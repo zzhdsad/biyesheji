@@ -16,6 +16,14 @@ from src.core.logging import setup_logging
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
+    if settings.ENV == "dev":
+        from src.infrastructure.database import init_db
+
+        try:
+            await init_db()
+        except Exception as exc:
+            # 数据库不可用时服务仍可启动（/health 会标记 unavailable）
+            logger.warning(f"数据库初始化跳过：{exc}")
     logger.info(f"{settings.APP_NAME} v{settings.VERSION} 启动完成（环境：{settings.ENV}）")
     yield
     logger.info("应用关闭")

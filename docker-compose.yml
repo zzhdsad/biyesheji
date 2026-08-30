@@ -51,6 +51,8 @@ services:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
     command: minio server /minio_data
+    ports:
+      - "9000:9000"
     volumes:
       - minio_data:/minio_data
 

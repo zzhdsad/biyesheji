@@ -1,66 +1,72 @@
 """文档管理路由：上传、列表、删除、重新向量化。"""
 
 import uuid
-from pathlib import Path
+from datetime import datetime
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, UploadFile
+from pydantic import BaseModel, ConfigDict
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.config import settings
+from src.application.document_service import DocumentService
+from src.domain.models import Document
+from src.infrastructure.database import get_db
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
-# PRD 3.1：支持的主流办公格式
-ALLOWED_EXTENSIONS = {"pdf", "docx", "pptx", "xlsx", "txt", "md", "html", "csv"}
+
+class DocumentOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    kb_id: uuid.UUID
+    file_name: str
+    file_type: str
+    file_size: int
+    parse_status: str
+    chunk_count: int
+    created_at: datetime
 
 
-@router.get("")
-async def list_documents(kb_id: str | None = None, parse_status: str | None = None) -> list[dict]:
+@router.get("", response_model=list[DocumentOut])
+async def list_documents(
+    kb_id: uuid.UUID | None = None,
+    parse_status: str | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> list[Document]:
     """文档列表，支持按知识库与解析状态筛选。
 
-    TODO: 查询 documents 表，按 kb_id / parse_status 过滤。
+    TODO: 接入鉴权后按用户可见的 kb_id 过滤，防止越权列举。
     """
-    return []
+    stmt = select(Document).order_by(Document.created_at.desc())
+    if kb_id is not None:
+        stmt = stmt.where(Document.kb_id == kb_id)
+    if parse_status is not None:
+        stmt = stmt.where(Document.parse_status == parse_status)
+    rows = (await db.scalars(stmt)).all()
+    return list(rows)
 
 
-@router.post("/upload")
+@router.post("/upload", response_model=DocumentOut, status_code=201)
 async def upload_document(
-    kb_id: str = Form(...),
+    kb_id: uuid.UUID = Form(...),
     file: UploadFile = File(...),
-) -> dict:
-    """上传文档：保存原始文件，异步解析由 Celery 任务完成（后续接入）。
+    db: AsyncSession = Depends(get_db),
+) -> Document:
+    """上传文档（PDF/DOCX/TXT）。
 
-    限制：单文件 ≤ MAX_FILE_SIZE_MB；仅支持白名单格式。
+    流程：类型/大小校验 → 知识库校验 → 存储原始文件（本地/MinIO）→ 写入 documents 表。
+    返回 document_id；parse_status 初始为 pending，解析由后续 Celery 任务异步完成。
     """
-    filename = file.filename or ""
-    suffix = Path(filename).suffix.lstrip(".").lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"不支持的文件类型：.{suffix}")
-
-    content = await file.read()
-    max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
-    if len(content) > max_bytes:
-        raise HTTPException(status_code=400, detail=f"文件超过 {settings.MAX_FILE_SIZE_MB}MB 限制")
-
-    upload_dir = Path(settings.UPLOAD_DIR)
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    doc_id = uuid.uuid4()
-    (upload_dir / f"{doc_id}.{suffix}").write_bytes(content)
-
-    # TODO: 写入 documents 表（parse_status=pending）并派发 Celery 解析任务
-    return {
-        "id": str(doc_id),
-        "kb_id": kb_id,
-        "file_name": filename,
-        "file_size": len(content),
-        "parse_status": "pending",
-    }
+    service = DocumentService(db)
+    return await service.upload(kb_id=kb_id, file=file)
 
 
 @router.delete("/{doc_id}")
 async def delete_document(doc_id: uuid.UUID) -> dict:
     """删除文档及其向量数据。
 
-    TODO: 删除 documents 记录 + Milvus 中对应 chunk + 原始文件。
+    TODO: 删除 documents 记录 + Milvus 中对应 chunk + 原始文件（存储层 delete）。
     """
     return {"id": str(doc_id), "deleted": True}
 

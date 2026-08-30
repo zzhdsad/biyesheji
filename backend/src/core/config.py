@@ -45,6 +45,16 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "uploads"
     MAX_FILE_SIZE_MB: int = 50
 
+    # 文件存储：local（本地磁盘）/ minio（S3 兼容对象存储）
+    STORAGE_BACKEND: str = "local"
+    MINIO_ENDPOINT: str = "localhost:9000"
+    MINIO_ACCESS_KEY: str = "minioadmin"
+    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_BUCKET: str = "documents"
+
+    # 开发环境默认管理员（接入 JWT 鉴权前的占位）
+    DEFAULT_ADMIN_EMAIL: str = "admin@example.com"
+
 
 @lru_cache
 def get_settings() -> Settings:
