@@ -35,6 +35,12 @@ def _mock_embedding_backend(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _mock_llm_backend(monkeypatch):
+    """所有测试默认 mock LLM（确定性回答），不依赖真实模型服务。"""
+    monkeypatch.setattr(settings, "LLM_BACKEND", "mock")
+
+
+@pytest.fixture(autouse=True)
 def vector_store():
     """注入向量库实现：Milvus 可用 → 真实 store；否则内存实现。"""
     if MILVUS_AVAILABLE:

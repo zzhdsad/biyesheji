@@ -1,64 +1,108 @@
-"""智能问答路由：RAG 问答（含 SSE 流式预留）、会话管理。"""
+"""智能问答路由：RAG 问答、会话管理（SSE 流式输出后续迭代）。"""
 
 import uuid
 
-from fastapi import APIRouter
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.application.rag_service import RagService
+from src.domain.models import Conversation, Message
+from src.infrastructure.database import get_db
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
 class ChatAskRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
-    kb_ids: list[str] = Field(default_factory=list, description="检索的知识库列表，空则默认当前库")
-    conversation_id: str | None = None
+    kb_ids: list[uuid.UUID] = Field(
+        default_factory=list, description="检索的知识库列表（权限过滤的依据）"
+    )
+    conversation_id: uuid.UUID | None = None
 
 
 class Citation(BaseModel):
+    chunk_id: str
     doc_id: str
     doc_name: str
     page_num: int | None = None
     title_path: str | None = None
     content: str
+    score: float
 
 
 class ChatAnswerResponse(BaseModel):
     conversation_id: str
+    message_id: str
     answer: str
     citations: list[Citation]
 
 
-@router.post("/ask", response_model=ChatAnswerResponse)
-async def ask(payload: ChatAskRequest) -> ChatAnswerResponse:
-    """RAG 问答（占位实现，返回可联调的固定结构）。
+class ConversationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
 
-    TODO: 接入 LangGraph 流水线：
-      查询改写 → (可选 HyDE) → 混合检索(向量+BM25) → RRF 融合 → Rerank → LLM 生成
-    约束：
-      - System Prompt 必须强制"仅根据参考资料回答，找不到就说不知道"
-      - 引用标注 [citation: doc_id, page] 后处理匹配，前端渲染引用卡片
-      - 后续提供 /ask/stream（SSE 流式输出）
+    id: uuid.UUID
+    title: str
+    kb_ids: list[uuid.UUID]
+    created_at: object
+
+
+class MessageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    role: str
+    content: str
+    citations: dict | None
+    created_at: object
+
+
+@router.post("/ask", response_model=ChatAnswerResponse)
+async def ask(payload: ChatAskRequest, db: AsyncSession = Depends(get_db)) -> ChatAnswerResponse:
+    """RAG 问答：向量检索 Top-K → 上下文拼接 → LLM 生成 → 引用溯源。
+
+    - kb_ids 为空返回 422（检索必须限定知识库范围，禁止越权）
+    - 答案严格基于检索资料，找不到时明确告知"无法回答"（防幻觉约束）
+    - citations 为答案引用的来源（文档名、页码、段落），前端渲染引用卡片
     """
+    from src.core.exceptions import AppException
+
+    if not payload.kb_ids:
+        raise AppException(422, "kb_ids 不能为空：必须指定检索的知识库范围")
+
+    service = RagService(db)
+    conv, assistant, citations = await service.ask(
+        kb_ids=payload.kb_ids,
+        question=payload.question.strip(),
+        conversation_id=payload.conversation_id,
+    )
     return ChatAnswerResponse(
-        conversation_id=payload.conversation_id or str(uuid.uuid4()),
-        answer="平台初始化中：RAG 流水线尚未接入，暂无法回答问题。",
-        citations=[],
+        conversation_id=str(conv.id),
+        message_id=str(assistant.id),
+        answer=assistant.content,
+        citations=[Citation(**c) for c in citations],
     )
 
 
-@router.get("/conversations")
-async def list_conversations() -> list[dict]:
-    """历史会话列表。
+@router.get("/conversations", response_model=list[ConversationOut])
+async def list_conversations(db: AsyncSession = Depends(get_db)) -> list[Conversation]:
+    """历史会话列表（按创建时间倒序）。
 
-    TODO: 按 user_id 查询 conversations 表（含标题、时间、kb_ids）。
+    TODO: 接入 JWT 鉴权后按当前用户 user_id 过滤。
     """
-    return []
+    rows = await db.scalars(select(Conversation).order_by(Conversation.created_at.desc()))
+    return list(rows)
 
 
-@router.get("/conversations/{conversation_id}/messages")
-async def list_messages(conversation_id: uuid.UUID) -> list[dict]:
-    """会话消息记录。
-
-    TODO: 查询 messages 表，按时间升序返回（含 citations JSON）。
-    """
-    return []
+@router.get("/conversations/{conversation_id}/messages", response_model=list[MessageOut])
+async def list_messages(
+    conversation_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+) -> list[Message]:
+    """会话消息记录（按时间升序，含 citations JSON）。"""
+    rows = await db.scalars(
+        select(Message)
+        .where(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.asc())
+    )
+    return list(rows)

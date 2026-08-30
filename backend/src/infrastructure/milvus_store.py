@@ -52,6 +52,17 @@ class BaseVectorStore(ABC):
     def count_by_doc(self, doc_id: str) -> int:
         """统计指定文档的向量条数（验证入库结果）。"""
 
+    @abstractmethod
+    def search(
+        self, query_vector: list[float], kb_ids: list[str], top_k: int
+    ) -> list[dict]:
+        """稠密向量检索（强制 kb_id 过滤，TECH_DESIGN 权限隔离）。
+
+        Returns:
+            [{id, doc_id, kb_id, chunk_index, content, page_num, title_path, score}]，
+            score 为相似度（越大越相关），按 score 降序。
+        """
+
 
 class MilvusStore(BaseVectorStore):
     """Milvus 2.4 实现（MilvusClient API）。连接惰性建立，失败抛 VectorStoreError。"""
@@ -203,6 +214,52 @@ class MilvusStore(BaseVectorStore):
         except Exception as exc:
             raise VectorStoreError(f"Milvus 查询失败 doc_id={doc_id}：{exc}") from exc
 
+    def search(
+        self, query_vector: list[float], kb_ids: list[str], top_k: int
+    ) -> list[dict]:
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION) or not kb_ids:
+            return []
+        # 强制 kb_id 过滤（TECH_DESIGN：所有检索加 kb_id 过滤，禁止越权访问）
+        kb_filter = "kb_id in [" + ", ".join(f'"{k}"' for k in kb_ids) + "]"
+        try:
+            results = client.search(
+                collection_name=self.COLLECTION,
+                data=[query_vector],
+                anns_field="dense_vector",
+                limit=top_k,
+                filter=kb_filter,
+                output_fields=[
+                    "id",
+                    "doc_id",
+                    "kb_id",
+                    "chunk_index",
+                    "content",
+                    "page_num",
+                    "title_path",
+                ],
+            )[0]
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus 检索失败：{exc}") from exc
+        hits = []
+        for hit in results:
+            entity = hit.get("entity", {})
+            page_num = entity.get("page_num")
+            hits.append(
+                {
+                    "id": entity.get("id"),
+                    "doc_id": entity.get("doc_id"),
+                    "kb_id": entity.get("kb_id"),
+                    "chunk_index": entity.get("chunk_index"),
+                    "content": entity.get("content", ""),
+                    # page_num=0 表示暂无页码（见 insert 注释），对调用方还原为 None
+                    "page_num": page_num if page_num else None,
+                    "title_path": entity.get("title_path") or None,
+                    "score": float(hit.get("distance", 0.0)),
+                }
+            )
+        return hits
+
 
 class InMemoryVectorStore(BaseVectorStore):
     """内存实现：开发/单元测试用（无 Milvus 服务时验证全流程）。"""
@@ -223,6 +280,37 @@ class InMemoryVectorStore(BaseVectorStore):
 
     def count_by_doc(self, doc_id: str) -> int:  # noqa: D102
         return sum(1 for v in self._rows.values() if v.doc_id == doc_id)
+
+    def search(  # noqa: D102
+        self, query_vector: list[float], kb_ids: list[str], top_k: int
+    ) -> list[dict]:
+        kb_set = set(kb_ids)
+
+        def _cosine(a: list[float], b: list[float]) -> float:
+            dot = sum(x * y for x, y in zip(a, b))
+            na = sum(x * x for x in a) ** 0.5
+            nb = sum(y * y for y in b) ** 0.5
+            return dot / (na * nb) if na and nb else 0.0
+
+        scored = [
+            (_cosine(query_vector, v.dense_vector), v)
+            for v in self._rows.values()
+            if v.kb_id in kb_set
+        ]
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return [
+            {
+                "id": v.id,
+                "doc_id": v.doc_id,
+                "kb_id": v.kb_id,
+                "chunk_index": v.chunk_index,
+                "content": v.content,
+                "page_num": v.page_num,
+                "title_path": v.title_path,
+                "score": round(score, 6),
+            }
+            for score, v in scored[:top_k]
+        ]
 
     def query_rows(self, doc_id: str) -> list[dict]:  # noqa: D102
         return [

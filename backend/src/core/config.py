@@ -34,6 +34,9 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "Qwen2.5-14B-Instruct-AWQ"
     EMBEDDING_MODEL: str = "BAAI/bge-m3"
     RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
+    # openai（OpenAI 兼容接口，如 vLLM）/ mock（确定性假回答，开发/测试）
+    LLM_BACKEND: str = "openai"
+    LLM_TIMEOUT_SECONDS: int = 120
 
     # 向量化（TECH_DESIGN：BGE-M3 稠密 1024d + 稀疏向量）
     # flagembedding（本地 FlagEmbedding，需下载模型）/ mock（确定性伪向量，开发/测试）
