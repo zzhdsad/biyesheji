@@ -35,6 +35,14 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "BAAI/bge-m3"
     RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
 
+    # 向量化（TECH_DESIGN：BGE-M3 稠密 1024d + 稀疏向量）
+    # flagembedding（本地 FlagEmbedding，需下载模型）/ mock（确定性伪向量，开发/测试）
+    EMBEDDING_BACKEND: str = "flagembedding"
+    EMBEDDING_DEVICE: str = "cpu"
+    EMBEDDING_BATCH_SIZE: int = 16
+    MILVUS_DIM: int = 1024
+    VECTORIZE_BATCH_SIZE: int = 32
+
     # 检索参数
     RETRIEVAL_TOP_K: int = 10
     RERANK_TOP_N: int = 5

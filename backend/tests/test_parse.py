@@ -5,20 +5,9 @@
 """
 
 import pytest
-from fastapi.testclient import TestClient
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.core.config import settings
-from src.main import app
-from tests.test_upload import PG_AVAILABLE, _init_db_standalone
-
-
-@pytest.fixture(scope="module")
-def client():
-    if PG_AVAILABLE:
-        _init_db_standalone()
-    with TestClient(app) as c:
-        yield c
+from tests.test_upload import PG_AVAILABLE
 
 
 def _make_kb(client) -> str:
@@ -32,7 +21,7 @@ def _make_kb(client) -> str:
 
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 def test_upload_txt_auto_parse_and_chunks(client):
-    """TXT 上传后自动解析：状态 success，chunks 入库且 token_count 受控。"""
+    """TXT 上传后自动解析：解析→切片→向量化流水线，最终状态 completed，chunks 入库且 token_count 受控。"""
     kb_id = _make_kb(client)
 
     # ≈ 1500 tokens 的 4 段文本（无标题 → title_path=None；有标题 → 保留路径）
@@ -47,9 +36,9 @@ def test_upload_txt_auto_parse_and_chunks(client):
     assert resp.status_code == 201, resp.text
     doc_id = resp.json()["id"]
 
-    # TestClient 中 BackgroundTasks 在响应后同步执行，此时解析应已完成
+    # TestClient 中 BackgroundTasks 在响应后同步执行，此时解析+向量化应已完成
     detail = client.get(f"/api/v1/documents/{doc_id}").json()
-    assert detail["parse_status"] == "success", detail
+    assert detail["parse_status"] == "completed", detail
     assert detail["chunk_count"] > 1
     assert detail["error_message"] == ""
 

@@ -37,3 +37,17 @@ def run_parse(doc_id: str) -> dict:
 
     logger.info(f"开始解析文档 doc_id={doc_id}")
     return asyncio.run(_run())
+
+
+def run_parse_pipeline(doc_id: str) -> dict:
+    """解析 + 向量化流水线：解析成功（success）后自动向量化至 completed。
+
+    供 BackgroundTasks / Celery 调用；向量化失败已由 IndexingService 回写
+    failed 与 error_message，此处仅透传异常给调用方记录日志。
+    """
+    from src.application.index_runner import run_vectorize
+
+    result = run_parse(doc_id)
+    if result["parse_status"] == "success":
+        result = run_vectorize(doc_id)
+    return result

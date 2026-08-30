@@ -77,7 +77,7 @@ class Document(Base, TimestampMixin):
     file_size: Mapped[int] = mapped_column(BigInteger, default=0)
     storage_path: Mapped[str] = mapped_column(String(512), default="")
     parse_status: Mapped[str] = mapped_column(String(16), default="pending")
-    # pending / parsing / success / failed
+    # pending / parsing / success（切片就绪）/ completed（已向量化）/ failed
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str] = mapped_column(Text, default="")
 

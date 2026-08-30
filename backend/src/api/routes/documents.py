@@ -45,12 +45,12 @@ class ChunkOut(BaseModel):
 
 
 def _run_parse_safely(doc_id: str) -> None:
-    """后台解析包装：失败已由 ParseService 回写 failed 状态与 error_message，
-    此处仅记录日志，避免后台任务异常冒泡导致响应中断。"""
-    from src.application.parse_runner import run_parse
+    """后台解析包装：执行解析→向量化流水线。失败已由 Service 回写 failed 状态与
+    error_message，此处仅记录日志，避免后台任务异常冒泡导致响应中断。"""
+    from src.application.parse_runner import run_parse_pipeline
 
     try:
-        run_parse(doc_id)
+        run_parse_pipeline(doc_id)
     except Exception:
         logger.error(f"后台解析任务执行失败 doc_id={doc_id}")
 
@@ -63,6 +63,26 @@ def _dispatch_parse(background_tasks: BackgroundTasks, doc_id: uuid.UUID) -> Non
         parse_document_task.delay(str(doc_id))
     else:
         background_tasks.add_task(_run_parse_safely, str(doc_id))
+
+
+def _dispatch_vectorize(background_tasks: BackgroundTasks, doc_id: uuid.UUID) -> None:
+    """按 PARSE_BACKEND 派发向量化：celery / background。"""
+    if settings.PARSE_BACKEND == "celery":
+        from src.application.tasks import vectorize_document_task
+
+        vectorize_document_task.delay(str(doc_id))
+    else:
+        background_tasks.add_task(_run_vectorize_safely, str(doc_id))
+
+
+def _run_vectorize_safely(doc_id: str) -> None:
+    """后台向量化包装：失败已由 IndexingService 回写 failed 状态与 error_message。"""
+    from src.application.index_runner import run_vectorize
+
+    try:
+        run_vectorize(doc_id)
+    except Exception:
+        logger.error(f"后台向量化任务执行失败 doc_id={doc_id}")
 
 
 @router.get("", response_model=list[DocumentOut])
@@ -139,6 +159,31 @@ async def list_chunks(doc_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> 
     return list(rows)
 
 
+@router.post("/{doc_id}/reindex", response_model=DocumentOut, status_code=202)
+async def reindex_document(
+    doc_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> Document:
+    """重新向量化：将已解析（success）文档的切片向量化写入 Milvus（202 Accepted）。
+
+    - completed：已完成向量化，幂等重写（先清旧向量）
+    - success：切片就绪待向量化
+    - 其他状态（pending/parsing/failed）拒绝，需先调用 /parse 完成解析
+    """
+    doc = await db.get(Document, doc_id)
+    if doc is None:
+        raise NotFoundError("文档不存在")
+    if doc.parse_status not in ("success", "completed"):
+        from src.core.exceptions import AppException
+
+        raise AppException(
+            409, f"文档切片未就绪（parse_status={doc.parse_status}），请先调用 /parse 解析"
+        )
+    _dispatch_vectorize(background_tasks, doc_id)
+    return doc
+
+
 @router.delete("/{doc_id}")
 async def delete_document(doc_id: uuid.UUID) -> dict:
     """删除文档及其向量数据。
@@ -146,12 +191,3 @@ async def delete_document(doc_id: uuid.UUID) -> dict:
     TODO: 删除 documents 记录（chunks 外键级联）+ Milvus 向量 + 原始文件。
     """
     return {"id": str(doc_id), "deleted": True}
-
-
-@router.post("/{doc_id}/reindex")
-async def reindex_document(doc_id: uuid.UUID) -> dict:
-    """重新向量化。
-
-    TODO: 派发 Celery 任务重新向量化该文档的所有切片。
-    """
-    return {"id": str(doc_id), "parse_status": "pending"}
