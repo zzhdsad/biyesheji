@@ -82,6 +82,26 @@ class Document(Base, TimestampMixin):
     error_message: Mapped[str] = mapped_column(Text, default="")
 
 
+class Chunk(Base, TimestampMixin):
+    """文档切片（父子关联：Document 1→N Chunk），供溯源与后续向量化。"""
+
+    __tablename__ = "chunks"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    doc_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, default=0)
+    content: Mapped[str] = mapped_column(Text)
+    token_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 与 Milvus document_chunks collection 字段对齐，便于同步（TECH_DESIGN 数据模型）
+    page_num: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    title_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+
+
 class Conversation(Base, TimestampMixin):
     __tablename__ = "conversations"
 

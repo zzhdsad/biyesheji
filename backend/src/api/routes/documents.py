@@ -1,15 +1,18 @@
-"""文档管理路由：上传、列表、删除、重新向量化。"""
+"""文档管理路由：上传（自动异步解析）、列表、详情、手动解析/重试、切片查询。"""
 
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
+from loguru import logger
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.document_service import DocumentService
-from src.domain.models import Document
+from src.core.config import settings
+from src.core.exceptions import NotFoundError
+from src.domain.models import Chunk, Document
 from src.infrastructure.database import get_db
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -25,7 +28,41 @@ class DocumentOut(BaseModel):
     file_size: int
     parse_status: str
     chunk_count: int
+    error_message: str
     created_at: datetime
+
+
+class ChunkOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    doc_id: uuid.UUID
+    chunk_index: int
+    content: str
+    token_count: int
+    title_path: str | None
+    page_num: int | None
+
+
+def _run_parse_safely(doc_id: str) -> None:
+    """后台解析包装：失败已由 ParseService 回写 failed 状态与 error_message，
+    此处仅记录日志，避免后台任务异常冒泡导致响应中断。"""
+    from src.application.parse_runner import run_parse
+
+    try:
+        run_parse(doc_id)
+    except Exception:
+        logger.error(f"后台解析任务执行失败 doc_id={doc_id}")
+
+
+def _dispatch_parse(background_tasks: BackgroundTasks, doc_id: uuid.UUID) -> None:
+    """按 PARSE_BACKEND 派发解析：celery（Redis 队列）/ background（进程内线程池）。"""
+    if settings.PARSE_BACKEND == "celery":
+        from src.application.tasks import parse_document_task
+
+        parse_document_task.delay(str(doc_id))
+    else:
+        background_tasks.add_task(_run_parse_safely, str(doc_id))
 
 
 @router.get("", response_model=list[DocumentOut])
@@ -49,24 +86,64 @@ async def list_documents(
 
 @router.post("/upload", response_model=DocumentOut, status_code=201)
 async def upload_document(
+    background_tasks: BackgroundTasks,
     kb_id: uuid.UUID = Form(...),
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
 ) -> Document:
     """上传文档（PDF/DOCX/TXT）。
 
-    流程：类型/大小校验 → 知识库校验 → 存储原始文件（本地/MinIO）→ 写入 documents 表。
-    返回 document_id；parse_status 初始为 pending，解析由后续 Celery 任务异步完成。
+    流程：校验 → 存储 → 写入 documents 表 → 异步派发解析任务
+    （TECH_DESIGN：上传后异步解析，不阻塞 API；parse_status: pending → parsing → success/failed）。
     """
     service = DocumentService(db)
-    return await service.upload(kb_id=kb_id, file=file)
+    doc = await service.upload(kb_id=kb_id, file=file)
+    _dispatch_parse(background_tasks, doc.id)
+    return doc
+
+
+@router.get("/{doc_id}", response_model=DocumentOut)
+async def get_document(doc_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> Document:
+    """文档详情（轮询解析状态与错误信息）。"""
+    doc = await db.get(Document, doc_id)
+    if doc is None:
+        raise NotFoundError("文档不存在")
+    return doc
+
+
+@router.post("/{doc_id}/parse", response_model=DocumentOut, status_code=202)
+async def parse_document(
+    doc_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> Document:
+    """手动触发解析/重新解析（失败重试入口，202 Accepted）。
+
+    状态通过 GET /documents/{doc_id} 轮询；后续可升级为 SSE 推送进度。
+    """
+    doc = await db.get(Document, doc_id)
+    if doc is None:
+        raise NotFoundError("文档不存在")
+    _dispatch_parse(background_tasks, doc_id)
+    return doc
+
+
+@router.get("/{doc_id}/chunks", response_model=list[ChunkOut])
+async def list_chunks(doc_id: uuid.UUID, db: AsyncSession = Depends(get_db)) -> list[Chunk]:
+    """文档切片列表（按 chunk_index 升序），用于核对解析结果与溯源。"""
+    doc = await db.get(Document, doc_id)
+    if doc is None:
+        raise NotFoundError("文档不存在")
+    stmt = select(Chunk).where(Chunk.doc_id == doc_id).order_by(Chunk.chunk_index)
+    rows = (await db.scalars(stmt)).all()
+    return list(rows)
 
 
 @router.delete("/{doc_id}")
 async def delete_document(doc_id: uuid.UUID) -> dict:
     """删除文档及其向量数据。
 
-    TODO: 删除 documents 记录 + Milvus 中对应 chunk + 原始文件（存储层 delete）。
+    TODO: 删除 documents 记录（chunks 外键级联）+ Milvus 向量 + 原始文件。
     """
     return {"id": str(doc_id), "deleted": True}
 
@@ -75,6 +152,6 @@ async def delete_document(doc_id: uuid.UUID) -> dict:
 async def reindex_document(doc_id: uuid.UUID) -> dict:
     """重新向量化。
 
-    TODO: 派发 Celery 任务重新解析并向量化该文档。
+    TODO: 派发 Celery 任务重新向量化该文档的所有切片。
     """
     return {"id": str(doc_id), "parse_status": "pending"}

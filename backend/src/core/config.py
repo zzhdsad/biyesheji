@@ -45,6 +45,12 @@ class Settings(BaseSettings):
     UPLOAD_DIR: str = "uploads"
     MAX_FILE_SIZE_MB: int = 50
 
+    # 解析 / 切片（TECH_DESIGN：结构感知切片，512~1024 tokens，overlap 50~100）
+    PARSE_BACKEND: str = "background"  # background（进程内线程池）/ celery（Redis 队列）
+    CHUNK_SIZE_TOKENS: int = 768
+    CHUNK_OVERLAP_TOKENS: int = 100
+    CHUNK_MIN_TOKENS: int = 32
+
     # 文件存储：local（本地磁盘）/ minio（S3 兼容对象存储）
     STORAGE_BACKEND: str = "local"
     MINIO_ENDPOINT: str = "localhost:9000"
