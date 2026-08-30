@@ -1,0 +1,11 @@
+# ===== RAG / AI 重依赖（基础设施就绪后安装）=====
+# 安装：pip install -r requirements-ai.txt
+langgraph>=0.2
+langchain-core>=0.3
+pymilvus>=2.4
+celery[redis]>=5.4
+sentence-transformers>=3.0
+FlagEmbedding>=1.2
+ragas>=0.1
+docling>=2.0
+openai>=1.40

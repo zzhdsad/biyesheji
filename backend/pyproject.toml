@@ -1,0 +1,21 @@
+[project]
+name = "knowledge-platform-backend"
+version = "0.1.0"
+description = "基于 RAG 的企业级智能知识问答平台 - 后端"
+requires-python = ">=3.10"
+
+[tool.black]
+line-length = 100
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+asyncio_mode = "auto"
+testpaths = ["tests"]
