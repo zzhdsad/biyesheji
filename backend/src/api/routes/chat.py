@@ -24,6 +24,7 @@ class ChatAskRequest(BaseModel):
 
 class Citation(BaseModel):
     chunk_id: str
+    source_index: int  # 来源编号（1-based，对应答案中 [citation: 编号, 页码] 的编号）
     doc_id: str
     doc_name: str
     page_num: int | None = None

@@ -47,10 +47,19 @@ class Settings(BaseSettings):
     VECTORIZE_BATCH_SIZE: int = 32
 
     # 检索参数
-    RETRIEVAL_TOP_K: int = 10
-    RERANK_TOP_N: int = 5
+    RECALL_TOP_K: int = 50  # 每路召回数量（送入 RRF 融合）
+    RERANK_TOP_N: int = 5  # 精排后返回给 LLM 的最终数量
+    RRF_K: int = 60  # RRF 融合平滑常数
+    RERANK_BACKEND: str = "mock"  # mock / flagreranker
+    RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
+    # HyDE 查询改写（TECH_DESIGN：检索前用小模型生成假设答案替换原问题）
     HYDE_ENABLED: bool = False
+    HYDE_BACKEND: str = "mock"  # mock / openai
+    HYDE_MODEL: str = "Qwen/Qwen2.5-1.5B-Instruct"
+    HYDE_BASE_URL: str | None = None  # 默认复用 LLM_BASE_URL
     HISTORY_WINDOW: int = 3
+    # 会话缓存（TECH_DESIGN：conversation:{conv_id}:history TTL 24h）
+    HISTORY_TTL_SECONDS: int = 86400
 
     # 文档
     UPLOAD_DIR: str = "uploads"

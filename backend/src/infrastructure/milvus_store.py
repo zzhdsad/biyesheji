@@ -63,6 +63,16 @@ class BaseVectorStore(ABC):
             score 为相似度（越大越相关），按 score 降序。
         """
 
+    @abstractmethod
+    def search_sparse(
+        self, query_sparse: dict, kb_ids: list[str], top_k: int
+    ) -> list[dict]:
+        """稀疏向量检索（BM25 关键词召回，强制 kb_id 过滤）。
+
+        query_sparse 为 BGE-M3 lexical weights（{token_id: weight}）。
+        返回结构同 search（score 为稀疏内点积，越大越相关）。
+        """
+
 
 class MilvusStore(BaseVectorStore):
     """Milvus 2.4 实现（MilvusClient API）。连接惰性建立，失败抛 VectorStoreError。"""
@@ -260,6 +270,51 @@ class MilvusStore(BaseVectorStore):
             )
         return hits
 
+    def search_sparse(
+        self, query_sparse: dict, kb_ids: list[str], top_k: int
+    ) -> list[dict]:
+        """稀疏向量检索（BM25 关键词召回，SPARSE_INVERTED_INDEX + IP）。"""
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION) or not kb_ids or not query_sparse:
+            return []
+        kb_filter = "kb_id in [" + ", ".join(f'"{k}"' for k in kb_ids) + "]"
+        try:
+            results = client.search(
+                collection_name=self.COLLECTION,
+                data=[query_sparse],
+                anns_field="sparse_vector",
+                limit=top_k,
+                filter=kb_filter,
+                output_fields=[
+                    "id",
+                    "doc_id",
+                    "kb_id",
+                    "chunk_index",
+                    "content",
+                    "page_num",
+                    "title_path",
+                ],
+            )[0]
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus 稀疏检索失败：{exc}") from exc
+        hits = []
+        for hit in results:
+            entity = hit.get("entity", {})
+            page_num = entity.get("page_num")
+            hits.append(
+                {
+                    "id": entity.get("id"),
+                    "doc_id": entity.get("doc_id"),
+                    "kb_id": entity.get("kb_id"),
+                    "chunk_index": entity.get("chunk_index"),
+                    "content": entity.get("content", ""),
+                    "page_num": page_num if page_num else None,
+                    "title_path": entity.get("title_path") or None,
+                    "score": float(hit.get("distance", 0.0)),
+                }
+            )
+        return hits
+
 
 class InMemoryVectorStore(BaseVectorStore):
     """内存实现：开发/单元测试用（无 Milvus 服务时验证全流程）。"""
@@ -297,6 +352,38 @@ class InMemoryVectorStore(BaseVectorStore):
             for v in self._rows.values()
             if v.kb_id in kb_set
         ]
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return [
+            {
+                "id": v.id,
+                "doc_id": v.doc_id,
+                "kb_id": v.kb_id,
+                "chunk_index": v.chunk_index,
+                "content": v.content,
+                "page_num": v.page_num,
+                "title_path": v.title_path,
+                "score": round(score, 6),
+            }
+            for score, v in scored[:top_k]
+        ]
+
+    def search_sparse(  # noqa: D102
+        self, query_sparse: dict, kb_ids: list[str], top_k: int
+    ) -> list[dict]:
+        kb_set = set(kb_ids)
+        if not query_sparse:
+            return []
+
+        def _ip(q: dict, d: dict) -> float:
+            # 稀疏内点积：仅对 query 中出现的 token 求和（匹配 Milvus IP 度量）
+            return sum(w * d.get(t, 0.0) for t, w in q.items())
+
+        scored = [
+            (_ip(query_sparse, v.sparse_vector), v)
+            for v in self._rows.values()
+            if v.kb_id in kb_set and v.sparse_vector
+        ]
+        scored = [(s, v) for s, v in scored if s > 0]
         scored.sort(key=lambda t: t[0], reverse=True)
         return [
             {

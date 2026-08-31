@@ -2,6 +2,7 @@
 
 - 向量化统一用 mock 后端（确定性伪向量），避免测试依赖 BGE-M3 模型下载。
 - Milvus 服务可用时用真实 MilvusStore，否则注入内存实现，保证全流程可测。
+- 会话缓存：Redis 可用 → 真实缓存；否则内存实现（对话历史按 conv_id 隔离，不互染）。
 """
 
 import pytest
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from src.core.config import settings
 from src.infrastructure import milvus_store
+from src.infrastructure import redis_client
 from src.main import app
 from tests.test_upload import PG_AVAILABLE, _init_db_standalone
 
@@ -28,6 +30,22 @@ def _probe_milvus() -> bool:
 MILVUS_AVAILABLE = _probe_milvus()
 
 
+def _probe_redis() -> bool:
+    """探测 Redis 是否可连接（2s 超时）。"""
+    try:
+        import redis
+
+        client = redis.from_url(settings.REDIS_URL, socket_connect_timeout=2)
+        client.ping()
+        client.aclose() if hasattr(client, "aclose") else client.close()
+        return True
+    except Exception:
+        return False
+
+
+REDIS_AVAILABLE = _probe_redis()
+
+
 @pytest.fixture(autouse=True)
 def _mock_embedding_backend(monkeypatch):
     """所有测试默认 mock 向量化（相同文本输出恒定）。"""
@@ -41,6 +59,15 @@ def _mock_llm_backend(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _mock_rerank_backend(monkeypatch):
+    """所有测试默认 mock Rerank（字符重叠打分），不依赖 BGE-Reranker 模型。"""
+    monkeypatch.setattr(settings, "RERANK_BACKEND", "mock")
+    from src.infrastructure import rerank
+
+    rerank.set_rerank(rerank.MockRerank())
+
+
+@pytest.fixture(autouse=True)
 def vector_store():
     """注入向量库实现：Milvus 可用 → 真实 store；否则内存实现。"""
     if MILVUS_AVAILABLE:
@@ -50,6 +77,22 @@ def vector_store():
     milvus_store.set_vector_store(store)
     yield store
     milvus_store.set_vector_store(None)
+
+
+@pytest.fixture(autouse=True, scope="module")
+def conversation_cache():
+    """注入会话缓存（模块级单例）：Redis 可用 → 真实缓存；否则内存实现。
+
+    模块级：一个 redis.asyncio 客户端绑定 TestClient 的 portal 循环，避免
+    每个测试新建客户端导致连接泄漏与 "portal not running" 错误。
+    """
+    if REDIS_AVAILABLE:
+        cache = redis_client.RedisConversationCache()
+    else:
+        cache = redis_client.InMemoryConversationCache()
+    redis_client.set_conversation_cache(cache)
+    yield cache
+    redis_client.set_conversation_cache(None)
 
 
 @pytest.fixture(scope="module")

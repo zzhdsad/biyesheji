@@ -62,11 +62,11 @@ class OpenAICompatibleLLM(BaseLLM):
 class MockLLM(BaseLLM):
     """确定性假回答（开发/测试）：验证 RAG 流程而不依赖真实模型。
 
-    行为与防幻觉约束一致：有参考资料时生成带 [n] 引用标注的回答；
+    行为与防幻觉约束一致：有参考资料时生成带 [citation: 编号, 页码] 标注的回答；
     无资料时明确回答"不知道"。
     """
 
-    _CTX_MARKER = "参考资料："
+    _CTX_MARKER = "参考资料"
 
     async def chat(self, messages: list[Message]) -> str:
         user_content = next(
@@ -76,13 +76,15 @@ class MockLLM(BaseLLM):
         context = parts[1].strip() if len(parts) == 2 else ""
         if not context:
             return "根据现有资料，我无法回答该问题。建议您补充相关文档后再试。"
-        # 提取首个上下文块，生成带引用标注的确定性回答
-        first = re.search(r"\[1\]\s*(.+)", context)
+        # 首个来源块：[1] 文档：... | 页码：N | 标题：...\n<原文>
+        first = re.search(r"\[1\][^\n]*\n(.+)", context)
         snippet = first.group(1)[:50].strip() if first else context[:50]
+        page_m = re.search(r"页码：(\d+)", context)
+        page = page_m.group(1) if page_m else "0"
         question = parts[0].strip().splitlines()[0][:50]
         return (
             f"（mock 回答）关于「{question}」：根据参考资料，"
-            f"{snippet}……[1]"
+            f"{snippet}……[citation: 1, {page}]"
         )
 
 
