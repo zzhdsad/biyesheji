@@ -23,3 +23,14 @@ next-env.d.ts
 .vscode/
 .DS_Store
 Thumbs.db
+
+# AI 模型权重与下载缓存（体积巨大，经 ModelScope/HF 下载，不入库）
+# .env 中 EMBEDDING_MODEL/RERANK_MODEL 指向这些本地路径；重新部署用 download_models_ms.py 下载
+models/
+.modelscope/
+.cache/
+*.incomplete
+*.safetensors
+*.bin
+backend/models/
+backend/.modelscope/

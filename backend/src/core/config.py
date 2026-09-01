@@ -1,5 +1,6 @@
 """应用配置：所有敏感信息通过 .env 注入，禁止硬编码。"""
 
+import os
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -45,6 +46,9 @@ class Settings(BaseSettings):
     EMBEDDING_BATCH_SIZE: int = 16
     MILVUS_DIM: int = 1024
     VECTORIZE_BATCH_SIZE: int = 32
+    # HuggingFace 镜像：国内 huggingface.co 不可达，默认走 hf-mirror.com（可经 .env 覆盖）
+    HF_ENDPOINT: str = "https://hf-mirror.com"
+    HF_HUB_DOWNLOAD_TIMEOUT: int = 60
 
     # 检索参数
     RECALL_TOP_K: int = 50  # 每路召回数量（送入 RRF 融合）
@@ -81,6 +85,9 @@ class Settings(BaseSettings):
     # 开发环境默认管理员（接入 JWT 鉴权前的占位）
     DEFAULT_ADMIN_EMAIL: str = "admin@example.com"
 
+    # 评估质量门禁（AGENTS.md：answer_correctness ≥ 0.75 才允许合入）
+    EVAL_ACCURACY_THRESHOLD: float = 0.75
+
 
 @lru_cache
 def get_settings() -> Settings:
@@ -88,3 +95,8 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
+
+# 注入 HuggingFace 下载相关环境变量（huggingface_hub 在首次下载时读取）。
+# 必须在 FlagEmbedding/transformers 触发下载前设置；config 在启动早期被各模块导入。
+os.environ.setdefault("HF_ENDPOINT", settings.HF_ENDPOINT)
+os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", str(settings.HF_HUB_DOWNLOAD_TIMEOUT))

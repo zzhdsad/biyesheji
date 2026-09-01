@@ -28,7 +28,8 @@ export interface KnowledgeBase {
   document_count?: number;
 }
 
-export type ParseStatus = 'pending' | 'parsing' | 'success' | 'failed';
+/** pending=待解析 / parsing=解析中 / success=切片就绪 / completed=已向量化 / failed=失败。 */
+export type ParseStatus = 'pending' | 'parsing' | 'success' | 'completed' | 'failed';
 
 export interface DocumentItem {
   id: string;
@@ -38,6 +39,7 @@ export interface DocumentItem {
   file_size: number;
   parse_status: ParseStatus;
   chunk_count: number;
+  error_message?: string;
   created_at: string;
 }
 
@@ -65,4 +67,47 @@ export interface HealthResponse {
   version?: string;
   env?: string;
   components: Record<string, string>;
+}
+
+// ─────────────────────────── 评估 ───────────────────────────
+
+/** 测试集条目（上传/评估输入）。 */
+export interface EvalTestCaseItem {
+  question: string;
+  golden_answer: string;
+  golden_contexts?: string[];
+}
+
+/** 单条用例评估结果（run 报告明细）。 */
+export interface EvalCaseResult {
+  test_case_id: string;
+  question: string;
+  golden_answer: string;
+  golden_contexts: string[];
+  answer: string;
+  retrieved_contexts: string[];
+  context_relevancy: number;
+  answer_correctness: number;
+  error?: string | null;
+}
+
+/** 评估报告（POST /evaluation/run）。 */
+export interface EvaluationReport {
+  run_id: string;
+  case_count: number;
+  context_relevancy: number;
+  answer_correctness: number;
+  passed: boolean;
+  threshold: number;
+  results: EvalCaseResult[];
+}
+
+/** 历史评估结果条目（GET /evaluation/results）。 */
+export interface EvaluationHistoryItem {
+  id: string;
+  question: string;
+  golden_answer: string;
+  answer_correctness: number;
+  context_relevancy: number;
+  created_at: string | null;
 }

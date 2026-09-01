@@ -62,33 +62,30 @@ class RagService:
         self.rerank = rerank or get_rerank()
         self.hyde = hyde if hyde is not None else get_hyde()
 
-    async def ask(
+    async def retrieve_and_answer(
         self,
         kb_ids: list[uuid.UUID],
         question: str,
-        conversation_id: uuid.UUID | None = None,
-    ) -> tuple[Conversation, Message, list[dict]]:
-        """执行 RAG 问答。
+        history: list[dict] | None = None,
+    ) -> tuple[str, list[dict]]:
+        """RAG 检索+生成核心（不持久化，供评估与编排复用）。
+
+        流程：HyDE 改写 → 混合检索 → RRF 融合 → Rerank → 上下文拼接 → LLM 生成。
+        不写会话/消息/缓存，避免评估批量调用污染聊天记录。
+
+        Args:
+            kb_ids: 检索范围（权限隔离，禁止越权）
+            question: 原始问题（Prompt 用之；检索查询可能被 HyDE 改写）
+            history: 多轮历史（chat 路径传入；评估为 None，单轮）
 
         Returns:
-            (conversation, assistant_message, citations)
+            (answer, hits) — hits 含 doc_name/content/page_num/title_path/score，
+            供引用构建与评估（retrieved_contexts）复用。
 
         Raises:
-            NotFoundError: 会话不存在
             AppException: 422 检索/生成失败
         """
         from src.core.exceptions import AppException
-
-        started_at = asyncio.get_event_loop().time()
-        conversation = await self._ensure_conversation(kb_ids, question, conversation_id)
-        history, cache_hit = await self._load_history(conversation.id)
-
-        # 先持久化用户消息（独立事务）：保证与助手消息 created_at 不同，
-        # 使历史查询 ORDER BY created_at 顺序确定；且生成失败时用户意图仍留存。
-        self.db.add(Message(
-            conversation_id=conversation.id, role="user", content=question,
-        ))
-        await self.db.commit()
 
         # HyDE 查询改写（TECH_DESIGN：用假设答案替换原问题做向量检索）
         # 仅改写检索查询；最终 Prompt 仍用原始问题。失败回退原问题。
@@ -99,8 +96,7 @@ class RagService:
                 if hypo and hypo.strip():
                     query_text = hypo.strip()
                     logger.info(
-                        f"HyDE 改写 conv={conversation.id}: "
-                        f"{question[:30]}... -> {query_text[:50]}..."
+                        f"HyDE 改写: {question[:30]}... -> {query_text[:50]}..."
                     )
             except HyDEError as exc:
                 logger.warning(f"HyDE 改写失败，回退原问题: {exc}")
@@ -121,7 +117,7 @@ class RagService:
                     self.store.search_sparse, query_sparse[0], kb_str, recall
                 )
         except (EmbeddingError, VectorStoreError) as exc:
-            logger.error(f"RAG 检索失败 conv={conversation.id}: {exc}")
+            logger.error(f"RAG 检索失败: {exc}")
             raise AppException(422, f"知识检索失败：{exc}") from exc
 
         # RRF 融合 → Top-RECALL_TOP_K 候选
@@ -135,12 +131,12 @@ class RagService:
                 self.rerank.rerank, question, fused, settings.RERANK_TOP_N
             )
         except RerankError as exc:
-            logger.error(f"RAG 重排失败 conv={conversation.id}: {exc}")
+            logger.error(f"RAG 重排失败: {exc}")
             raise AppException(422, f"重排序失败：{exc}") from exc
 
         logger.info(
-            f"混合检索 conv={conversation.id} dense={len(dense_hits)} "
-            f"sparse={len(sparse_hits)} fused={len(fused)} reranked={len(hits)}"
+            f"混合检索 dense={len(dense_hits)} sparse={len(sparse_hits)} "
+            f"fused={len(fused)} reranked={len(hits)}"
         )
 
         # 为精排后的命中注入 doc_name（Prompt 与引用卡片均需展示文档名）
@@ -148,14 +144,47 @@ class RagService:
 
         # 生成
         user_prompt = self._build_user_prompt(question, hits)
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}, *history,
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}, *(history or []),
                     {"role": "user", "content": user_prompt}]
         try:
             answer = await self.llm.chat(messages)
         except LLMError as exc:
-            logger.error(f"RAG 生成失败 conv={conversation.id}: {exc}")
+            logger.error(f"RAG 生成失败: {exc}")
             raise AppException(422, f"回答生成失败：{exc}") from exc
         answer = answer.strip() or "（模型未返回内容，请重试）"
+        return answer, hits
+
+    async def ask(
+        self,
+        kb_ids: list[uuid.UUID],
+        question: str,
+        conversation_id: uuid.UUID | None = None,
+    ) -> tuple[Conversation, Message, list[dict]]:
+        """执行 RAG 问答（编排：会话管理 + 持久化 + 缓存）。
+
+        检索/生成核心委派 retrieve_and_answer，本方法负责会话创建、消息持久化、
+        引用后处理与 Redis 缓存同步。多轮历史透传至核心以保持上下文。
+
+        Returns:
+            (conversation, assistant_message, citations)
+
+        Raises:
+            NotFoundError: 会话不存在
+            AppException: 422 检索/生成失败
+        """
+        started_at = asyncio.get_event_loop().time()
+        conversation = await self._ensure_conversation(kb_ids, question, conversation_id)
+        history, cache_hit = await self._load_history(conversation.id)
+
+        # 先持久化用户消息（独立事务）：保证与助手消息 created_at 不同，
+        # 使历史查询 ORDER BY created_at 顺序确定；且生成失败时用户意图仍留存。
+        self.db.add(Message(
+            conversation_id=conversation.id, role="user", content=question,
+        ))
+        await self.db.commit()
+
+        # 检索+生成核心（不持久化）
+        answer, hits = await self.retrieve_and_answer(kb_ids, question, history)
 
         # 引用后处理：解析答案中的 [citation: 编号, 页码] → 引用来源；无标记时兜底全部来源
         citations = await self._build_citations(answer, hits)

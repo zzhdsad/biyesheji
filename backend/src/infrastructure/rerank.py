@@ -70,8 +70,10 @@ class FlagRerankerModel(BaseRerank):
                     "未安装 FlagEmbedding：pip install FlagEmbedding"
                 ) from exc
             try:
-                self._model = FlagReranker(self._model_name, use_fp16=True)
-                logger.info(f"Reranker 已加载：{self._model_name}")
+                # CPU 设备禁用 fp16（半精度在 CPU 上不支持/无加速），GPU 才开启
+                use_fp16 = settings.EMBEDDING_DEVICE != "cpu"
+                self._model = FlagReranker(self._model_name, use_fp16=use_fp16)
+                logger.info(f"Reranker 已加载：{self._model_name}（use_fp16={use_fp16}）")
             except Exception as exc:
                 raise RerankError(f"Reranker 加载失败（{self._model_name}）：{exc}") from exc
         return self._model
