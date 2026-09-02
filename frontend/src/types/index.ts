@@ -1,5 +1,27 @@
 /** 共享类型定义（与后端 Pydantic Schema 对应）。 */
 
+// ─────────────────────────── 鉴权 ───────────────────────────
+
+/** 用户角色（与后端 User.role 对应）。 */
+export type UserRole = 'admin' | 'member';
+
+/** 对外暴露的用户信息（GET /auth/me、login.user，不含密码）。 */
+export interface UserOut {
+  id: string;
+  email: string;
+  username: string;
+  role: UserRole;
+  created_at?: string | null;
+}
+
+/** 登录响应（POST /auth/login）。 */
+export interface TokenResponse {
+  access_token: string;
+  token_type: 'bearer';
+  expires_in: number; // 秒
+  user: UserOut;
+}
+
 export type Role = 'user' | 'assistant';
 
 export interface Citation {

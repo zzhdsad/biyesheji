@@ -12,12 +12,42 @@ import type {
   MessageOut,
   Role,
 } from '@/types';
+import { clearToken, getToken } from './token';
 
 /** 统一 API 客户端：开发环境经 Next.js rewrites 代理到 FastAPI。 */
 export const api = axios.create({
   baseURL: '/api/v1',
   timeout: 60_000, // RAG 检索+生成可能较慢，放宽超时
 });
+
+// ── 拦截器：自动携带 JWT + 401 自动跳登录 ───────────────────────────────────
+// 请求拦截器：每个请求自动注入 Authorization: Bearer <token>
+api.interceptors.request.use((config) => {
+  const token = getToken();
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// 响应拦截器：401（未鉴权/token 过期）→ 清 token + 硬跳登录页
+// 用 window.location 硬跳，避免 SPA 路由守卫与拦截器互相触发造成循环
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    const status = err?.response?.status;
+    if (status === 401 && typeof window !== 'undefined') {
+      // /login、/register 自身的 401 不跳转（避免登录页请求失败时反复跳转）
+      const path = window.location.pathname;
+      if (!path.startsWith('/login') && !path.startsWith('/register')) {
+        clearToken();
+        const redirect = encodeURIComponent(path + window.location.search);
+        window.location.href = `/login?redirect=${redirect}`;
+      }
+    }
+    return Promise.reject(err);
+  },
+);
 
 export interface ChatAnswer {
   conversation_id: string;
