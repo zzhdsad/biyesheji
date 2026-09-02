@@ -2,6 +2,7 @@
 
 import { useCallback } from 'react';
 import type { Citation } from '@/types';
+import { getToken } from '@/services/token';
 
 /** SSE 事件回调集合（与后端 chat.py /ask-stream 事件协议对应）。 */
 export interface SSEHandlers {
@@ -25,9 +26,13 @@ export async function streamSSE(
   body: unknown,
   handlers: SSEHandlers,
 ): Promise<void> {
+  // 流式 fetch 不走 axios，需手动注入 Authorization（鉴权后 /chat/ask-stream 受保护）
+  const token = getToken();
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (token) headers.Authorization = `Bearer ${token}`;
   const resp = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify(body),
   });
   if (!resp.ok || !resp.body) {

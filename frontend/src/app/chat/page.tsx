@@ -1,11 +1,25 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Badge, Button, Empty, Input, Layout, Select, Space, Tooltip, Typography } from 'antd';
-import { PlusOutlined, SendOutlined } from '@ant-design/icons';
+import {
+  Avatar,
+  Badge,
+  Button,
+  Dropdown,
+  Empty,
+  Input,
+  Layout,
+  Select,
+  Space,
+  Tooltip,
+  Typography,
+} from 'antd';
+import { LogoutOutlined, PlusOutlined, SendOutlined, UserOutlined } from '@ant-design/icons';
+import type { MenuProps } from 'antd';
 import { AppSider } from '@/components/layout/AppSider';
 import { MessageItem } from '@/components/chat/MessageItem';
 import { useChatStore } from '@/stores/chatStore';
+import { useUserStore } from '@/stores/userStore';
 
 const { Header, Content, Footer } = Layout;
 
@@ -29,6 +43,42 @@ function SystemStatus() {
         }
       />
     </Tooltip>
+  );
+}
+
+/** 右上角用户菜单：头像 + 用户名，下拉登出。 */
+function UserMenu() {
+  const { user, logout } = useUserStore();
+  if (!user) return null;
+  const items: MenuProps['items'] = [
+    {
+      key: 'info',
+      label: (
+        <div style={{ padding: '4px 0' }}>
+          <Typography.Text strong>{user.username}</Typography.Text>
+          <br />
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+            {user.email}
+          </Typography.Text>
+        </div>
+      ),
+      disabled: true,
+    },
+    { type: 'divider' },
+    {
+      key: 'logout',
+      icon: <LogoutOutlined />,
+      label: '退出登录',
+      onClick: () => void logout(),
+    },
+  ];
+  return (
+    <Dropdown menu={{ items }} placement="bottomRight">
+      <Space style={{ cursor: 'pointer' }}>
+        <Avatar size="small" icon={<UserOutlined />} />
+        <Typography.Text>{user.username}</Typography.Text>
+      </Space>
+    </Dropdown>
   );
 }
 
@@ -109,6 +159,7 @@ export default function ChatPage() {
             <Button icon={<PlusOutlined />} onClick={() => newConversation()}>
               新建会话
             </Button>
+            <UserMenu />
           </Space>
         </Header>
 

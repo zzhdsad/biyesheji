@@ -1,7 +1,8 @@
 import type { Metadata } from 'next';
-import { ConfigProvider } from 'antd';
+import { App, ConfigProvider } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { AntdRegistry } from '@ant-design/nextjs-registry';
+import { AuthInit } from '@/components/AuthInit';
 import { Providers } from './providers';
 import './globals.css';
 
@@ -19,7 +20,12 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
             locale={zhCN}
             theme={{ token: { colorPrimary: '#1677ff', borderRadius: 8 } }}
           >
-            <Providers>{children}</Providers>
+            {/* antd App 提供 message/notification/modal 的上下文式 API（App.useApp） */}
+            <App>
+              <Providers>
+                <AuthInit>{children}</AuthInit>
+              </Providers>
+            </App>
           </ConfigProvider>
         </AntdRegistry>
       </body>
