@@ -25,9 +25,10 @@ class Settings(BaseSettings):
     MILVUS_URI: str = "http://localhost:19530"
     MILVUS_COLLECTION: str = "document_chunks"
 
-    # 安全
+    # 安全（JWT 鉴权）
     SECRET_KEY: str = "change-me-in-production"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
+    JWT_ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 7 天
 
     # 模型服务
     LLM_BASE_URL: str = "http://localhost:8000/v1"

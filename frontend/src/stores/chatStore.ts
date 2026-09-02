@@ -1,7 +1,7 @@
 import { create } from 'zustand';
+import { streamSSE } from '@/hooks/useSSE';
 import type { ChatMessage, Conversation, HealthResponse, KnowledgeBase } from '@/types';
 import {
-  askQuestion,
   fetchConversations,
   fetchHealth,
   fetchKnowledgeBases,
@@ -91,33 +91,72 @@ export const useChatStore = create<ChatState>((set, get) => ({
       role: 'user',
       content: question,
     };
-    set((s) => ({ messages: [...s.messages, userMsg], sending: true }));
+    // 预声明助手占位消息 id，便于流式增量更新（打字机效果）
+    const assistantId = crypto.randomUUID();
+    set((s) => ({
+      messages: [
+        ...s.messages,
+        userMsg,
+        { id: assistantId, role: 'assistant', content: '', citations: [] },
+      ],
+      sending: true,
+    }));
 
     try {
-      const res = await askQuestion({
-        question,
-        kb_ids: [selectedKbId],
-        conversation_id: currentConversationId,
-      });
-      const assistantMsg: ChatMessage = {
-        id: res.message_id ?? crypto.randomUUID(),
-        role: 'assistant',
-        content: res.answer,
-        citations: res.citations,
-      };
-      set((s) => ({
-        messages: [...s.messages, assistantMsg],
-        currentConversationId: res.conversation_id,
-        sending: false,
-      }));
-      // 发送成功后刷新侧边栏会话列表（标题/排序变化）
-      void get().loadConversations();
+      await streamSSE(
+        '/api/v1/chat/ask-stream',
+        { question, kb_ids: [selectedKbId], conversation_id: currentConversationId },
+        {
+          onStart: ({ conversation_id }) => {
+            set({ currentConversationId: conversation_id });
+          },
+          onCitations: ({ citations }) => {
+            // 引用卡片在生成前实时展示
+            set((s) => ({
+              messages: s.messages.map((m) =>
+                m.id === assistantId ? { ...m, citations } : m,
+              ),
+            }));
+          },
+          onDelta: ({ content }) => {
+            // 逐 chunk 追加内容，形成打字机效果
+            set((s) => ({
+              messages: s.messages.map((m) =>
+                m.id === assistantId ? { ...m, content: m.content + content } : m,
+              ),
+            }));
+          },
+          onDone: ({ message_id, conversation_id }) => {
+            set((s) => ({
+              messages: s.messages.map((m) =>
+                m.id === assistantId ? { ...m, id: message_id || m.id } : m,
+              ),
+              currentConversationId: conversation_id,
+              sending: false,
+            }));
+            // 发送成功后刷新侧边栏会话列表（标题/排序变化）
+            void get().loadConversations();
+          },
+          onError: ({ message }) => {
+            set((s) => ({
+              messages: s.messages.map((m) =>
+                m.id === assistantId
+                  ? { ...m, content: m.content || `生成失败：${message}` }
+                  : m,
+              ),
+              sending: false,
+            }));
+          },
+        },
+      );
     } catch {
+      // 网络错误等：占位消息兜底提示
       set((s) => ({
-        messages: [
-          ...s.messages,
-          { id: crypto.randomUUID(), role: 'assistant', content: '请求失败，请稍后重试。' },
-        ],
+        messages: s.messages.map((m) =>
+          m.id === assistantId
+            ? { ...m, content: m.content || '请求失败，请稍后重试。' }
+            : m,
+        ),
         sending: false,
       }));
     }

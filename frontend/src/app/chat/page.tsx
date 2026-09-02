@@ -127,11 +127,6 @@ export default function ChatPage() {
               {messages.map((m) => (
                 <MessageItem key={m.id} message={m} />
               ))}
-              {sending && (
-                <div style={{ color: '#8c8c8c', padding: '8px 16px', fontSize: 13 }}>
-                  正在思考…
-                </div>
-              )}
               <div ref={bottomRef} />
             </div>
           )}

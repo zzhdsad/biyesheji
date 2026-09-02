@@ -10,6 +10,7 @@ TECH_DESIGN / AGENTS.md 约束：
 import asyncio
 import re
 import uuid
+from collections.abc import AsyncIterator
 
 from loguru import logger
 from sqlalchemy import select
@@ -87,6 +88,33 @@ class RagService:
         """
         from src.core.exceptions import AppException
 
+        # 检索+重排核心（HyDE → 混合检索 → RRF → Rerank → 注入文档名）
+        hits = await self._retrieve(kb_ids, question)
+
+        # 生成
+        user_prompt = self._build_user_prompt(question, hits)
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}, *(history or []),
+                    {"role": "user", "content": user_prompt}]
+        try:
+            answer = await self.llm.chat(messages)
+        except LLMError as exc:
+            logger.error(f"RAG 生成失败: {exc}")
+            raise AppException(422, f"回答生成失败：{exc}") from exc
+        answer = answer.strip() or "（模型未返回内容，请重试）"
+        return answer, hits
+
+    async def _retrieve(
+        self, kb_ids: list[uuid.UUID], question: str
+    ) -> list[dict]:
+        """检索+重排核心：HyDE → 混合检索 → RRF → Rerank → 注入文档名。
+
+        抽取自 retrieve_and_answer，供非流式与流式路径共用，避免逻辑漂移。
+
+        Raises:
+            AppException: 422 检索/重排失败
+        """
+        from src.core.exceptions import AppException
+
         # HyDE 查询改写（TECH_DESIGN：用假设答案替换原问题做向量检索）
         # 仅改写检索查询；最终 Prompt 仍用原始问题。失败回退原问题。
         query_text = question
@@ -141,18 +169,29 @@ class RagService:
 
         # 为精排后的命中注入 doc_name（Prompt 与引用卡片均需展示文档名）
         await self._enrich_hits_with_doc_name(hits)
+        return hits
 
-        # 生成
-        user_prompt = self._build_user_prompt(question, hits)
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}, *(history or []),
-                    {"role": "user", "content": user_prompt}]
-        try:
-            answer = await self.llm.chat(messages)
-        except LLMError as exc:
-            logger.error(f"RAG 生成失败: {exc}")
-            raise AppException(422, f"回答生成失败：{exc}") from exc
-        answer = answer.strip() or "（模型未返回内容，请重试）"
-        return answer, hits
+    def _hits_to_citations(self, hits: list[dict]) -> list[dict]:
+        """将全部检索命中转为引用来源（不按标记过滤，source_index 1-based）。
+
+        流式路径用：citations 在生成前推送，实现引用卡片实时展示。
+        DB 持久化用同一份，保证历史回看与流式一致。
+        """
+        citations = []
+        for i, h in enumerate(hits, start=1):
+            citations.append(
+                {
+                    "chunk_id": h["id"],
+                    "source_index": i,
+                    "doc_id": h["doc_id"],
+                    "doc_name": h.get("doc_name", "未知文档"),
+                    "page_num": h["page_num"],
+                    "title_path": h["title_path"],
+                    "content": h["content"],
+                    "score": h.get("rerank_score", h.get("score", 0.0)),
+                }
+            )
+        return citations
 
     async def ask(
         self,
@@ -207,6 +246,79 @@ class RagService:
         await self.cache.append_message(conversation.id, "user", question)
         await self.cache.append_message(conversation.id, "assistant", answer)
         return conversation, assistant, citations
+
+    async def ask_stream(
+        self,
+        kb_ids: list[uuid.UUID],
+        question: str,
+        conversation_id: uuid.UUID | None = None,
+    ) -> AsyncIterator[dict]:
+        """流式 RAG 问答：yield SSE 事件 dict（{"event": ..., "data": ...}）。
+
+        编排同 ask()，但生成阶段流式推送 chunk；持久化在生成完成后一次性完成。
+        事件序列：start → citations → delta×N → done（出错时 error 替代 done）。
+
+        检索失败抛 AppException（端点层异常处理器返回 422，不进入流）；
+        生成失败转 error 事件，已持久化的用户消息保留。
+        """
+        started_at = asyncio.get_event_loop().time()
+        conversation = await self._ensure_conversation(kb_ids, question, conversation_id)
+        yield {"event": "start", "data": {"conversation_id": str(conversation.id)}}
+
+        history, cache_hit = await self._load_history(conversation.id)
+
+        # 先持久化用户消息（独立事务）：保证与助手消息 created_at 顺序确定；
+        # 生成失败时用户意图仍留存。
+        self.db.add(Message(
+            conversation_id=conversation.id, role="user", content=question,
+        ))
+        await self.db.commit()
+
+        # 检索+重排核心（不持久化）
+        hits = await self._retrieve(kb_ids, question)
+        citations = self._hits_to_citations(hits)
+        yield {"event": "citations", "data": {"citations": citations}}
+
+        # 构造 Prompt 并流式生成
+        user_prompt = self._build_user_prompt(question, hits)
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}, *(history or []),
+                    {"role": "user", "content": user_prompt}]
+        answer_parts: list[str] = []
+        try:
+            async for chunk in self.llm.chat_stream(messages):
+                answer_parts.append(chunk)
+                yield {"event": "delta", "data": {"content": chunk}}
+        except LLMError as exc:
+            logger.error(f"RAG 流式生成失败: {exc}")
+            yield {"event": "error", "data": {"message": f"回答生成失败：{exc}"}}
+            return
+        answer = "".join(answer_parts).strip() or "（模型未返回内容，请重试）"
+
+        elapsed_ms = int((asyncio.get_event_loop().time() - started_at) * 1000)
+        logger.info(
+            f"RAG 流式问答完成 conv={conversation.id} hits={len(hits)} "
+            f"citations={len(citations)} cache={'hit' if cache_hit else 'miss'} "
+            f"耗时={elapsed_ms}ms"
+        )
+
+        # 持久化助手消息（独立事务，引用 JSON）→ PostgreSQL（事实源）
+        assistant = Message(
+            conversation_id=conversation.id, role="assistant",
+            content=answer, citations={"sources": citations},
+        )
+        self.db.add(assistant)
+        await self.db.commit()
+        await self.db.refresh(assistant)
+        # 同步追加到 Redis 缓存（24h TTL，自动裁剪至最近 N 轮）
+        await self.cache.append_message(conversation.id, "user", question)
+        await self.cache.append_message(conversation.id, "assistant", answer)
+        yield {
+            "event": "done",
+            "data": {
+                "conversation_id": str(conversation.id),
+                "message_id": str(assistant.id),
+            },
+        }
 
     async def _ensure_conversation(
         self, kb_ids: list[uuid.UUID], question: str, conversation_id: uuid.UUID | None

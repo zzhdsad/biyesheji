@@ -1,10 +1,14 @@
 """大模型客户端抽象：OpenAI 兼容接口（vLLM/Qwen）/ mock 可切换（依赖倒置）。
 
 TECH_DESIGN：LLM 通过 vLLM 提供 OpenAI 兼容接口，AWQ 4bit 量化部署。
+支持流式生成（stream=True）供 SSE 端点逐 chunk 推送答案。
 """
 
+import asyncio
+import json
 import re
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 
 import httpx
 from loguru import logger
@@ -24,7 +28,11 @@ class BaseLLM(ABC):
 
     @abstractmethod
     async def chat(self, messages: list[Message]) -> str:
-        """生成回答。"""
+        """生成回答（一次性返回完整文本）。"""
+
+    @abstractmethod
+    def chat_stream(self, messages: list[Message]) -> AsyncIterator[str]:
+        """流式生成：逐 chunk yield 答案文本片段（供 SSE 推送）。"""
 
 
 class OpenAICompatibleLLM(BaseLLM):
@@ -58,6 +66,44 @@ class OpenAICompatibleLLM(BaseLLM):
         except (KeyError, IndexError, ValueError) as exc:
             raise LLMError(f"LLM 响应格式异常：{exc}") from exc
 
+    async def chat_stream(self, messages: list[Message]) -> AsyncIterator[str]:
+        """流式生成：OpenAI SSE 协议（stream=true），逐 chunk yield delta.content。"""
+        payload = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": 0.1,
+            "max_tokens": 1024,
+            "stream": True,
+        }
+        headers = {"Authorization": f"Bearer {self._api_key}"} if self._api_key else {}
+        try:
+            async with httpx.AsyncClient(timeout=settings.LLM_TIMEOUT_SECONDS) as client:
+                async with client.stream(
+                    "POST",
+                    f"{self._base_url}/chat/completions",
+                    json=payload,
+                    headers=headers,
+                ) as response:
+                    response.raise_for_status()
+                    async for line in response.aiter_lines():
+                        if not line or not line.startswith("data:"):
+                            continue
+                        data = line[5:].strip()
+                        if data == "[DONE]":
+                            break
+                        try:
+                            obj = json.loads(data)
+                        except json.JSONDecodeError:
+                            continue
+                        try:
+                            delta = obj["choices"][0]["delta"].get("content")
+                        except (KeyError, IndexError):
+                            continue
+                        if delta:
+                            yield delta
+        except httpx.HTTPError as exc:
+            raise LLMError(f"LLM 流式请求失败（{self._base_url}）：{exc}") from exc
+
 
 class MockLLM(BaseLLM):
     """确定性假回答（开发/测试）：验证 RAG 流程而不依赖真实模型。
@@ -69,6 +115,17 @@ class MockLLM(BaseLLM):
     _CTX_MARKER = "参考资料"
 
     async def chat(self, messages: list[Message]) -> str:
+        return self._build_answer(messages)
+
+    async def chat_stream(self, messages: list[Message]) -> AsyncIterator[str]:
+        """模拟流式：先构造完整 mock 答案，再按固定步长切片 yield。"""
+        answer = self._build_answer(messages)
+        step = 4  # 每段 4 字符，模拟逐字输出
+        for i in range(0, len(answer), step):
+            yield answer[i : i + step]
+            await asyncio.sleep(0.02)  # 增强打字机观感
+
+    def _build_answer(self, messages: list[Message]) -> str:
         user_content = next(
             (m["content"] for m in reversed(messages) if m["role"] == "user"), ""
         )

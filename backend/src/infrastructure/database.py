@@ -45,6 +45,7 @@ async def get_db() -> AsyncIterator[AsyncSession]:
 async def init_db() -> None:
     """开发环境初始化：自动建表 + seed 默认管理员（生产环境请使用 Alembic 迁移）。"""
     from src.domain.models import Base, User
+    from src.core.security import hash_password
 
     engine = get_engine()
     async with engine.begin() as conn:
@@ -60,9 +61,14 @@ async def init_db() -> None:
                 User(
                     email=settings.DEFAULT_ADMIN_EMAIL,
                     username="admin",
-                    hashed_password="not-set-yet",  # TODO: 接入注册/JWT 后替换为真实哈希
+                    hashed_password=hash_password("admin123"),
                     role="admin",
                 )
             )
             await session.commit()
-            logger.info(f"已创建默认管理员：{settings.DEFAULT_ADMIN_EMAIL}")
+            logger.info(f"已创建默认管理员：{settings.DEFAULT_ADMIN_EMAIL} / admin123")
+        elif exists.hashed_password in ("not-set-yet", ""):
+            # 旧占位数据迁移：更新为真实哈希
+            exists.hashed_password = hash_password("admin123")
+            await session.commit()
+            logger.info("默认管理员密码已更新为 admin123")

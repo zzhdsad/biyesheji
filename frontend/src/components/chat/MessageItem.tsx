@@ -108,7 +108,7 @@ export function MessageItem({ message }: { message: ChatMessage }) {
         >
           {isUser ? (
             <span style={{ whiteSpace: 'pre-wrap' }}>{message.content}</span>
-          ) : (
+          ) : message.content ? (
             <div style={{ whiteSpace: 'pre-wrap' }}>
               {renderAnswer(
                 message.content,
@@ -117,6 +117,9 @@ export function MessageItem({ message }: { message: ChatMessage }) {
                 activeKey[0] ? parseInt(activeKey[0], 10) : null,
               )}
             </div>
+          ) : (
+            // 流式生成前的检索阶段：占位提示，首个 delta 到达后由打字机内容替代
+            <span style={{ color: '#8c8c8c' }}>正在检索知识库…</span>
           )}
         </div>
         {!isUser && citations.length > 0 && (
