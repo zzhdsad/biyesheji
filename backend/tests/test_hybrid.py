@@ -38,6 +38,65 @@ def test_rrf_preserves_hit_fields():
     assert fused[0]["title_path"] == "章"
 
 
+# ---------- 单元：BGERerank 配置与惰性加载（不下载模型） ----------
+
+
+def test_bge_rerank_lazy_loading_does_not_load_on_construction():
+    """BGERerank 构造时不立即加载模型（惰性，避免测试触发 2.3GB 下载）。"""
+    from src.infrastructure.rerank import BGERerank
+
+    r = BGERerank()
+    # 构造完成，模型未加载
+    assert r._model is None
+    # 默认 model_name 取自 settings.RERANK_MODEL
+    assert r._model_name == settings.RERANK_MODEL
+
+
+def test_bge_rerank_uses_local_path_when_configured(monkeypatch):
+    """RERANK_MODEL_PATH 配置后，model_name 应优先用本地路径。"""
+    from src.infrastructure.rerank import BGERerank
+
+    monkeypatch.setattr(settings, "RERANK_MODEL_PATH", "/data/models/bge-reranker")
+    r = BGERerank()
+    assert r._model_name == "/data/models/bge-reranker"
+    assert r._local_path == "/data/models/bge-reranker"
+
+
+def test_bge_rerank_empty_candidates_skips_model_loading():
+    """空候选时直接返回 []，不应触发模型加载。"""
+    from src.infrastructure.rerank import BGERerank
+
+    r = BGERerank()
+    assert r.rerank("q", [], top_n=5) == []
+    # 模型仍未加载
+    assert r._model is None
+
+
+def test_bge_rerank_import_error_raises_rerank_error(monkeypatch):
+    """未安装 FlagEmbedding 时抛 RerankError（友好降级提示）。"""
+    from src.infrastructure import rerank as rerank_mod
+
+    # 模拟 FlagEmbedding 未安装：让 _get_model 内部 import 失败
+    monkeypatch.setattr(rerank_mod.BGERerank, "_model", None, raising=False)
+    # 注入一个会抛 ImportError 的 fake 模块路径
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "FlagEmbedding":
+            raise ImportError("simulated")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    r = rerank_mod.BGERerank()
+    try:
+        r.rerank("q", [{"content": "x"}], top_n=1)
+    except rerank_mod.RerankError as exc:
+        assert "未安装 FlagEmbedding" in str(exc)
+    else:
+        raise AssertionError("应抛 RerankError")
+
+
 # ---------- 单元：MockRerank ----------
 
 

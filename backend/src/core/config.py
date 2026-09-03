@@ -35,7 +35,6 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = "EMPTY"
     LLM_MODEL: str = "Qwen2.5-14B-Instruct-AWQ"
     EMBEDDING_MODEL: str = "BAAI/bge-m3"
-    RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
     # openai（OpenAI 兼容接口，如 vLLM）/ mock（确定性假回答，开发/测试）
     LLM_BACKEND: str = "openai"
     LLM_TIMEOUT_SECONDS: int = 120
@@ -55,8 +54,14 @@ class Settings(BaseSettings):
     RECALL_TOP_K: int = 50  # 每路召回数量（送入 RRF 融合）
     RERANK_TOP_N: int = 5  # 精排后返回给 LLM 的最终数量
     RRF_K: int = 60  # RRF 融合平滑常数
-    RERANK_BACKEND: str = "mock"  # mock / flagreranker
-    RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"
+    # mock（确定性伪重排，开发/测试）/ flagreranker（BGE-Reranker-v2-m3 真实精排）
+    RERANK_BACKEND: str = "mock"
+    RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"  # HuggingFace 模型 ID
+    # 本地模型路径（离线/生产场景）：设了优先用本地路径，避免运行时下载
+    # 为空则按 RERANK_MODEL 从 HuggingFace 拉取（首拉约 2.3GB，国内走 HF_ENDPOINT 镜像）
+    RERANK_MODEL_PATH: str | None = None
+    # 设备：cpu / cuda:0 / mps；CPU 上自动禁用 fp16
+    RERANK_DEVICE: str = "cpu"
     # HyDE 查询改写（TECH_DESIGN：检索前用小模型生成假设答案替换原问题）
     HYDE_ENABLED: bool = False
     HYDE_BACKEND: str = "mock"  # mock / openai
