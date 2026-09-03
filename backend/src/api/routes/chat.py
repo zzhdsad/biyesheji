@@ -1,9 +1,16 @@
-"""智能问答路由：RAG 问答（同步 / SSE 流式）、会话管理。"""
+"""智能问答路由：RAG 问答（同步 / SSE 流式）、会话管理。
+
+安全规范（AGENTS.md §3 / TECH_DESIGN RBAC）：
+- 所有端点受 protected_router 统一鉴权（Depends(get_current_user)）
+- kb_ids 必须校验：用户可访问 ∩ 请求的 kb_ids == 请求的 kb_ids
+- 会话归属校验：Conversation.user_id == request.state.user.id
+- 新建会话用当前登录用户（不再硬编码 DEFAULT_ADMIN_EMAIL）
+"""
 
 import json
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
@@ -11,7 +18,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.rag_service import RagService
-from src.domain.models import Conversation, Message
+from src.core.deps import get_accessible_kb_ids
+from src.core.exceptions import PermissionDeniedError
+from src.domain.models import Conversation, Message, User
 from src.infrastructure.database import get_db
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -62,21 +71,67 @@ class MessageOut(BaseModel):
     created_at: object
 
 
-@router.post("/ask", response_model=ChatAnswerResponse)
-async def ask(payload: ChatAskRequest, db: AsyncSession = Depends(get_db)) -> ChatAnswerResponse:
-    """RAG 问答：向量检索 Top-K → 上下文拼接 → LLM 生成 → 引用溯源。
+# ── 公共安全校验 ─────────────────────────────────────────────────────────────
 
-    - kb_ids 为空返回 422（检索必须限定知识库范围，禁止越权）
-    - 答案严格基于检索资料，找不到时明确告知"无法回答"（防幻觉约束）
-    - citations 为答案引用的来源（文档名、页码、段落），前端渲染引用卡片
+async def _validate_kb_access(
+    db: AsyncSession, user: User, kb_ids: list[uuid.UUID]
+) -> None:
+    """校验用户是否可访问请求的全部 kb_ids。
+
+    Raises:
+        PermissionDeniedError: 存在无权访问的 kb_id
+    """
+    accessible = await get_accessible_kb_ids(db, user)
+    forbidden = set(kb_ids) - accessible
+    if forbidden:
+        raise PermissionDeniedError(f"无权访问以下知识库: {forbidden}")
+
+
+async def _validate_conversation_owner(
+    db: AsyncSession, user: User, conversation_id: uuid.UUID
+) -> Conversation:
+    """校验会话归属并返回会话。
+
+    Raises:
+        NotFoundError: 会话不存在
+        PermissionDeniedError: 会话不属于当前用户
+    """
+    from src.core.exceptions import NotFoundError
+
+    conv = await db.get(Conversation, conversation_id)
+    if conv is None:
+        raise NotFoundError("会话不存在")
+    if conv.user_id != user.id:
+        raise PermissionDeniedError("无权访问该会话")
+    return conv
+
+
+# ── 端点实现 ────────────────────────────────────────────────────────────────
+
+@router.post("/ask", response_model=ChatAnswerResponse)
+async def ask(
+    payload: ChatAskRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> ChatAnswerResponse:
+    """RAG 问答（同步）。
+
+    安全：校验 kb_ids 权限 + 校验 conversation_id 归属 + RagService 使用当前用户。
     """
     from src.core.exceptions import AppException
 
     if not payload.kb_ids:
         raise AppException(422, "kb_ids 不能为空：必须指定检索的知识库范围")
 
+    user: User = request.state.user
+    await _validate_kb_access(db, user, payload.kb_ids)
+
+    if payload.conversation_id is not None:
+        await _validate_conversation_owner(db, user, payload.conversation_id)
+
     service = RagService(db)
     conv, assistant, citations = await service.ask(
+        user=user,
         kb_ids=payload.kb_ids,
         question=payload.question.strip(),
         conversation_id=payload.conversation_id,
@@ -90,36 +145,33 @@ async def ask(payload: ChatAskRequest, db: AsyncSession = Depends(get_db)) -> Ch
 
 
 @router.post("/ask-stream")
-async def ask_stream(payload: ChatAskRequest, db: AsyncSession = Depends(get_db)):
-    """RAG 问答（SSE 流式）：检索 → 推送引用 → 逐 chunk 流式生成 → 持久化。
+async def ask_stream(
+    payload: ChatAskRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """RAG 问答（SSE 流式）。
 
-    事件协议（text/event-stream，每事件两行 + 空行分隔）：
-        event: start     data: {"conversation_id": "..."}
-        event: citations data: {"citations": [{...}]}   # 检索完成后立即推送
-        event: delta      data: {"content": "chunk"}    # 多次，逐字/逐 chunk
-        event: done       data: {"conversation_id": "...", "message_id": "..."}
-        event: error      data: {"message": "..."}      # 出错时替代 done
-
-    - kb_ids 为空返回 422（检索必须限定知识库范围，禁止越权）
-    - 答案严格基于检索资料，找不到时明确告知"无法回答"（防幻觉约束）
-    - citations 在生成前推送全部检索命中，前端实时渲染引用卡片
+    安全：校验 kb_ids 权限 + 校验 conversation_id 归属 + RagService 使用当前用户。
+    事件协议见原注释，不变。
     """
-    from src.core.exceptions import AppException, NotFoundError
+    from src.core.exceptions import AppException
 
     if not payload.kb_ids:
         raise AppException(422, "kb_ids 不能为空：必须指定检索的知识库范围")
-    # 流开始前预校验会话存在性：未知会话返回 404（与非流式 /ask 一致），
-    # 避免进入流后才以 error 事件告知（HTTP 语义更清晰）。
+
+    user: User = request.state.user
+    await _validate_kb_access(db, user, payload.kb_ids)
+
     if payload.conversation_id is not None:
-        conv = await db.get(Conversation, payload.conversation_id)
-        if conv is None:
-            raise NotFoundError("会话不存在")
+        await _validate_conversation_owner(db, user, payload.conversation_id)
 
     service = RagService(db)
 
     async def event_stream():
         try:
             async for evt in service.ask_stream(
+                user=user,
                 kb_ids=payload.kb_ids,
                 question=payload.question.strip(),
                 conversation_id=payload.conversation_id,
@@ -143,20 +195,36 @@ async def ask_stream(payload: ChatAskRequest, db: AsyncSession = Depends(get_db)
 
 
 @router.get("/conversations", response_model=list[ConversationOut])
-async def list_conversations(db: AsyncSession = Depends(get_db)) -> list[Conversation]:
+async def list_conversations(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> list[Conversation]:
     """历史会话列表（按创建时间倒序）。
 
-    TODO: 接入 JWT 鉴权后按当前用户 user_id 过滤。
+    安全隔离：只返回当前用户自己创建的会话（Conversation.user_id == current_user.id）。
     """
-    rows = await db.scalars(select(Conversation).order_by(Conversation.created_at.desc()))
+    user: User = request.state.user
+    rows = await db.scalars(
+        select(Conversation)
+        .where(Conversation.user_id == user.id)
+        .order_by(Conversation.created_at.desc())
+    )
     return list(rows)
 
 
 @router.get("/conversations/{conversation_id}/messages", response_model=list[MessageOut])
 async def list_messages(
-    conversation_id: uuid.UUID, db: AsyncSession = Depends(get_db)
+    conversation_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
 ) -> list[Message]:
-    """会话消息记录（按时间升序，含 citations JSON）。"""
+    """会话消息记录（按时间升序，含 citations JSON）。
+
+    安全隔离：校验会话归属（Conversation.user_id == current_user.id），防止越权读取他人会话消息。
+    """
+    user: User = request.state.user
+    await _validate_conversation_owner(db, user, conversation_id)
+
     rows = await db.scalars(
         select(Message)
         .where(Message.conversation_id == conversation_id)

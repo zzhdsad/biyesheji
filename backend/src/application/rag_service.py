@@ -17,7 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
-from src.core.exceptions import NotFoundError
+from src.core.exceptions import NotFoundError, PermissionDeniedError
 from src.domain.models import Conversation, Document, Message, User
 from src.infrastructure.embedding import BaseEmbedding, EmbeddingError, get_embedding
 from src.infrastructure.hyde import BaseHyDE, HyDEError, get_hyde
@@ -195,6 +195,7 @@ class RagService:
 
     async def ask(
         self,
+        user: User,
         kb_ids: list[uuid.UUID],
         question: str,
         conversation_id: uuid.UUID | None = None,
@@ -204,15 +205,22 @@ class RagService:
         检索/生成核心委派 retrieve_and_answer，本方法负责会话创建、消息持久化、
         引用后处理与 Redis 缓存同步。多轮历史透传至核心以保持上下文。
 
+        Args:
+            user: 当前登录用户（用于归属校验 + 新建会话绑定）
+            kb_ids: 检索范围（调用方已校验权限）
+            question: 原始问题
+            conversation_id: 续用已有会话；None 则新建
+
         Returns:
             (conversation, assistant_message, citations)
 
         Raises:
             NotFoundError: 会话不存在
+            PermissionDeniedError: 会话归属不匹配
             AppException: 422 检索/生成失败
         """
         started_at = asyncio.get_event_loop().time()
-        conversation = await self._ensure_conversation(kb_ids, question, conversation_id)
+        conversation = await self._ensure_conversation(user, kb_ids, question, conversation_id)
         history, cache_hit = await self._load_history(conversation.id)
 
         # 先持久化用户消息（独立事务）：保证与助手消息 created_at 不同，
@@ -249,6 +257,7 @@ class RagService:
 
     async def ask_stream(
         self,
+        user: User,
         kb_ids: list[uuid.UUID],
         question: str,
         conversation_id: uuid.UUID | None = None,
@@ -258,11 +267,20 @@ class RagService:
         编排同 ask()，但生成阶段流式推送 chunk；持久化在生成完成后一次性完成。
         事件序列：start → citations → delta×N → done（出错时 error 替代 done）。
 
-        检索失败抛 AppException（端点层异常处理器返回 422，不进入流）；
-        生成失败转 error 事件，已持久化的用户消息保留。
+        Args:
+            user: 当前登录用户（用于归属校验 + 新建会话绑定）
+            kb_ids: 检索范围（调用方已校验权限）
+            question: 原始问题
+            conversation_id: 续用已有会话；None 则新建
+
+        Raises:
+            NotFoundError: 会话不存在
+            PermissionDeniedError: 会话归属不匹配（由调用方先校验，此处兜底）
+            AppException: 检索失败（端点层异常处理器返回 422，不进入流）；
+                生成失败转 error 事件，已持久化的用户消息保留。
         """
         started_at = asyncio.get_event_loop().time()
-        conversation = await self._ensure_conversation(kb_ids, question, conversation_id)
+        conversation = await self._ensure_conversation(user, kb_ids, question, conversation_id)
         yield {"event": "start", "data": {"conversation_id": str(conversation.id)}}
 
         history, cache_hit = await self._load_history(conversation.id)
@@ -321,25 +339,31 @@ class RagService:
         }
 
     async def _ensure_conversation(
-        self, kb_ids: list[uuid.UUID], question: str, conversation_id: uuid.UUID | None
+        self,
+        user: User,
+        kb_ids: list[uuid.UUID],
+        question: str,
+        conversation_id: uuid.UUID | None,
     ) -> Conversation:
+        """确保会话存在：有 conversation_id 则校验归属，无则创建新会话绑定当前用户。
+
+        安全（AGENTS.md）：
+        - 新会话一律绑定调用方 user.id（不再硬编码 DEFAULT_ADMIN_EMAIL）
+        - 续用会话时校验归属（双保险，调用方已先校验过）
+
+        Raises:
+            NotFoundError: 会话不存在
+            PermissionDeniedError: 会话不属于当前用户
+        """
         if conversation_id is not None:
             conv = await self.db.get(Conversation, conversation_id)
             if conv is None:
                 raise NotFoundError("会话不存在")
+            if conv.user_id != user.id:
+                raise PermissionDeniedError("无权访问该会话")
             return conv
-        user = await self.db.scalar(
-            select(User).where(User.email == settings.DEFAULT_ADMIN_EMAIL)
-        )
-        if user is None:  # 测试/异常环境下兜底
-            user = User(
-                email=settings.DEFAULT_ADMIN_EMAIL,
-                username="admin",
-                hashed_password="not-set-yet",
-                role="admin",
-            )
-            self.db.add(user)
-            await self.db.flush()
+
+        # 新建会话：绑定当前登录用户
         conv = Conversation(
             user_id=user.id,
             title=question[:20],

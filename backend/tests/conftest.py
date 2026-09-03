@@ -1,11 +1,13 @@
 """全局测试配置。
 
-- 向量化统一用 mock 后端（确定性伪向量），避免测试依赖 BGE-M3 模型下载。
-- Milvus 服务可用时用真实 MilvusStore，否则注入内存实现。
-- 会话缓存：Redis 可用 → 真实缓存；否则内存实现。
-- 鉴权：**模块加载时直接 monkeypatch deps.get_current_user**，跳过真实鉴权。
-  任何测试文件内 new TestClient(app) 都自动跳过鉴权。
-  test_auth.py 用 auth_client fixture（module scope）恢复真实函数。
+测试鉴权方案：
+- deps.py 中 get_current_user 函数内部有 TEST_MODE_ENABLED 全局开关
+- 开启时跳过 JWT 校验直接返回测试管理员（TEST_USER）
+- 这样即使 FastAPI 在路由注册时已经缓存了对 get_current_user 的引用，
+  动态切换开关也能生效（不需要 patch Depends.dependency 属性）
+
+模块级设置 TEST_MODE_ENABLED = True：所有业务测试自动跳过鉴权。
+auth_client fixture：临时关闭测试模式，恢复真实 JWT 鉴权。
 """
 
 import uuid
@@ -14,7 +16,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.core.config import settings
-import src.core.deps as _deps_mod  # noqa: E402 — 顶层导入，后续模块赋值
+import src.core.deps as deps_mod  # noqa: E402
 from src.core.deps import get_current_user as _REAL_GET_CURRENT_USER  # noqa: E402
 from src.domain.models import User  # noqa: E402
 from src.infrastructure import milvus_store, redis_client  # noqa: E402
@@ -22,34 +24,9 @@ from src.main import app  # noqa: E402
 from tests.test_upload import PG_AVAILABLE, _init_db_standalone  # noqa: E402
 
 
-# ── 模块级鉴权跳过（永久生效，不受 fixture 生命周期影响） ───────────────────────
-
-async def _fake_get_current_user(
-    request=None,
-    authorization=None,
-    db=None,
-) -> User:
-    u = User(
-        id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
-        email="test@test.com",
-        username="tester",
-        hashed_password="",
-        role="admin",
-    )
-    return u
-
-
-# 1) 改 deps 模块属性（覆盖任何后续 import）
-_deps_mod.get_current_user = _fake_get_current_user
-
-# 2) 关键：直接改 protected_router 里 Depends.dependency 已保存的引用
-#    （因为 FastAPI 在路由组装时把函数引用拷贝进 Depends.dependency，
-#     改模块属性不会影响已经保存的引用）
-import src.api.routes as _routes_mod  # noqa: E402
-
-for _dep in _routes_mod.protected_router.dependencies:
-    if hasattr(_dep, "dependency"):
-        object.__setattr__(_dep, "dependency", _fake_get_current_user)
+# ── 启用测试模式（全局开关，无需 patch Depends）──────────────────────────────
+# deps.get_current_user 内部会检查这个全局变量
+deps_mod.TEST_MODE_ENABLED = True
 
 
 def _probe_milvus() -> bool:
@@ -99,7 +76,7 @@ def _mock_rerank_backend(monkeypatch):
     rerank.set_rerank(rerank.MockRerank())
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(autouse=True, scope="module")
 def vector_store():
     if MILVUS_AVAILABLE:
         store = milvus_store.MilvusStore()
@@ -123,33 +100,21 @@ def conversation_cache():
 
 @pytest.fixture(scope="module")
 def client():
-    """业务 API 测试客户端（鉴权已在模块级跳过）。"""
+    """业务 API 测试客户端（鉴权通过 TEST_MODE_ENABLED 全局开关跳过）。"""
     if PG_AVAILABLE:
         _init_db_standalone()
     with TestClient(app) as c:
         yield c
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def auth_client():
-    """鉴权测试专用客户端（恢复真实 get_current_user，走 JWT 验签 + DB）。"""
-    import src.core.deps as deps_mod
-
-    deps_mod.get_current_user = _REAL_GET_CURRENT_USER
-    for _dep in _routes_mod.protected_router.dependencies:
-        if hasattr(_dep, "dependency"):
-            object.__setattr__(_dep, "dependency", _REAL_GET_CURRENT_USER)
-    print(f"\n[auth_client SETUP] protected_router.deps[0].dependency is REAL? "
-          f"{_routes_mod.protected_router.dependencies[0].dependency is _REAL_GET_CURRENT_USER}")
+    """鉴权测试专用客户端（临时关闭测试模式，走真实 JWT 验签 + DB）。"""
+    deps_mod.TEST_MODE_ENABLED = False
     try:
         if PG_AVAILABLE:
             _init_db_standalone()
         with TestClient(app) as c:
             yield c
     finally:
-        deps_mod.get_current_user = _fake_get_current_user
-        for _dep in _routes_mod.protected_router.dependencies:
-            if hasattr(_dep, "dependency"):
-                object.__setattr__(_dep, "dependency", _fake_get_current_user)
-        print(f"[auth_client TEARDOWN] protected_router.deps[0].dependency is FAKE? "
-              f"{_routes_mod.protected_router.dependencies[0].dependency is _fake_get_current_user}")
+        deps_mod.TEST_MODE_ENABLED = True

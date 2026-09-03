@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "context7": {
+      "command": "C:/software/node/node.exe",
+      "args": [
+        "C:/tool/toolkit/mcp-servers/node_modules/@upstash/context7-mcp/dist/index.js"
+      ]
+    },
+    "memory": {
+      "command": "C:/software/node/node.exe",
+      "args": [
+        "C:/tool/toolkit/mcp-servers/node_modules/@modelcontextprotocol/server-memory/dist/index.js",
+        "--storage-path",
+        "C:/tool/memory/memory.json"
+      ]
+    },
+    "playwright": {
+      "command": "C:/software/node/node.exe",
+      "args": [
+        "C:/tool/toolkit/mcp-servers/node_modules/@playwright/mcp/cli.js"
+      ]
+    }
+  }
+}
