@@ -174,3 +174,51 @@ export async function fetchEvalHistory(kbId?: string): Promise<EvaluationHistory
   });
   return data;
 }
+
+// ─────────────────────────── 反馈收集 ───────────────────────────
+// PRD §3.6 / §8：用户对助手消息点赞/踩 + 文本纠错意见
+
+export interface FeedbackPayload {
+  message_id: string;
+  rating: 1 | -1;
+  comment?: string;
+}
+
+export interface FeedbackResult {
+  id: string;
+  message_id: string;
+  rating: number;
+  comment: string;
+}
+
+/** 提交反馈（点赞/踩 + 可选纠错意见）；同一消息重复提交会覆盖更新。 */
+export async function submitFeedback(
+  payload: FeedbackPayload,
+): Promise<FeedbackResult> {
+  const { data } = await api.post<FeedbackResult>('/feedbacks', payload);
+  return data;
+}
+
+/** 查询某条消息的已有反馈（无则返回 null）。 */
+export async function fetchFeedback(
+  messageId: string,
+): Promise<FeedbackResult | null> {
+  const { data } = await api.get<FeedbackResult | null>(`/feedbacks/${messageId}`);
+  return data;
+}
+
+// ─────────────────────────── 系统仪表盘 ───────────────────────────
+// PRD §5.2：总文档数 / 知识库数 / 累计问答数 / 平均响应延迟（仅 admin）
+
+export interface AdminStats {
+  total_docs: number;
+  total_kbs: number;
+  total_qa: number;
+  avg_latency_ms: number;
+}
+
+/** 系统仪表盘全局统计（GET /admin/stats，仅 admin 可访问）。 */
+export async function fetchAdminStats(): Promise<AdminStats> {
+  const { data } = await api.get<AdminStats>('/admin/stats');
+  return data;
+}

@@ -62,11 +62,15 @@ class Settings(BaseSettings):
     RERANK_MODEL_PATH: str | None = None
     # 设备：cpu / cuda:0 / mps；CPU 上自动禁用 fp16
     RERANK_DEVICE: str = "cpu"
-    # HyDE 查询改写（TECH_DESIGN：检索前用小模型生成假设答案替换原问题）
-    HYDE_ENABLED: bool = False
+    # HyDE 查询改写（TECH_DESIGN §4.5：检索前用小模型生成假设答案替换原问题）
+    # 默认开启（用户需求）；开发期无小模型服务时设 HYDE_BACKEND=mock 或 HYDE_ENABLED=false
+    HYDE_ENABLED: bool = True
     HYDE_BACKEND: str = "mock"  # mock / openai
     HYDE_MODEL: str = "Qwen/Qwen2.5-1.5B-Instruct"
-    HYDE_BASE_URL: str | None = None  # 默认复用 LLM_BASE_URL
+    # HyDE 小模型 API 地址：为空则复用 LLM_BASE_URL
+    # Ollama：http://localhost:11434/v1（Ollama ≥0.1.x 兼容 OpenAI /v1）
+    # vLLM  ：http://localhost:8001/v1（vllm serve Qwen/Qwen2.5-1.5B-Instruct --port 8001）
+    HYDE_BASE_URL: str | None = None
     HISTORY_WINDOW: int = 3
     # 会话缓存（TECH_DESIGN：conversation:{conv_id}:history TTL 24h）
     HISTORY_TTL_SECONDS: int = 86400

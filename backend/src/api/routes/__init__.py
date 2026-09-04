@@ -9,7 +9,15 @@
 
 from fastapi import APIRouter, Depends
 
-from src.api.routes import auth, chat, documents, evaluation, knowledge_bases
+from src.api.routes import (
+    admin,
+    auth,
+    chat,
+    documents,
+    evaluation,
+    feedbacks,
+    knowledge_bases,
+)
 from src.core.deps import get_current_user
 
 # ── 免鉴权路由 ───────────────────────────────────────────────────────────────
@@ -26,6 +34,8 @@ protected_router.include_router(documents.router)
 protected_router.include_router(chat.router)
 protected_router.include_router(knowledge_bases.router)
 protected_router.include_router(evaluation.router)
+protected_router.include_router(feedbacks.router)  # PRD §3.6：用户反馈收集
+protected_router.include_router(admin.router)  # PRD §5.2：系统仪表盘统计（仅 admin）
 
 # ── 聚合 ─────────────────────────────────────────────────────────────────────
 api_router = APIRouter()

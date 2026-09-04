@@ -1,17 +1,22 @@
 'use client';
 
-import { useEffect } from 'react';
+import { Suspense, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Alert, Button, Card, Form, Input, Typography } from 'antd';
 import { LockOutlined, UserOutlined } from '@ant-design/icons';
 import { useUserStore } from '@/stores/userStore';
 
-interface LoginForm {
+interface LoginFormValues {
   username_or_email: string;
   password: string;
 }
 
-export default function LoginPage() {
+/**
+ * 登录表单内层组件。
+ * 注意：useSearchParams() 在 Next.js 14 静态预渲染时要求 Suspense 边界
+ * （missing-suspense-with-csr-bailout），因此默认导出用 <Suspense> 包裹。
+ */
+function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const { login, loading, error, token } = useUserStore();
@@ -24,7 +29,7 @@ export default function LoginPage() {
     }
   }, [token, router, searchParams]);
 
-  const onFinish = async (values: LoginForm) => {
+  const onFinish = async (values: LoginFormValues) => {
     const ok = await login(values.username_or_email, values.password);
     if (ok) {
       const redirect = searchParams.get('redirect') || '/chat';
@@ -60,7 +65,7 @@ export default function LoginPage() {
           />
         )}
 
-        <Form<LoginForm> layout="vertical" onFinish={onFinish} autoComplete="off">
+        <Form<LoginFormValues> layout="vertical" onFinish={onFinish} autoComplete="off">
           <Form.Item
             label="用户名 / 邮箱"
             name="username_or_email"
@@ -106,5 +111,14 @@ export default function LoginPage() {
         </div>
       </Card>
     </div>
+  );
+}
+
+/** 默认导出：Suspense 边界包裹 useSearchParams（Next.js 14 静态预渲染要求）。 */
+export default function LoginPage() {
+  return (
+    <Suspense fallback={null}>
+      <LoginForm />
+    </Suspense>
   );
 }

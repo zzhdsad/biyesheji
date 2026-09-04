@@ -91,9 +91,14 @@ services:
       - uploads_data:/app/uploads
 
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        # rewrites 在 next build 阶段内联，必须构建时注入（容器网络服务名）
+        BACKEND_URL: http://backend:8000
     container_name: kp-frontend
     environment:
+      # 运行时保留（供 server 端其他运行时代码读取；rewrites 已在构建时固化）
       BACKEND_URL: http://backend:8000
     ports:
       - "3000:3000"

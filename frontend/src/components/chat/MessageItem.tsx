@@ -4,6 +4,7 @@ import { useState, type ReactNode } from 'react';
 import { Avatar, Collapse, Tag, Typography } from 'antd';
 import { RobotOutlined, UserOutlined, FileTextOutlined } from '@ant-design/icons';
 import type { Citation, ChatMessage } from '@/types';
+import { FeedbackButtons } from './FeedbackButtons';
 
 const { Text, Paragraph } = Typography;
 
@@ -79,12 +80,14 @@ function cardLabel(c: Citation): ReactNode {
   );
 }
 
-/** 单条消息气泡 + 引用来源卡片。 */
+/** 单条消息气泡 + 引用来源卡片 + 反馈按钮（仅助手消息）。 */
 export function MessageItem({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
   const [activeKey, setActiveKey] = useState<string[]>([]);
 
   const citations = message.citations ?? [];
+  // 仅助手消息 + 已有内容（非流式占位阶段）时显示反馈按钮
+  const showFeedback = !isUser && Boolean(message.content);
 
   return (
     <div
@@ -145,6 +148,17 @@ export function MessageItem({ message }: { message: ChatMessage }) {
                 ),
               }))}
             />
+          </div>
+        )}
+        {showFeedback && (
+          <div
+            style={{
+              marginTop: 4,
+              display: 'flex',
+              justifyContent: 'flex-start',
+            }}
+          >
+            <FeedbackButtons messageId={message.id} />
           </div>
         )}
       </div>

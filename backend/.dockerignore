@@ -1,0 +1,25 @@
+# Python 虚拟环境（容器内重新安装依赖，不拷入镜像）
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# 敏感配置：通过 docker compose env_file 注入，不进镜像
+.env
+.env.*
+
+# 运行时数据与大文件（volume 挂载 / 运行时下载）
+uploads/
+models/
+*.log
+
+# 测试与文档（生产镜像不需要）
+tests/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 版本控制
+.git/
+.gitignore

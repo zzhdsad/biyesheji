@@ -38,6 +38,59 @@ def test_get_hyde_enabled_mock(monkeypatch):
     assert isinstance(h, hyde.MockHyDE)
 
 
+def test_get_hyde_enabled_openai_returns_qwen_hyde(monkeypatch):
+    """HYDE_ENABLED + openai 后端 → 返回 QwenHyDE 实例（不调用真实 API）。"""
+    monkeypatch.setattr(settings, "HYDE_ENABLED", True)
+    monkeypatch.setattr(settings, "HYDE_BACKEND", "openai")
+    hyde.set_hyde(None)
+    h = hyde.get_hyde()
+    assert isinstance(h, hyde.QwenHyDE)
+    assert isinstance(h, hyde.OpenAIHyDE)  # 别名
+    # 客户端未初始化（惰性加载，构造时不连网）
+    assert h._client is None
+
+
+# ---------- 单元：QwenHyDE 配置解析（不调用真实 API） ----------
+
+
+def test_qwen_hyde_falls_back_to_llm_base_url_when_unset(monkeypatch):
+    """HYDE_BASE_URL 未设置时回退 LLM_BASE_URL（与主 LLM 同服务，节省部署）。"""
+    monkeypatch.setattr(settings, "HYDE_BASE_URL", None)
+    monkeypatch.setattr(settings, "LLM_BASE_URL", "https://api.deepseek.com/v1")
+    h = hyde.QwenHyDE()
+    assert h._base_url == "https://api.deepseek.com/v1"
+    assert h._model == settings.HYDE_MODEL
+
+
+def test_qwen_hyde_uses_custom_base_url(monkeypatch):
+    """HYDE_BASE_URL 设置时优先使用（如指向 Ollama /v1 端点）。"""
+    monkeypatch.setattr(settings, "HYDE_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setattr(settings, "HYDE_MODEL", "qwen2.5:1.5b")
+    h = hyde.QwenHyDE()
+    assert h._base_url == "http://localhost:11434/v1"
+    assert h._model == "qwen2.5:1.5b"
+
+
+def test_qwen_hyde_import_error_raises_hyde_error(monkeypatch):
+    """未安装 openai 包时抛 HyDEError（友好降级提示）。"""
+    import builtins
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "openai":
+            raise ImportError("simulated")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    h = hyde.QwenHyDE()
+    try:
+        h.generate("考勤制度")
+    except hyde.HyDEError as exc:
+        assert "未安装 openai" in str(exc)
+    else:
+        raise AssertionError("应抛 HyDEError")
+
+
 # ---------- 集成：改写对检索查询生效 ----------
 
 

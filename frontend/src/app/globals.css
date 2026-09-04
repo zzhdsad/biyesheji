@@ -2,7 +2,32 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── 主题 CSS 变量（Tailwind darkMode: 'class' 适配）─────────────────────────
+   值与 antd 算法对齐：亮色取 defaultAlgorithm 默认 token，暗色取 darkAlgorithm
+   的经典暗底（#141414 页面 / #1f1f1f 容器），保证 antd 组件与自定义样式一致 */
+:root {
+  --bg-page: #f5f7fa;
+  --bg-surface: #ffffff;
+  --text-primary: rgba(0, 0, 0, 0.88);
+  --text-secondary: rgba(0, 0, 0, 0.65);
+  --border-app: #f0f0f0;
+}
+
+.dark {
+  --bg-page: #141414;
+  --bg-surface: #1f1f1f;
+  --text-primary: rgba(255, 255, 255, 0.85);
+  --text-secondary: rgba(255, 255, 255, 0.65);
+  --border-app: #303030;
+}
+
+html {
+  /* 跟随主题的浏览器原生控件（滚动条/表单自动填充），值由 JS 维护 */
+  color-scheme: light;
+}
+
 body {
-  background: #f5f7fa;
-  color: rgba(0, 0, 0, 0.88);
+  background: var(--bg-page);
+  color: var(--text-primary);
+  transition: background-color 0.2s ease;
 }

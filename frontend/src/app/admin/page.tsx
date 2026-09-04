@@ -1,40 +1,111 @@
 'use client';
 
-import { Card, Col, Row, Statistic } from 'antd';
+import { Alert, Button, Card, Col, Row, Statistic } from 'antd';
 import {
   DatabaseOutlined,
   FileTextOutlined,
   MessageOutlined,
+  ReloadOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
+import { useQuery } from '@tanstack/react-query';
+import { fetchAdminStats } from '@/services/api';
 
-// TODO: 从统计接口获取真实数据
+/**
+ * 系统仪表盘（PRD §5.2）：总文档数 / 知识库数量 / 累计问答数 / 平均响应时间。
+ * 数据来自 GET /admin/stats（仅 admin 可访问），useQuery 管理加载/错误/刷新态。
+ */
 export default function AdminPage() {
+  const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
+    queryKey: ['admin', 'stats'],
+    queryFn: fetchAdminStats,
+    staleTime: 30_000, // 统计数据不需要实时，30s 内不重复请求
+    retry: 1,
+  });
+
+  const isForbidden =
+    isError &&
+    (error as { response?: { status?: number } })?.response?.status === 403;
+
   return (
     <div style={{ padding: 24 }}>
-      <h2 style={{ marginTop: 0 }}>系统仪表盘</h2>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          marginBottom: 16,
+        }}
+      >
+        <h2 style={{ margin: 0 }}>系统仪表盘</h2>
+        <Button
+          icon={<ReloadOutlined />}
+          loading={isFetching}
+          onClick={() => refetch()}
+        >
+          刷新
+        </Button>
+      </div>
+
+      {isForbidden && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="无权访问系统统计"
+          description="系统仪表盘仅管理员可见，如有需要请联系管理员开通权限。"
+        />
+      )}
+
+      {isError && !isForbidden && (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="统计数据加载失败"
+          description="请确认后端服务与数据库正常运行后点击刷新重试。"
+        />
+      )}
+
       <Row gutter={[16, 16]}>
         <Col xs={12} lg={6}>
-          <Card>
-            <Statistic title="文档总数" value={55} prefix={<FileTextOutlined />} />
+          <Card loading={isLoading}>
+            <Statistic
+              title="文档总数"
+              value={data?.total_docs ?? 0}
+              prefix={<FileTextOutlined />}
+            />
           </Card>
         </Col>
         <Col xs={12} lg={6}>
-          <Card>
-            <Statistic title="知识库数量" value={2} prefix={<DatabaseOutlined />} />
+          <Card loading={isLoading}>
+            <Statistic
+              title="知识库数量"
+              value={data?.total_kbs ?? 0}
+              prefix={<DatabaseOutlined />}
+            />
           </Card>
         </Col>
         <Col xs={12} lg={6}>
-          <Card>
-            <Statistic title="累计问答数" value={1320} prefix={<MessageOutlined />} />
+          <Card loading={isLoading}>
+            <Statistic
+              title="累计问答数"
+              value={data?.total_qa ?? 0}
+              prefix={<MessageOutlined />}
+            />
           </Card>
         </Col>
         <Col xs={12} lg={6}>
-          <Card>
+          <Card loading={isLoading}>
             <Statistic
               title="平均响应时间"
-              value={1.8}
-              suffix="s"
+              // 后端返回毫秒；无问答记录时为 0，展示"暂无数据"避免误读为 0.0s
+              value={
+                data && data.avg_latency_ms > 0
+                  ? data.avg_latency_ms / 1000
+                  : '暂无数据'
+              }
+              suffix={data && data.avg_latency_ms > 0 ? 's' : undefined}
               precision={1}
               prefix={<ThunderboltOutlined />}
             />
