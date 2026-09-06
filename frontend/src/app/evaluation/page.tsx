@@ -30,6 +30,8 @@ import {
   ExperimentOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons';
+import { AppLayout } from '@/components/layout/AppLayout';
+import { AdminHeaderRight } from '@/components/layout/AppSider';
 import type {
   EvaluationHistoryItem,
   EvaluationReport,
@@ -289,43 +291,46 @@ export default function EvaluationPage() {
     },
   ];
 
-  return (
-    <div style={{ padding: 24 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16, gap: 16 }}>
-        <Space size={12} align="center">
-          <h2 style={{ margin: 0 }}>
-            <ExperimentOutlined /> 评估面板
-          </h2>
-          <Select
-            style={{ width: 240 }}
-            placeholder="选择知识库"
-            value={selectedKbId ?? undefined}
-            onChange={handleKbChange}
-            options={knowledgeBases.map((kb) => ({ label: kb.name, value: kb.id }))}
-            notFoundContent="暂无知识库"
-          />
-        </Space>
-        <Space>
-          <Button icon={<DownloadOutlined />} onClick={downloadSample}>
-            下载示例测试集
-          </Button>
-          <Upload accept=".json" showUploadList={false} beforeUpload={handleUpload}>
-            <Button icon={<CloudUploadOutlined />} loading={uploading} disabled={!selectedKbId}>
-              上传测试集
-            </Button>
-          </Upload>
-          <Button
-            type="primary"
-            icon={<ThunderboltOutlined />}
-            loading={running}
-            disabled={!selectedKbId}
-            onClick={() => void handleRun()}
-          >
-            运行评估
-          </Button>
-        </Space>
-      </div>
+  const headerLeft = (
+    <Space size={12} align="center">
+      <ExperimentOutlined />
+      <h2 style={{ margin: 0 }}>评估面板</h2>
+      <Select
+        style={{ width: 240 }}
+        placeholder="选择知识库"
+        value={selectedKbId ?? undefined}
+        onChange={handleKbChange}
+        options={knowledgeBases.map((kb) => ({ label: kb.name, value: kb.id }))}
+        notFoundContent="暂无知识库"
+      />
+    </Space>
+  );
 
+  const headerRight = (
+    <Space size="large" align="center">
+      <Button icon={<DownloadOutlined />} onClick={downloadSample}>
+        下载示例测试集
+      </Button>
+      <Upload accept=".json" showUploadList={false} beforeUpload={handleUpload}>
+        <Button icon={<CloudUploadOutlined />} loading={uploading} disabled={!selectedKbId}>
+          上传测试集
+        </Button>
+      </Upload>
+      <Button
+        type="primary"
+        icon={<ThunderboltOutlined />}
+        loading={running}
+        disabled={!selectedKbId}
+        onClick={() => void handleRun()}
+      >
+        运行评估
+      </Button>
+      <AdminHeaderRight />
+    </Space>
+  );
+
+  return (
+    <AppLayout pageTitle="" headerLeft={headerLeft} headerRight={headerRight}>
       {error && (
         <Alert
           type="error"
@@ -448,6 +453,6 @@ export default function EvaluationPage() {
           locale={{ emptyText: '暂无历史评估记录' }}
         />
       </Card>
-    </div>
+    </AppLayout>
   );
 }

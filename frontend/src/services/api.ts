@@ -72,6 +72,30 @@ export async function fetchKnowledgeBases(): Promise<KnowledgeBase[]> {
   return data;
 }
 
+/** 创建知识库（POST /kb，owner_id 由后端从当前登录用户取）。 */
+export async function createKb(payload: {
+  name: string;
+  description?: string;
+  visibility?: 'public' | 'private';
+}): Promise<KnowledgeBase> {
+  const { data } = await api.post<KnowledgeBase>('/kb', payload);
+  return data;
+}
+
+/** 编辑知识库（PUT /kb/{id}，partial update；仅 owner 或 admin 可调用）。 */
+export async function updateKb(
+  kbId: string,
+  payload: Partial<Pick<KnowledgeBase, 'name' | 'description' | 'visibility'>>,
+): Promise<KnowledgeBase> {
+  const { data } = await api.put<KnowledgeBase>(`/kb/${kbId}`, payload);
+  return data;
+}
+
+/** 删除知识库（DELETE /kb/{id}，documents 外键 CASCADE 级联删除）。 */
+export async function deleteKb(kbId: string): Promise<void> {
+  await api.delete(`/kb/${kbId}`);
+}
+
 /** 历史会话列表（按创建时间倒序）。 */
 export async function fetchConversations(): Promise<Conversation[]> {
   const { data } = await api.get<Conversation[]>('/chat/conversations');
@@ -220,5 +244,50 @@ export interface AdminStats {
 /** 系统仪表盘全局统计（GET /admin/stats，仅 admin 可访问）。 */
 export async function fetchAdminStats(): Promise<AdminStats> {
   const { data } = await api.get<AdminStats>('/admin/stats');
+  return data;
+}
+
+// ─────────────────────────── 模型配置 ───────────────────────────
+
+export interface ModelConfig {
+  llm_provider: 'mock' | 'deepseek' | 'openai' | 'qwen' | 'ollama' | 'custom';
+  llm_base_url: string;
+  llm_model: string;
+  llm_api_key: string; // 脱敏值：sk-****xxxx
+  embedding_backend: 'mock' | 'flagembedding';
+  embedding_model: string;
+  embedding_device: 'cpu' | 'cuda';
+  rerank_backend: 'mock' | 'flagreranker';
+  rerank_model: string;
+  rerank_device: 'cpu' | 'cuda';
+  hyde_enabled: boolean;
+  hyde_backend: 'mock' | 'openai';
+  hyde_model: string;
+  hyde_base_url: string;
+}
+
+export interface TestConnectionResult {
+  ok: boolean;
+  message: string;
+  latency_ms?: number;
+}
+
+/** 获取当前模型配置（API key 已脱敏）。 */
+export async function fetchModelConfig(): Promise<ModelConfig> {
+  const { data } = await api.get<ModelConfig>('/settings/model');
+  return data;
+}
+
+/** 更新模型配置（仅 admin）。API key 传脱敏值则保留原值。 */
+export async function updateModelConfig(payload: Partial<ModelConfig>): Promise<ModelConfig> {
+  const { data } = await api.put<ModelConfig>('/settings/model', payload);
+  return data;
+}
+
+/** 测试 LLM 连通性（不保存配置，直接用提交的参数发请求）。 */
+export async function testModelConnection(
+  payload: Partial<ModelConfig>,
+): Promise<TestConnectionResult> {
+  const { data } = await api.post<TestConnectionResult>('/settings/model/test', payload);
   return data;
 }

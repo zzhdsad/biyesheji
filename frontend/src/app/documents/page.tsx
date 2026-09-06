@@ -25,6 +25,8 @@ import type { RcFile, UploadFile } from 'antd/es/upload';
 import type { DocumentItem, ParseStatus } from '@/types';
 import { uploadDocument } from '@/services/api';
 import { isParsing, useDocumentStore } from '@/stores/documentStore';
+import { AppLayout } from '@/components/layout/AppLayout';
+import { AdminHeaderRight } from '@/components/layout/AppSider';
 
 const STATUS_MAP: Record<ParseStatus, { label: string; color: string }> = {
   pending: { label: '待解析', color: 'default' },
@@ -75,11 +77,15 @@ export default function DocumentsPage() {
   } = useDocumentStore();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
 
-  // 初始化：加载知识库（默认选第一个后自动加载文档）
+  // 初始化：加载知识库，并按 URL ?kb_id= 预选（来自「管理文档」跳转）
   useEffect(() => {
+    const qKb = new URLSearchParams(window.location.search).get('kb_id');
     void loadKnowledgeBases().then(() => {
-      // selectKb 已在 store 中触发 loadDocuments，但首次无选中时也需全量加载
-      void loadDocuments();
+      if (qKb) {
+        selectKb(qKb);
+      } else {
+        void loadDocuments();
+      }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -217,39 +223,40 @@ export default function DocumentsPage() {
     },
   ];
 
-  return (
-    <div style={{ padding: 24 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16, gap: 16 }}>
-        <Space size={12} align="center">
-          <h2 style={{ margin: 0 }}>文档管理</h2>
-          <Select
-            size="middle"
-            style={{ width: 220 }}
-            placeholder="选择知识库筛选"
-            value={selectedKbId ?? undefined}
-            loading={loadingKbs}
-            onChange={selectKb}
-            options={knowledgeBases.map((kb) => ({ label: kb.name, value: kb.id }))}
-            notFoundContent="暂无知识库"
-          />
-        </Space>
-        <Upload
-          fileList={fileList}
-          multiple
-          accept={ACCEPT}
-          showUploadList
-          customRequest={handleUpload}
-          disabled={!selectedKbId}
-          onChange={({ fileList: fl }) => setFileList(fl)}
-        >
-          <Tooltip title={!selectedKbId ? '请先选择知识库' : '支持 PDF / DOCX / TXT / MD，可多选'}>
-            <Button type="primary" icon={<CloudUploadOutlined />} disabled={!selectedKbId}>
-              上传文档
-            </Button>
-          </Tooltip>
-        </Upload>
-      </div>
+  const headerLeft = <h2 style={{ margin: 0 }}>文档管理</h2>;
+  const headerRight = (
+    <Space size="large" align="center">
+      <Select
+        size="middle"
+        style={{ width: 220 }}
+        placeholder="选择知识库筛选"
+        value={selectedKbId ?? undefined}
+        loading={loadingKbs}
+        onChange={selectKb}
+        options={knowledgeBases.map((kb) => ({ label: kb.name, value: kb.id }))}
+        notFoundContent="暂无知识库"
+      />
+      <Upload
+        fileList={fileList}
+        multiple
+        accept={ACCEPT}
+        showUploadList
+        customRequest={handleUpload}
+        disabled={!selectedKbId}
+        onChange={({ fileList: fl }) => setFileList(fl)}
+      >
+        <Tooltip title={!selectedKbId ? '请先选择知识库' : '支持 PDF / DOCX / TXT / MD，可多选'}>
+          <Button type="primary" icon={<CloudUploadOutlined />} disabled={!selectedKbId}>
+            上传文档
+          </Button>
+        </Tooltip>
+      </Upload>
+      <AdminHeaderRight />
+    </Space>
+  );
 
+  return (
+    <AppLayout pageTitle="" headerLeft={headerLeft} headerRight={headerRight}>
       {error && (
         <Alert
           type="error"
@@ -270,6 +277,6 @@ export default function DocumentsPage() {
         pagination={{ pageSize: 10, showSizeChanger: true }}
         locale={{ emptyText: selectedKbId ? '该知识库暂无文档' : '请选择知识库查看文档' }}
       />
-    </div>
+    </AppLayout>
   );
 }

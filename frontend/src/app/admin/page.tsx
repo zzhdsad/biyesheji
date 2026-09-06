@@ -1,7 +1,8 @@
 'use client';
 
-import { Alert, Button, Card, Col, Row, Statistic } from 'antd';
+import { Alert, Button, Card, Col, Row, Space, Statistic } from 'antd';
 import {
+  DashboardOutlined,
   DatabaseOutlined,
   FileTextOutlined,
   MessageOutlined,
@@ -10,6 +11,8 @@ import {
 } from '@ant-design/icons';
 import { useQuery } from '@tanstack/react-query';
 import { fetchAdminStats } from '@/services/api';
+import { AppLayout } from '@/components/layout/AppLayout';
+import { AdminHeaderRight } from '@/components/layout/AppSider';
 
 /**
  * 系统仪表盘（PRD §5.2）：总文档数 / 知识库数量 / 累计问答数 / 平均响应时间。
@@ -27,26 +30,23 @@ export default function AdminPage() {
     isError &&
     (error as { response?: { status?: number } })?.response?.status === 403;
 
-  return (
-    <div style={{ padding: 24 }}>
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          marginBottom: 16,
-        }}
-      >
-        <h2 style={{ margin: 0 }}>系统仪表盘</h2>
-        <Button
-          icon={<ReloadOutlined />}
-          loading={isFetching}
-          onClick={() => refetch()}
-        >
-          刷新
-        </Button>
-      </div>
+  const headerLeft = (
+    <Space size="middle" align="center">
+      <DashboardOutlined style={{ fontSize: 20 }} />
+      <h2 style={{ margin: 0 }}>系统仪表盘</h2>
+    </Space>
+  );
+  const headerRight = (
+    <Space size="large" align="center">
+      <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>
+        刷新
+      </Button>
+      <AdminHeaderRight />
+    </Space>
+  );
 
+  return (
+    <AppLayout pageTitle="" headerLeft={headerLeft} headerRight={headerRight}>
       {isForbidden && (
         <Alert
           type="warning"
@@ -117,6 +117,6 @@ export default function AdminPage() {
         评估面板建设中：上传测试集（问题-标准答案-上下文）后可运行 RAGAS 评估，
         展示上下文相关度与答案正确率。
       </Card>
-    </div>
+    </AppLayout>
   );
 }

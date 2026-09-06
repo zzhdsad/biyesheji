@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { streamSSE } from '@/hooks/useSSE';
 import type { ChatMessage, Conversation, HealthResponse, KnowledgeBase } from '@/types';
 import {
+  createKb as apiCreateKb,
   fetchConversations,
   fetchHealth,
   fetchKnowledgeBases,
@@ -23,6 +24,8 @@ interface ChatState {
   health: HealthResponse | null;
   // 动作
   loadKnowledgeBases: () => Promise<void>;
+  /** 创建知识库（成功后自动选中新库并刷新列表）。 */
+  createKb: (name: string, description?: string, visibility?: 'public' | 'private') => Promise<KnowledgeBase | null>;
   selectKb: (kbId: string) => void;
   loadConversations: () => Promise<void>;
   selectConversation: (conversationId: string) => Promise<void>;
@@ -58,6 +61,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   selectKb: (kbId: string) => set({ selectedKbId: kbId }),
+
+  createKb: async (name, description, visibility) => {
+    try {
+      const kb = await apiCreateKb({ name, description, visibility });
+      // 创建后立即把新库插入列表头部并选中（避免重新拉全量列表的等待）
+      set((s) => ({
+        knowledgeBases: [kb, ...s.knowledgeBases],
+        selectedKbId: kb.id,
+      }));
+      return kb;
+    } catch {
+      return null;
+    }
+  },
 
   loadConversations: async () => {
     set({ loadingConversations: true });
