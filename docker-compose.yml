@@ -80,6 +80,8 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-knowledge_platform}
       REDIS_URL: redis://redis:6379/0
       MILVUS_URI: http://milvus:19530
+      # HuggingFace 国内镜像，加速 BGE-M3 / BGE-Reranker 模型下载
+      HF_ENDPOINT: https://hf-mirror.com
     ports:
       - "8000:8000"
     depends_on:

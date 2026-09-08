@@ -6,6 +6,7 @@ BGE-M3 稀疏向量为 lexical weights（token_id → 权重），与 Milvus SPA
 
 import hashlib
 import math
+import threading
 from abc import ABC, abstractmethod
 
 from loguru import logger
@@ -36,19 +37,21 @@ class BGE3Embedding(BaseEmbedding):
     模型约 2.3GB，首次使用自动下载；延迟导入避免未安装 FlagEmbedding 时影响启动。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, model_name: str | None = None, device: str | None = None) -> None:
         try:
             from FlagEmbedding import BGEM3FlagModel
         except ImportError as exc:
             raise EmbeddingError(
                 "未安装 FlagEmbedding，无法使用 BGE-M3 向量化。"
-                "请安装：pip install FlagEmbedding，或在 .env 设置 EMBEDDING_BACKEND=mock"
+                "请安装：pip install FlagEmbedding，或在设置页选择 mock 向量化"
             ) from exc
-        logger.info(f"加载 BGE-M3 模型（device={settings.EMBEDDING_DEVICE}）…")
+        _model = model_name or settings.EMBEDDING_MODEL
+        _device = device or settings.EMBEDDING_DEVICE
+        logger.info(f"加载 BGE-M3 模型（device={_device}）…")
         self._model = BGEM3FlagModel(
-            settings.EMBEDDING_MODEL,
-            use_fp16=settings.EMBEDDING_DEVICE != "cpu",
-            device=settings.EMBEDDING_DEVICE,
+            _model,
+            use_fp16=_device != "cpu",
+            device=_device,
         )
 
     def encode(self, texts: list[str]) -> tuple[list[list[float]], list[dict[int, float]]]:
@@ -97,11 +100,44 @@ class MockEmbedding(BaseEmbedding):
         return dense, sparse
 
 
-def get_embedding() -> BaseEmbedding:
-    """按 EMBEDDING_BACKEND 创建向量化实现（工厂）。"""
-    backend = settings.EMBEDDING_BACKEND
-    if backend == "flagembedding":
-        return BGE3Embedding()
+# 模块级单槽缓存：(配置 key, 实例)。BGE-M3 加载 2.3GB 耗时数十秒，
+# 每次提问/每个后台任务重建实例会打爆内存与 CPU；配置变更时替换旧引用。
+_embedding_cache: tuple[tuple, BaseEmbedding] | None = None
+_embedding_lock = threading.Lock()
+
+
+def _resolve_config(config: dict | None) -> tuple[str, str, str]:
+    """解析生效配置（None/空值回退 env），key 与构造参数用同一组结果。"""
+    c = config or {}
+    backend = (c.get("embedding_backend") or settings.EMBEDDING_BACKEND).lower()
+    model = c.get("embedding_model") or settings.EMBEDDING_MODEL
+    device = (c.get("embedding_device") or settings.EMBEDDING_DEVICE).lower()
+    return backend, model, device
+
+
+def get_embedding(config: dict | None = None) -> BaseEmbedding:
+    """按 EMBEDDING_BACKEND 创建/复用向量化实现（工厂 + 单例缓存）。
+
+    Args:
+        config: 运行时配置（DB），含 embedding_backend/embedding_model/embedding_device；
+                None 时回退 env。
+
+    缓存策略：按 (backend, model, device) 单槽缓存实例，命中直接复用
+    （避免重复加载 2.3GB 模型）；配置变更时重建并替换旧实例。线程安全。
+    """
+    global _embedding_cache
+    backend, model, device = _resolve_config(config)
+
     if backend == "mock":
         return MockEmbedding()
-    raise EmbeddingError(f"未知 EMBEDDING_BACKEND：{backend}")
+
+    if backend != "flagembedding":
+        raise EmbeddingError(f"未知 EMBEDDING_BACKEND：{backend}")
+
+    key = (backend, model, device)
+    with _embedding_lock:
+        if _embedding_cache is not None and _embedding_cache[0] == key:
+            return _embedding_cache[1]
+        inst = BGE3Embedding(model_name=model, device=device)
+        _embedding_cache = (key, inst)
+        return inst

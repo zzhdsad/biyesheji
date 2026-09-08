@@ -1,0 +1,39 @@
+INFO:     127.0.0.1:65259 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65300 - "POST /api/v1/auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65300 - "GET /api/v1/documents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:65300 - "POST /api/v1/documents/680840b6-91d5-42cb-9d4b-aa6c358c16f0/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:65300 - "POST /api/v1/documents/76806a6a-b99a-4be9-be47-2c40a40c65d3/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:65300 - "POST /api/v1/documents/92bb9ac8-db76-47bd-a102-9a839dd30021/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:64621 - "POST /api/v1/auth/login HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64621 - "GET /api/v1/documents HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64621 - "POST /api/v1/documents/680840b6-91d5-42cb-9d4b-aa6c358c16f0/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:64621 - "POST /api/v1/documents/76806a6a-b99a-4be9-be47-2c40a40c65d3/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:64621 - "POST /api/v1/documents/92bb9ac8-db76-47bd-a102-9a839dd30021/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:64621 - "POST /api/v1/documents/8ffed2a9-76ff-4ef6-bbbb-0fa5f189feba/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:64621 - "POST /api/v1/documents/f2c03040-869d-4495-a822-2539e8d27198/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:64621 - "POST /api/v1/documents/da704a30-fb7a-493d-a7a9-dfc8a51e5d14/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:64621 - "POST /api/v1/documents/99d8e491-9127-4413-99f5-ab3bab7ec5d5/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:64621 - "POST /api/v1/documents/5d54c507-3c6f-4e48-aa25-713d58847a67/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:64621 - "POST /api/v1/documents/71be497d-1b9c-4534-8615-c67ae6fbcc2c/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:64621 - "POST /api/v1/documents/09a60789-3a59-49fd-955b-b34d250b21c4/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:64621 - "POST /api/v1/documents/545837a5-1929-4064-aa9f-88ced67eb78c/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:64621 - "POST /api/v1/documents/7d967fa9-17cd-47a5-bcf8-47cab95d0c3a/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:50950 - "POST /api/v1/documents/f7fdbbd1-d756-4aac-abba-3b0e6c7c440f/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:50965 - "POST /api/v1/documents/46b995f2-04f1-47de-9f7d-857ba5150d0a/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:50965 - "POST /api/v1/documents/e0f408cc-e7a2-4b09-8b45-2c7a9754457b/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:50965 - "POST /api/v1/documents/0af62885-00cd-40f9-874d-4bd896c7a352/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:50965 - "POST /api/v1/documents/5f87e25c-7565-4044-8e5a-0b5bfee4179f/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:57832 - "POST /api/v1/documents/8dbaf1ef-66e4-4075-9726-8a4a31f16acd/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:57832 - "POST /api/v1/documents/72a7c060-ad31-4f1b-a01a-f1c623b94b4a/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:57832 - "POST /api/v1/documents/fb894894-d3f0-4053-9d7f-4d0fe7894903/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:57832 - "POST /api/v1/documents/f06a1bc4-9887-45ab-9b0c-812d611cb55f/reindex HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:51636 - "POST /api/v1/documents/8a1d4c9f-7ada-4a5c-b82d-5645de8a9964/reindex HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:64035 - "POST /api/v1/documents/a28790f7-f1dc-4347-a8e3-849b83129a5c/reindex HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:53628 - "POST /api/v1/documents/e35cf933-0f21-4ae9-9025-a85ef0061f77/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:53628 - "POST /api/v1/documents/a3b2d587-9fc6-4220-a698-4050ff419638/reindex HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:50750 - "POST /api/v1/documents/746d58c7-c802-417e-86eb-3c12670ab8fa/reindex HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:50761 - "POST /api/v1/documents/241f4567-d061-4cb2-92f7-c10e223b7a87/reindex HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:52980 - "POST /api/v1/documents/f8a4aa27-ae78-41c3-901b-1c947ee04406/reindex HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:62767 - "POST /api/v1/documents/1788a263-35dc-476e-9e5f-7ee3a5b889dd/reindex HTTP/1.1" 202 Accepted
+INFO:     127.0.0.1:62767 - "POST /api/v1/documents/b73ed6da-cf40-4bf5-9523-96f74b1675c8/reindex HTTP/1.1" 500 Internal Server Error
+INFO:     127.0.0.1:60520 - "POST /api/v1/documents/f212f02d-5157-4391-8282-bdeb6edd1721/reindex HTTP/1.1" 500 Internal Server Error

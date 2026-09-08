@@ -36,6 +36,14 @@ class KnowledgeBaseOut(KnowledgeBaseCreate):
     owner_id: uuid.UUID
 
 
+class KnowledgeBaseUpdate(BaseModel):
+    """编辑知识库（partial update）：仅传入的字段被更新。"""
+
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    description: str | None = Field(default=None, max_length=2000)
+    visibility: str | None = Field(default=None, pattern="^(public|private)$")
+
+
 @router.post("", response_model=KnowledgeBaseOut, status_code=201)
 async def create_kb(
     payload: KnowledgeBaseCreate,
@@ -101,6 +109,35 @@ async def delete_kb(
     await db.delete(kb)
     await db.commit()
     return {"id": str(kb_id), "deleted": True}
+
+
+@router.put("/{kb_id}", response_model=KnowledgeBaseOut)
+async def update_kb(
+    kb_id: uuid.UUID,
+    payload: KnowledgeBaseUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> KnowledgeBase:
+    """编辑知识库元信息（partial update）。
+
+    安全：仅 KB owner 或 admin 可编辑。只更新请求中显式传入的字段。
+    """
+    user: User = request.state.user
+    kb = await db.get(KnowledgeBase, kb_id)
+    if kb is None:
+        raise NotFoundError("知识库不存在")
+
+    if user.role != "admin" and kb.owner_id != user.id:
+        raise PermissionDeniedError("无权编辑该知识库")
+
+    # exclude_unset=True：未传入的字段保持原值（partial update）
+    changes = payload.model_dump(exclude_unset=True)
+    for field, value in changes.items():
+        setattr(kb, field, value)
+
+    await db.commit()
+    await db.refresh(kb)
+    return kb
 
 
 @router.get("/{kb_id}/members")

@@ -158,3 +158,32 @@ class Feedback(Base, TimestampMixin):
     )
     rating: Mapped[int] = mapped_column(Integer)  # 1 赞 / -1 踩
     comment: Mapped[str] = mapped_column(Text, default="")
+
+
+class ModelConfig(Base, TimestampMixin):
+    """全局模型配置（单行表，id=1），用户在前端设置页动态配置。
+
+    运行时优先读此表；为空时 fallback 到 .env 环境变量。
+    """
+
+    __tablename__ = "model_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    # LLM 生成
+    llm_provider: Mapped[str] = mapped_column(String(32), default="mock")  # deepseek/openai/qwen/ollama/custom
+    llm_base_url: Mapped[str] = mapped_column(String(512), default="")
+    llm_model: Mapped[str] = mapped_column(String(128), default="")
+    llm_api_key: Mapped[str] = mapped_column(String(512), default="")
+    # Embedding
+    embedding_backend: Mapped[str] = mapped_column(String(32), default="mock")  # mock/flagembedding
+    embedding_model: Mapped[str] = mapped_column(String(128), default="BAAI/bge-m3")
+    embedding_device: Mapped[str] = mapped_column(String(16), default="cpu")
+    # Rerank
+    rerank_backend: Mapped[str] = mapped_column(String(32), default="mock")  # mock/flagreranker
+    rerank_model: Mapped[str] = mapped_column(String(128), default="BAAI/bge-reranker-v2-m3")
+    rerank_device: Mapped[str] = mapped_column(String(16), default="cpu")
+    # HyDE
+    hyde_enabled: Mapped[bool] = mapped_column(default=True)
+    hyde_backend: Mapped[str] = mapped_column(String(32), default="mock")  # mock/openai
+    hyde_model: Mapped[str] = mapped_column(String(128), default="")
+    hyde_base_url: Mapped[str] = mapped_column(String(512), default="")

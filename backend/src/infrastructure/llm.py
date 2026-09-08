@@ -36,12 +36,12 @@ class BaseLLM(ABC):
 
 
 class OpenAICompatibleLLM(BaseLLM):
-    """OpenAI 兼容 /chat/completions（vLLM、Ollama 等均支持）。"""
+    """OpenAI 兼容 /chat/completions（vLLM、Ollama、DeepSeek 等均支持）。"""
 
-    def __init__(self, base_url: str | None = None, model: str | None = None) -> None:
+    def __init__(self, base_url: str | None = None, model: str | None = None, api_key: str | None = None) -> None:
         self._base_url = (base_url or settings.LLM_BASE_URL).rstrip("/")
         self._model = model or settings.LLM_MODEL
-        self._api_key = settings.LLM_API_KEY
+        self._api_key = api_key if api_key is not None else settings.LLM_API_KEY
 
     async def chat(self, messages: list[Message]) -> str:
         payload = {
@@ -145,11 +145,21 @@ class MockLLM(BaseLLM):
         )
 
 
-def get_llm() -> BaseLLM:
-    """按 LLM_BACKEND 创建客户端（工厂）。"""
-    backend = settings.LLM_BACKEND
-    if backend == "openai":
-        return OpenAICompatibleLLM()
+def get_llm(config: dict | None = None) -> BaseLLM:
+    """按 LLM_BACKEND 创建客户端（工厂）。
+
+    Args:
+        config: 运行时配置（来自 DB），含 llm_base_url/llm_model/llm_api_key；
+                为 None 时回退到 .env 环境变量。
+    """
+    backend = (config or {}).get("llm_provider") or settings.LLM_BACKEND
+    # deepseek/openai/qwen/ollama/custom 都走 OpenAI 兼容协议
+    if backend in ("openai", "deepseek", "qwen", "ollama", "custom"):
+        return OpenAICompatibleLLM(
+            base_url=(config or {}).get("llm_base_url"),
+            model=(config or {}).get("llm_model"),
+            api_key=(config or {}).get("llm_api_key"),
+        )
     if backend == "mock":
         return MockLLM()
     raise LLMError(f"未知 LLM_BACKEND：{backend}")

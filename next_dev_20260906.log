@@ -1,0 +1,52 @@
+
+> knowledge-platform-frontend@0.1.0 dev
+> next dev
+
+  ▲ Next.js 14.2.5
+  - Local:        http://localhost:3000
+
+ ✓ Starting...
+ ✓ Ready in 2.6s
+ ✓ Compiled /src/middleware in 228ms (73 modules)
+ ○ Compiling /login ...
+ ✓ Compiled /login in 4.5s (5460 modules)
+ GET /login?redirect=%2F 200 in 5070ms
+ ○ Compiling / ...
+ ✓ Compiled / in 24.8s (3640 modules)
+ GET / 307 in 27154ms
+ ○ Compiling /chat ...
+ ✓ Compiled /chat in 11.5s (5770 modules)
+ ○ Compiling /_not-found ...
+ ✓ Compiled /_not-found in 1606ms (5759 modules)
+ ○ Compiling /login ...
+ ✓ Compiled /login in 743ms (2778 modules)
+ GET /login?redirect=%2F 200 in 2364ms
+ ○ Compiling / ...
+ ✓ Compiled / in 741ms (943 modules)
+ GET / 307 in 2387ms
+ ○ Compiling /chat ...
+ ✓ Compiled /chat in 934ms (2910 modules)
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+ GET /chat 200 in 3009ms
+ GET / 307 in 83ms
+ GET /chat 200 in 245ms
+(node:5464) [DEP0060] DeprecationWarning: The `util._extend` API is deprecated. Please use Object.assign() instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+ ○ Compiling /_not-found ...
+ ✓ Compiled /login in 1822ms (5759 modules)
+ ✓ Compiled (5800 modules)
+ GET /@vite/client 404 in 2638ms
+ ⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+ ⚠ Fast Refresh had to perform a full reload. Read more: https://nextjs.org/docs/messages/fast-refresh-reload
+ GET /login?redirect=%2Fchat 200 in 1079ms
+ GET /_next/static/webpack/4068c288335dc80d.webpack.hot-update.json 404 in 1534ms
+ GET /_next/static/webpack/4068c288335dc80d.webpack.hot-update.json 404 in 1517ms
+Warning: [antd: Modal] `destroyOnClose` is deprecated. Please use `destroyOnHidden` instead.
+ GET /chat 200 in 245ms
+ GET /login?redirect=%2Fchat 200 in 117ms
+ GET /_next/static/chunks/app/login/page.js 404 in 79ms
+ GET /login?redirect=%2F%40vite%2Fclient 200 in 56ms
+ GET /chat 200 in 175ms
+ GET /chat 200 in 140ms
+ GET /chat 200 in 143ms
+ GET /chat 200 in 128ms

@@ -65,10 +65,11 @@ class QwenHyDE(BaseHyDE):
     依赖：``pip install openai``
     """
 
-    def __init__(self, model: str | None = None, base_url: str | None = None) -> None:
+    def __init__(self, model: str | None = None, base_url: str | None = None, api_key: str | None = None) -> None:
         self._model = model or settings.HYDE_MODEL
         # 优先用 HYDE_BASE_URL；为空则回退 LLM_BASE_URL（与主 LLM 同服务，节省部署）
         self._base_url = base_url or settings.HYDE_BASE_URL or settings.LLM_BASE_URL
+        self._api_key = api_key if api_key is not None else settings.LLM_API_KEY
         self._client = None  # 实例级缓存，进程内只创建一次 OpenAI client
 
     def _get_client(self):
@@ -81,8 +82,9 @@ class QwenHyDE(BaseHyDE):
                     "，或在 .env 设置 HYDE_BACKEND=mock"
                 ) from exc
             try:
-                # Ollama 不需要 api_key，传 "none" 占位即可
-                self._client = OpenAI(base_url=self._base_url, api_key="none")
+                # 复用主 LLM 的 API Key（DeepSeek 等需要鉴权；本地 Ollama 传 "none" 也兼容）
+                api_key = self._api_key or "none"
+                self._client = OpenAI(base_url=self._base_url, api_key=api_key)
                 logger.info(
                     f"HyDE 客户端就绪 model={self._model} base_url={self._base_url}"
                 )
@@ -129,29 +131,40 @@ OpenAIHyDE = QwenHyDE
 _hyde: BaseHyDE | None = None
 
 
-def get_hyde() -> BaseHyDE | None:
+def get_hyde(config: dict | None = None) -> BaseHyDE | None:
     """工厂：``HYDE_ENABLED`` 关闭时返回 None；开启时按 ``HYDE_BACKEND`` 注入。
 
-    默认开启（TECH_DESIGN §4.5 / 用户需求：HYDE_ENABLED=true）；
-    开发期无小模型服务时设 ``HYDE_BACKEND=mock`` 用确定性伪改写，
-    或设 ``HYDE_ENABLED=false`` 完全跳过改写。
+    Args:
+        config: 运行时配置（DB），含 hyde_enabled/hyde_backend/hyde_model/hyde_base_url/llm_api_key
     """
     global _hyde
-    if _hyde is not None:
+    if config is None:
+        if _hyde is not None:
+            return _hyde
+        if not settings.HYDE_ENABLED:
+            return None
+        backend = settings.HYDE_BACKEND.lower()
+        if backend == "openai":
+            _hyde = QwenHyDE()
+            logger.info(
+                f"HyDE 使用 OpenAI 兼容实现（model={settings.HYDE_MODEL}, "
+                f"base_url={settings.HYDE_BASE_URL or 'LLM_BASE_URL'})"
+            )
+        else:
+            _hyde = MockHyDE()
+            logger.info("HyDE 使用 mock 实现（开发模式）")
         return _hyde
-    if not settings.HYDE_ENABLED:
+
+    if not config.get("hyde_enabled", True):
         return None
-    backend = settings.HYDE_BACKEND.lower()
+    backend = (config.get("hyde_backend") or settings.HYDE_BACKEND).lower()
     if backend == "openai":
-        _hyde = QwenHyDE()
-        logger.info(
-            f"HyDE 使用 OpenAI 兼容实现（model={settings.HYDE_MODEL}, "
-            f"base_url={settings.HYDE_BASE_URL or 'LLM_BASE_URL'})"
+        return QwenHyDE(
+            model=config.get("hyde_model"),
+            base_url=config.get("hyde_base_url"),
+            api_key=config.get("llm_api_key"),
         )
-    else:
-        _hyde = MockHyDE()
-        logger.info("HyDE 使用 mock 实现（开发模式）")
-    return _hyde
+    return MockHyDE()
 
 
 def set_hyde(hyde: BaseHyDE | None) -> None:

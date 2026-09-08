@@ -28,6 +28,13 @@ minio>=7.2
 pypdf>=4.0
 python-docx>=1.1
 
+# AI 依赖
+# openai：HyDE 假设答案生成走 OpenAI 兼容 SDK（DeepSeek/Qwen/Ollama 等）
+openai>=1.40
+# FlagEmbedding（BGE-M3 向量化 + BGE-Reranker 精排）按需安装：
+# pip install FlagEmbedding（约 2.3GB 模型，首次运行自动下载）
+# 安装后在设置页将 Embedding/Rerank 后端切换为 flagembedding/flagreranker
+
 # 测试
 pytest>=8.2
 pytest-asyncio>=0.23

@@ -21,6 +21,7 @@ from src.infrastructure.milvus_store import (
     VectorStoreError,
     get_vector_store,
 )
+from src.application.model_config_service import get_effective_config_cached
 
 
 class IndexingService:
@@ -33,8 +34,17 @@ class IndexingService:
         store: BaseVectorStore | None = None,
     ) -> None:
         self.db = db
-        self.embedding = embedding or get_embedding()
+        self.embedding = embedding
         self.store = store or get_vector_store()
+        self._config_loaded = False
+
+    async def _ensure_embedding(self) -> None:
+        if self._config_loaded:
+            return
+        self._config_loaded = True
+        if self.embedding is None:
+            cfg = await get_effective_config_cached(self.db)
+            self.embedding = get_embedding(cfg)
 
     async def run(self, doc_id: uuid.UUID) -> Document:
         """向量化指定文档的全部切片并写入 Milvus。
@@ -46,7 +56,9 @@ class IndexingService:
         doc = await self.db.get(Document, doc_id)
         if doc is None:
             raise NotFoundError("文档不存在")
-        if doc.parse_status != "success":
+        # success（切片就绪）/ completed（重建向量）/ failed（向量化失败重试，切片保留）
+        # 均可向量化；failed 但无切片时由下方"文档无切片"分支兜底报 422
+        if doc.parse_status not in ("success", "completed", "failed"):
             raise AppException(
                 409, f"文档切片未就绪（parse_status={doc.parse_status}），请先完成解析"
             )
@@ -61,6 +73,9 @@ class IndexingService:
 
         chunks = sorted(chunks, key=lambda c: c.chunk_index)
         started_at = asyncio.get_event_loop().time()
+
+        # 惰性加载运行时配置并初始化 embedding
+        await self._ensure_embedding()
 
         # CPU/GPU 密集的向量化放线程池，避免阻塞事件循环
         try:

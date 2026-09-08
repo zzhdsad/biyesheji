@@ -130,7 +130,7 @@ def _run_vectorize_safely(doc_id: str) -> None:
     try:
         run_vectorize(doc_id)
     except Exception:
-        logger.error(f"后台向量化任务执行失败 doc_id={doc_id}")
+        logger.exception(f"后台向量化任务执行失败 doc_id={doc_id}")
 
 
 # ── 端点实现 ────────────────────────────────────────────────────────────────
@@ -171,7 +171,7 @@ async def upload_document(
     file: UploadFile = File(...),
     db: AsyncSession = Depends(get_db),
 ) -> Document:
-    """上传文档（PDF/DOCX/TXT）。
+    """上传文档（PDF/DOCX/TXT/MD）。
 
     安全：权限校验已集成到 DocumentService.upload 内部，
     校验顺序为：文件类型 (400) → 文件大小 (400) → KB 存在性 (404) → KB 权限 (403)。

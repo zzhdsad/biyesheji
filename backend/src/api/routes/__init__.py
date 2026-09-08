@@ -17,6 +17,7 @@ from src.api.routes import (
     evaluation,
     feedbacks,
     knowledge_bases,
+    settings,
 )
 from src.core.deps import get_current_user
 
@@ -36,6 +37,7 @@ protected_router.include_router(knowledge_bases.router)
 protected_router.include_router(evaluation.router)
 protected_router.include_router(feedbacks.router)  # PRD §3.6：用户反馈收集
 protected_router.include_router(admin.router)  # PRD §5.2：系统仪表盘统计（仅 admin）
+protected_router.include_router(settings.router)  # 模型配置（LLM/Embedding/Rerank/HyDE）
 
 # ── 聚合 ─────────────────────────────────────────────────────────────────────
 api_router = APIRouter()

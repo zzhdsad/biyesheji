@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     RECALL_TOP_K: int = 50  # 每路召回数量（送入 RRF 融合）
     RERANK_TOP_N: int = 5  # 精排后返回给 LLM 的最终数量
     RRF_K: int = 60  # RRF 融合平滑常数
+    # 相关性门槛（PRD §8.3 幻觉兜底）：Top 候选的稠密语义相似度均低于该值时拒答，
+    # 防止"仅词语重叠、答非所问"的检索结果（如问"你觉得产品如何"命中 PRD 描述）送入 LLM
+    RELEVANCE_THRESHOLD: float = 0.5
     # mock（确定性伪重排，开发/测试）/ flagreranker（BGE-Reranker-v2-m3 真实精排）
     RERANK_BACKEND: str = "mock"
     RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"  # HuggingFace 模型 ID

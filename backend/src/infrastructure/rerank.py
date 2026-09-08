@@ -11,6 +11,8 @@ TECH_DESIGN §1.4 / §4.3：BGE-Reranker-v2-m3（Cross-Encoder）对 Top-K 精�
 
 from __future__ import annotations
 
+import threading
+
 from loguru import logger
 
 from src.core.config import settings
@@ -69,12 +71,13 @@ class BGERerank(BaseRerank):
     """
 
     # 历史别名（向后兼容旧引用）
-    def __init__(self, model_name: str | None = None) -> None:
+    def __init__(self, model_name: str | None = None, device: str | None = None) -> None:
         # 优先用本地路径（如配置），否则用 HuggingFace 模型 ID
         self._local_path: str | None = settings.RERANK_MODEL_PATH or None
         self._model_name: str = (
             model_name or self._local_path or settings.RERANK_MODEL
         )
+        self._device = device or settings.RERANK_DEVICE
         self._model = None  # 实例级缓存，首次调用 _get_model() 时加载
 
     def _get_model(self):
@@ -98,14 +101,14 @@ class BGERerank(BaseRerank):
             ) from exc
 
         # CPU 设备禁用 fp16（半精度在 CPU 上不支持/无加速），GPU 才开启
-        use_fp16 = settings.RERANK_DEVICE != "cpu"
+        use_fp16 = self._device != "cpu"
         load_from = (
             f"本地路径={self._local_path}"
             if self._local_path
             else f"HuggingFace ID={self._model_name}"
         )
         logger.info(
-            f"Reranker 首次加载中（{load_from}, device={settings.RERANK_DEVICE}, "
+            f"Reranker 首次加载中（{load_from}, device={self._device}, "
             f"use_fp16={use_fp16}）… 首次加载约 2.3GB，可能耗时较长…"
         )
         try:
@@ -157,25 +160,45 @@ class BGERerank(BaseRerank):
 FlagRerankerModel = BGERerank
 
 
-_rerank: BaseRerank | None = None
+# 模块级单槽缓存：(配置 key, 实例)。FlagReranker 加载 2.3GB，
+# 传 config 的调用（运行时 DB 配置）此前每次新建实例，导致重复加载。
+_rerank_cache: tuple[tuple, BaseRerank] | None = None
+_rerank_lock = threading.Lock()
+
+_rerank: BaseRerank | None = None  # 仅 env 路径 / 测试注入用
 
 
-def get_rerank() -> BaseRerank:
-    """工厂单例：按 RERANK_BACKEND 注入（mock / flagreranker）。
+def _resolve_rerank_config(config: dict | None) -> tuple[str, str, str]:
+    """解析生效配置（None/空值回退 env），与 BGERerank.__init__ 语义一致。"""
+    c = config or {}
+    backend = (c.get("rerank_backend") or settings.RERANK_BACKEND).lower()
+    model = c.get("rerank_model") or settings.RERANK_MODEL_PATH or settings.RERANK_MODEL
+    device = (c.get("rerank_device") or settings.RERANK_DEVICE).lower()
+    return backend, model, device
 
-    模块级单例 _rerank 跨调用复用，确保 BGE-Reranker 模型在进程内只加载一次。
+
+def get_rerank(config: dict | None = None) -> BaseRerank:
+    """工厂：按 RERANK_BACKEND 注入（mock / flagreranker），单槽缓存。
+
+    缓存策略：按 (backend, model, device) 缓存实例，命中直接复用；
+    配置变更时重建并替换。线程安全（调用方可能在 to_thread 中）。
     """
-    global _rerank
-    if _rerank is not None:
-        return _rerank
-    backend = settings.RERANK_BACKEND.lower()
-    if backend == "flagreranker":
-        _rerank = BGERerank()
-        logger.info("Reranker 后端：flagreranker（BGE-Reranker-v2-m3 真实精排）")
-    else:
-        _rerank = MockRerank()
-        logger.info("Reranker 后端：mock（开发模式，无模型依赖）")
-    return _rerank
+    global _rerank_cache, _rerank
+    backend, model, device = _resolve_rerank_config(config)
+
+    if backend == "mock":
+        return MockRerank()
+    if backend != "flagreranker":
+        raise RerankError(f"未知 RERANK_BACKEND：{backend}")
+
+    key = (backend, model, device)
+    with _rerank_lock:
+        if _rerank_cache is not None and _rerank_cache[0] == key:
+            return _rerank_cache[1]
+        inst = BGERerank(model_name=model, device=device)
+        _rerank_cache = (key, inst)
+        _rerank = inst  # 兼容旧单例引用
+        return inst
 
 
 def set_rerank(rerank: BaseRerank | None) -> None:
