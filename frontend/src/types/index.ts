@@ -3,7 +3,7 @@
 // ─────────────────────────── 鉴权 ───────────────────────────
 
 /** 用户角色（与后端 User.role 对应）。 */
-export type UserRole = 'admin' | 'member';
+export type UserRole = 'admin' | 'member' | 'viewer';
 
 /** 对外暴露的用户信息（GET /auth/me、login.user，不含密码）。 */
 export interface UserOut {
@@ -11,6 +11,9 @@ export interface UserOut {
   email: string;
   username: string;
   role: UserRole;
+  name?: string;
+  department?: string;
+  must_change_password?: boolean;
   created_at?: string | null;
 }
 

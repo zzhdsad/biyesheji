@@ -231,3 +231,80 @@ async def list_messages(
         .order_by(Message.created_at.asc())
     )
     return list(rows)
+
+
+@router.delete("/conversations/{conversation_id}")
+async def delete_conversation(
+    conversation_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """删除历史会话（级联删除消息 + 清理 Redis 缓存）。
+
+    安全隔离：校验会话归属（Conversation.user_id == current_user.id），防止越权删除他人会话。
+    Message 通过 ORM relationship cascade="all, delete-orphan" 级联删除，
+    无需手动逐条删除消息。
+    """
+    from src.core.exceptions import NotFoundError
+    from src.infrastructure.redis_client import get_conversation_cache
+
+    user: User = request.state.user
+    conv = await db.get(Conversation, conversation_id)
+    if conv is None:
+        raise NotFoundError("会话不存在")
+    if conv.user_id != user.id:
+        raise PermissionDeniedError("无权删除该会话")
+
+    await db.delete(conv)
+    await db.commit()
+
+    # 清理 Redis 对话缓存（失败仅告警，不阻断删除主流程）
+    try:
+        cache = get_conversation_cache()
+        await cache.delete(conversation_id)
+    except Exception as exc:
+        logger.warning(f"清理会话缓存失败（不影响删除）: {exc}")
+
+    logger.info(f"用户 {user.id} 删除会话 {conversation_id}")
+    return {"id": str(conversation_id), "deleted": True}
+
+
+@router.delete("/conversations")
+async def delete_all_conversations(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """删除当前用户的全部历史会话（级联删除消息 + 清理 Redis 缓存）。
+
+    安全隔离：只删除当前用户创建的会话（Conversation.user_id == current_user.id）。
+    """
+    from sqlalchemy import delete as sa_delete
+
+    from src.infrastructure.redis_client import get_conversation_cache
+
+    user: User = request.state.user
+
+    # 先查出所有会话 ID（供清理 Redis 缓存用）
+    rows = await db.scalars(
+        select(Conversation.id).where(Conversation.user_id == user.id)
+    )
+    conv_ids = list(rows)
+    if not conv_ids:
+        return {"deleted_count": 0}
+
+    # 批量删除会话 → Message 通过 DB 级 ondelete=CASCADE 自动级联删除
+    await db.execute(
+        sa_delete(Conversation).where(Conversation.id.in_(conv_ids))
+    )
+    await db.commit()
+
+    # 清理 Redis 对话缓存（逐个删除，失败仅告警）
+    try:
+        cache = get_conversation_cache()
+        for cid in conv_ids:
+            await cache.delete(cid)
+    except Exception as exc:
+        logger.warning(f"批量清理会话缓存失败（不影响删除）: {exc}")
+
+    logger.info(f"用户 {user.id} 删除全部会话，共 {len(conv_ids)} 条")
+    return {"deleted_count": len(conv_ids)}

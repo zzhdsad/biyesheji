@@ -4,6 +4,8 @@
 - JWT 必须验签（HS256 + SECRET_KEY），防止伪造 token 绕过鉴权
 """
 
+import secrets
+import string
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import UUID
@@ -13,6 +15,12 @@ import jwt
 from loguru import logger
 
 from src.core.config import settings
+
+
+def generate_random_password(length: int = 8) -> str:
+    """生成随机初始密码（大小写字母 + 数字，不含易混淆字符）。"""
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(length))
 
 
 def hash_password(plain: str) -> str:

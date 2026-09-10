@@ -36,3 +36,8 @@ export async function apiFetchMe(): Promise<UserOut> {
   const { data } = await api.get<UserOut>('/auth/me');
   return data;
 }
+
+/** 修改密码（首次登录强制修改时调用）。 */
+export async function apiChangePassword(oldPassword: string, newPassword: string): Promise<void> {
+  await api.post('/auth/change-password', { old_password: oldPassword, new_password: newPassword });
+}

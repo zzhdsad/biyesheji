@@ -72,7 +72,9 @@ async def get_current_user(
         raise HTTPException(status_code=401, detail="无效的 token")
 
     user_id_str: str = payload["sub"]
-    user = await db.scalar(select(User).where(User.id == user_id_str))
+    user = await db.scalar(
+        select(User).where(User.id == user_id_str, User.deleted_at.is_(None))
+    )
     if user is None:
         raise HTTPException(status_code=401, detail="用户不存在")
 

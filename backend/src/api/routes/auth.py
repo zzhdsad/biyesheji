@@ -1,16 +1,16 @@
-"""用户鉴权路由：注册 / 登录 / 登出 / 当前用户。
+"""用户鉴权路由：登录 / 登出 / 当前用户 / 修改密码。
 
-其中 /register、/login 免鉴权（挂在 auth_public_router 下）；
-/logout、/me 需要鉴权，在本 router 内单独依赖 Depends(get_current_user)。
+用户注册功能已移除：账号由管理员在「用户管理」中创建（单个添加或批量导入），
+系统首次启动时内置默认管理员账号。
+/login 免鉴权；/logout、/me、/change-password 需要鉴权。
 """
 
-import re
 from datetime import datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +24,7 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
 
+
 class UserOut(BaseModel):
     """对外暴露的用户信息（不含密码）。"""
 
@@ -33,20 +34,10 @@ class UserOut(BaseModel):
     email: EmailStr
     username: str
     role: str
+    name: str = ""
+    department: str = ""
+    must_change_password: bool = False
     created_at: datetime | None = None
-
-
-class RegisterRequest(BaseModel):
-    email: EmailStr
-    username: str = Field(min_length=3, max_length=64)
-    password: str = Field(min_length=6, max_length=128)
-
-    @field_validator("username")
-    @classmethod
-    def _username_alnum(cls, v: str) -> str:
-        if not re.match(r"^[A-Za-z0-9_\-]+$", v):
-            raise ValueError("用户名仅支持字母、数字、下划线、短横线")
-        return v
 
 
 class LoginRequest(BaseModel):
@@ -54,6 +45,13 @@ class LoginRequest(BaseModel):
 
     username_or_email: str = Field(min_length=1, max_length=255)
     password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    """修改密码（首次登录强制修改时使用）。"""
+
+    old_password: str
+    new_password: str = Field(min_length=6, max_length=128)
 
 
 class TokenResponse(BaseModel):
@@ -65,32 +63,6 @@ class TokenResponse(BaseModel):
 
 # ── Endpoints ───────────────────────────────────────────────────────────────
 
-@router.post(
-    "/register",
-    status_code=status.HTTP_201_CREATED,
-    response_model=UserOut,
-)
-async def register(
-    payload: RegisterRequest,
-    db: AsyncSession = Depends(get_db),
-) -> User:
-    """注册新用户（不自动登录，需调 /login 拿 token）。"""
-    if await db.scalar(select(User).where(User.email == payload.email)):
-        raise HTTPException(status_code=400, detail="邮箱已被注册")
-    if await db.scalar(select(User).where(User.username == payload.username)):
-        raise HTTPException(status_code=400, detail="用户名已被使用")
-
-    user = User(
-        email=payload.email,
-        username=payload.username,
-        hashed_password=hash_password(payload.password),
-        role="member",
-    )
-    db.add(user)
-    await db.commit()
-    await db.refresh(user)
-    return user
-
 
 @router.post("/login", response_model=TokenResponse)
 async def login(
@@ -99,8 +71,8 @@ async def login(
 ) -> TokenResponse:
     """用户名或邮箱登录，返回 JWT。"""
     q = select(User).where(
-        (User.email == payload.username_or_email)
-        | (User.username == payload.username_or_email)
+        ((User.email == payload.username_or_email) | (User.username == payload.username_or_email))
+        & User.deleted_at.is_(None)
     )
     user = await db.scalar(q)
     if user is None or not verify_password(payload.password, user.hashed_password):
@@ -134,3 +106,21 @@ async def me(
 ) -> User:
     """返回当前登录用户信息。"""
     return current_user
+
+
+@router.post("/change-password")
+async def change_password(
+    payload: ChangePasswordRequest,
+    current_user: Annotated[User, Depends(get_current_user)],
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """修改密码。首次登录（must_change_password=True）时必须调用。"""
+    if not verify_password(payload.old_password, current_user.hashed_password):
+        raise HTTPException(status_code=400, detail="原密码错误")
+    if payload.old_password == payload.new_password:
+        raise HTTPException(status_code=400, detail="新密码不能与原密码相同")
+
+    current_user.hashed_password = hash_password(payload.new_password)
+    current_user.must_change_password = False
+    await db.commit()
+    return {"message": "密码修改成功"}

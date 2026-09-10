@@ -95,8 +95,10 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: str = "minioadmin"
     MINIO_BUCKET: str = "documents"
 
-    # 开发环境默认管理员（接入 JWT 鉴权前的占位）
-    DEFAULT_ADMIN_EMAIL: str = "admin@example.com"
+    # 开发环境默认管理员（系统首次启动时若 users 表为空则自动创建）
+    DEFAULT_ADMIN_EMAIL: str = "admin@company.com"
+    DEFAULT_ADMIN_USERNAME: str = "admin"
+    DEFAULT_ADMIN_PASSWORD: str = "admin123456"
 
     # 评估质量门禁（AGENTS.md：answer_correctness ≥ 0.75 才允许合入）
     EVAL_ACCURACY_THRESHOLD: float = 0.75

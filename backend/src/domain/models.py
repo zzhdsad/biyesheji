@@ -34,7 +34,11 @@ class User(Base, TimestampMixin):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     hashed_password: Mapped[str] = mapped_column(String(255))
-    role: Mapped[str] = mapped_column(String(16), default="member")  # admin / member
+    role: Mapped[str] = mapped_column(String(16), default="member")  # admin / member / viewer
+    name: Mapped[str] = mapped_column(String(64), default="")  # 姓名
+    department: Mapped[str] = mapped_column(String(64), default="")  # 部门
+    must_change_password: Mapped[bool] = mapped_column(default=False)  # 首次登录强制修改密码
+    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)  # 软删除时间（回收站7天）
 
 
 class KnowledgeBase(Base, TimestampMixin):
@@ -44,7 +48,7 @@ class KnowledgeBase(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(128), index=True)
     description: Mapped[str] = mapped_column(Text, default="")
     visibility: Mapped[str] = mapped_column(String(16), default="private")  # public / private
-    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
+    owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
 
     members: Mapped[list["KBMember"]] = relationship(
         back_populates="knowledge_base", cascade="all, delete-orphan"

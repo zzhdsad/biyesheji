@@ -115,6 +115,17 @@ export async function fetchMessages(conversationId: string): Promise<ChatMessage
   }));
 }
 
+/** 删除历史会话（DELETE /chat/conversations/{id}，级联删除消息 + 清缓存）。 */
+export async function deleteConversation(conversationId: string): Promise<void> {
+  await api.delete(`/chat/conversations/${conversationId}`);
+}
+
+/** 删除当前用户的全部历史会话（DELETE /chat/conversations）。 */
+export async function deleteAllConversations(): Promise<{ deletedCount: number }> {
+  const { data } = await api.delete<{ deleted_count: number }>('/chat/conversations');
+  return { deletedCount: data.deleted_count };
+}
+
 /** 系统健康状态（postgres/redis/milvus）。 */
 export async function fetchHealth(): Promise<HealthResponse> {
   const { data } = await axios.get<HealthResponse>('/health', { timeout: 5_000 });
@@ -290,4 +301,139 @@ export async function testModelConnection(
 ): Promise<TestConnectionResult> {
   const { data } = await api.post<TestConnectionResult>('/settings/model/test', payload);
   return data;
+}
+
+// ─────────────────────────── 用户管理 ───────────────────────────
+
+/** 创建用户请求体。 */
+export interface UserCreatePayload {
+  username: string;
+  email: string;
+  name?: string;
+  department?: string;
+  role?: 'admin' | 'member' | 'viewer';
+}
+
+/** 创建用户响应（含初始密码）。 */
+export interface UserCreateResponse {
+  user: UserOut;
+  initial_password: string;
+}
+
+/** 更新用户请求体。 */
+export interface UserUpdatePayload {
+  name?: string;
+  department?: string;
+  role?: 'admin' | 'member' | 'viewer';
+}
+
+/** 批量导入结果。 */
+export interface BatchImportResult {
+  total: number;
+  success: number;
+  failed: number;
+  errors: string[];
+}
+
+/** 重置密码响应。 */
+export interface ResetPasswordResponse {
+  user_id: string;
+  username: string;
+  new_password: string;
+}
+
+/** 批量删除结果。 */
+export interface BatchDeleteResult {
+  total: number;
+  success: number;
+  message: string;
+}
+
+/** 批量删除预检失败返回。 */
+export interface BatchDeleteError {
+  message: string;
+  errors: string[];
+}
+
+/** 用户列表。 */
+export async function fetchUsers(): Promise<UserOut[]> {
+  const { data } = await api.get<UserOut[]>('/users');
+  return data;
+}
+
+/** 创建用户（系统自动生成初始密码）。 */
+export async function createUser(payload: UserCreatePayload): Promise<UserCreateResponse> {
+  const { data } = await api.post<UserCreateResponse>('/users', payload);
+  return data;
+}
+
+/** 更新用户信息。 */
+export async function updateUser(
+  userId: string,
+  payload: UserUpdatePayload,
+): Promise<UserOut> {
+  const { data } = await api.put<UserOut>(`/users/${userId}`, payload);
+  return data;
+}
+
+/** 删除用户。 */
+export async function deleteUser(userId: string): Promise<void> {
+  await api.delete(`/users/${userId}`);
+}
+
+/** 管理员重置用户密码（返回新随机密码）。 */
+export async function resetUserPassword(userId: string): Promise<ResetPasswordResponse> {
+  const { data } = await api.post<ResetPasswordResponse>(`/users/${userId}/reset-password`);
+  return data;
+}
+
+/** 批量删除用户（全量预检，有错误则抛 400 + 错误详情）。 */
+export async function batchDeleteUsers(userIds: string[]): Promise<BatchDeleteResult> {
+  const { data } = await api.post<BatchDeleteResult>('/users/batch-delete', { user_ids: userIds });
+  return data;
+}
+
+/** 回收站用户列表。 */
+export async function fetchTrashUsers(): Promise<UserOut[]> {
+  const { data } = await api.get<UserOut[]>('/users/trash');
+  return data;
+}
+
+/** 从回收站恢复用户。 */
+export async function restoreUser(userId: string): Promise<UserOut> {
+  const { data } = await api.post<UserOut>(`/users/${userId}/restore`);
+  return data;
+}
+
+/** 批量恢复回收站用户（全量预检，有错误则抛 400 + 错误详情）。 */
+export async function batchRestoreUsers(userIds: string[]): Promise<{ total: number; success: number; message: string }> {
+  const { data } = await api.post('/users/batch-restore', { user_ids: userIds });
+  return data;
+}
+
+/** 彻底删除用户（不可恢复）。 */
+export async function purgeUser(userId: string): Promise<void> {
+  await api.delete(`/users/${userId}/purge`);
+}
+
+/** 批量导入用户（CSV 文件）。 */
+export async function batchImportUsers(file: File): Promise<BatchImportResult> {
+  const form = new FormData();
+  form.append('file', file);
+  const { data } = await api.post<BatchImportResult>('/users/batch', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return data;
+}
+
+/** 下载批量导入 CSV 模板。 */
+export async function downloadUserTemplate(): Promise<void> {
+  const resp = await api.get('/users/template', { responseType: 'blob' });
+  const blob = new Blob([resp.data], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'user_import_template.csv';
+  a.click();
+  URL.revokeObjectURL(url);
 }

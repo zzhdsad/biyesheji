@@ -105,8 +105,7 @@ function LoginForm() {
 
         <div style={{ textAlign: 'center' }}>
           <Typography.Text type="secondary">
-            还没账号？{' '}
-            <Typography.Link href="/register">去注册 →</Typography.Link>
+            没有账号？请联系管理员开通
           </Typography.Text>
         </div>
       </Card>

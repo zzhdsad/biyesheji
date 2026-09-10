@@ -2,6 +2,7 @@
 
 import { Layout, theme } from 'antd';
 import { AppSider } from './AppSider';
+import { ForceChangePassword } from '@/components/ForceChangePassword';
 
 const { Content } = Layout;
 
@@ -73,6 +74,8 @@ export function AppLayout({
           </Layout.Footer>
         )}
       </Layout>
+      {/* 首次登录强制修改密码（全站生效） */}
+      <ForceChangePassword />
     </Layout>
   );
 }

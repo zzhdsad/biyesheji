@@ -18,6 +18,7 @@ from src.api.routes import (
     feedbacks,
     knowledge_bases,
     settings,
+    users,
 )
 from src.core.deps import get_current_user
 
@@ -25,8 +26,8 @@ from src.core.deps import get_current_user
 auth_public_router = APIRouter()
 auth_public_router.include_router(
     auth.router,
-    # auth.router 内 /logout、/me 已单独依赖 Depends(get_current_user)
-    # 只有 /register、/login 真正免鉴权
+    # auth.router 内 /logout、/me、/change-password 已单独依赖 Depends(get_current_user)
+    # 只有 /login 真正免鉴权
 )
 
 # ── 业务路由（统一鉴权） ──────────────────────────────────────────────────────
@@ -38,6 +39,7 @@ protected_router.include_router(evaluation.router)
 protected_router.include_router(feedbacks.router)  # PRD §3.6：用户反馈收集
 protected_router.include_router(admin.router)  # PRD §5.2：系统仪表盘统计（仅 admin）
 protected_router.include_router(settings.router)  # 模型配置（LLM/Embedding/Rerank/HyDE）
+protected_router.include_router(users.router)  # 用户管理（仅 admin）
 
 # ── 聚合 ─────────────────────────────────────────────────────────────────────
 api_router = APIRouter()
