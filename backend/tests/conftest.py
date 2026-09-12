@@ -76,6 +76,45 @@ def _mock_rerank_backend(monkeypatch):
     rerank.set_rerank(rerank.MockRerank())
 
 
+@pytest.fixture(autouse=True)
+def _force_mock_model_config(monkeypatch):
+    """确保运行时配置使用 mock 后端，避免 DB 中残留的 flagembedding 配置覆盖
+    conftest 的 settings mock，导致测试加载真实 BGE-M3 模型。
+
+    patch get_effective_config_cached 使其从 settings 动态构建配置：
+    - 后端强制 mock
+    - hyde_enabled 跟随 settings.HYDE_ENABLED（测试可 monkeypatch 控制）
+    """
+    import src.application.model_config_service as mcs
+
+    async def _mock_cached(db):
+        return {
+            "llm_provider": "mock",
+            "llm_base_url": "",
+            "llm_model": "mock",
+            "llm_api_key": "",
+            "embedding_backend": "mock",
+            "embedding_model": "mock",
+            "embedding_device": "cpu",
+            "rerank_backend": "mock",
+            "rerank_model": "mock",
+            "rerank_device": "cpu",
+            "hyde_enabled": settings.HYDE_ENABLED,
+            "hyde_backend": "mock",
+            "hyde_model": "mock",
+            "hyde_base_url": "",
+        }
+
+    # 清除缓存，确保不会读到旧的 flagembedding 配置
+    mcs._config_cache = None
+    # 同时 patch model_config_service 和 rag_service（rag_service 通过 from import 绑定了引用）
+    monkeypatch.setattr(mcs, "get_effective_config_cached", _mock_cached)
+    import src.application.rag_service as rag_mod
+    monkeypatch.setattr(rag_mod, "get_effective_config_cached", _mock_cached)
+    yield
+    mcs._config_cache = None
+
+
 @pytest.fixture(autouse=True, scope="module")
 def vector_store():
     if MILVUS_AVAILABLE:

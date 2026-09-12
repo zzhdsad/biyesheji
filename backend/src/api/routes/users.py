@@ -55,6 +55,7 @@ class UserOut(BaseModel):
     name: str = ""
     department: str = ""
     must_change_password: bool = False
+    is_active: bool = True
     created_at: datetime | None = None
     deleted_at: datetime | None = None
 
@@ -255,6 +256,48 @@ async def delete_user(
     user.deleted_at = datetime.utcnow()
     await db.commit()
     return {"message": "用户已移入回收站，7 天内可恢复"}
+
+
+@router.post("/{user_id}/disable")
+async def disable_user(
+    request: Request,
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """禁用用户账号（BUSINESS_RULES §2 离职处理=禁用，不删除，保留数据，可恢复）。
+
+    禁用后用户无法登录，但所有数据（文档、问答记录）保留。
+    与回收站删除不同：禁用是永久状态直到手动启用，不受 7 天自动清理影响。
+    """
+    current = _require_admin(request)
+    if current.id == user_id:
+        raise HTTPException(status_code=400, detail="不能禁用自己")
+
+    user = await _get_active_user(db, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在或已删除")
+
+    user.is_active = False
+    await db.commit()
+    return {"message": "用户已禁用（离职处理），账号数据保留，可随时启用恢复"}
+
+
+@router.post("/{user_id}/enable")
+async def enable_user(
+    request: Request,
+    user_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """启用用户账号（恢复已禁用的用户）。"""
+    _require_admin(request)
+
+    user = await _get_active_user(db, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="用户不存在或已删除")
+
+    user.is_active = True
+    await db.commit()
+    return {"message": "用户已启用，可正常登录"}
 
 
 @router.post("/{user_id}/reset-password", response_model=ResetPasswordResponse)

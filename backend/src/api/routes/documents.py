@@ -151,7 +151,9 @@ async def list_documents(
     user: User = request.state.user
     accessible = await get_accessible_kb_ids(db, user)
 
-    stmt = select(Document).where(Document.kb_id.in_(accessible))
+    stmt = select(Document).where(
+        Document.kb_id.in_(accessible), Document.deleted_at.is_(None)
+    )
     if kb_id is not None:
         if kb_id not in accessible:
             return []  # 用户无权访问该 kb_id，返回空而非报错（400 由前端处理）
@@ -266,12 +268,107 @@ async def delete_document(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """删除文档及其向量数据。
+    """删除文档 → 移入回收站（软删除，默认7天可恢复）。
 
-    安全：校验文档所属知识库的访问权限。
-
-    TODO: 删除 documents 记录（chunks 外键级联）+ Milvus 向量 + 原始文件。
+    安全：校验文档所属知识库的访问权限（需 Editor 以上或 owner/admin）。
     """
     user: User = request.state.user
-    await _get_doc_with_access_check(db, user, doc_id)
-    return {"id": str(doc_id), "deleted": True}
+    doc = await _get_doc_with_access_check(db, user, doc_id)
+
+    doc.deleted_at = datetime.utcnow()
+    await db.commit()
+    return {"id": str(doc_id), "deleted": True, "message": "已移入回收站，7天内可恢复"}
+
+
+@router.get("/trash/list", response_model=list[DocumentOut])
+async def list_trash_documents(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> list[Document]:
+    """回收站文档列表（仅 admin，自动清理过期项）。"""
+    from datetime import timedelta
+    from src.core.config import settings as cfg
+
+    user: User = request.state.user
+    if user.role != "admin":
+        from src.core.exceptions import PermissionDeniedError
+        raise PermissionDeniedError("仅管理员可查看回收站")
+
+    # 清理过期项
+    cutoff = datetime.utcnow() - timedelta(days=cfg.TRASH_RETENTION_DAYS)
+    expired = (await db.scalars(select(Document).where(Document.deleted_at < cutoff))).all()
+    for d in expired:
+        await db.delete(d)
+    if expired:
+        await db.commit()
+
+    rows = (
+        await db.scalars(
+            select(Document)
+            .where(Document.deleted_at.is_not(None))
+            .order_by(Document.deleted_at.desc())
+        )
+    ).all()
+    return list(rows)
+
+
+@router.post("/{doc_id}/restore", response_model=DocumentOut)
+async def restore_document(
+    doc_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> Document:
+    """从回收站恢复文档（仅 admin）。"""
+    user: User = request.state.user
+    if user.role != "admin":
+        from src.core.exceptions import PermissionDeniedError
+        raise PermissionDeniedError("仅管理员可恢复")
+
+    doc = await db.get(Document, doc_id)
+    if doc is None or doc.deleted_at is None:
+        from src.core.exceptions import NotFoundError
+        raise NotFoundError("文档不在回收站中")
+
+    doc.deleted_at = None
+    await db.commit()
+    await db.refresh(doc)
+    return doc
+
+
+@router.delete("/{doc_id}/purge")
+async def purge_document(
+    doc_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """彻底删除文档（仅 admin，不可恢复，级联删除 chunks + 清理向量/文件）。"""
+    user: User = request.state.user
+    if user.role != "admin":
+        from src.core.exceptions import PermissionDeniedError
+        raise PermissionDeniedError("仅管理员可彻底删除")
+
+    doc = await db.get(Document, doc_id)
+    if doc is None:
+        from src.core.exceptions import NotFoundError
+        raise NotFoundError("文档不存在")
+
+    # 清理 Milvus 向量（best-effort）
+    try:
+        from src.infrastructure.milvus_store import get_vector_store
+        store = get_vector_store()
+        store.delete_by_doc_id(str(doc_id))
+    except Exception as e:
+        logger.warning(f"清理向量失败（不影响删除）: {e}")
+
+    # 清理原始文件（best-effort）
+    try:
+        from src.infrastructure.storage import get_storage
+        storage = get_storage()
+        if doc.storage_path:
+            storage.delete(doc.storage_path)
+    except Exception as e:
+        logger.warning(f"清理文件失败（不影响删除）: {e}")
+
+    await db.delete(doc)
+    await db.commit()
+    return {"id": str(doc_id), "purged": True}

@@ -9,6 +9,7 @@ import {
   Divider,
   Form,
   Input,
+  InputNumber,
   Row,
   Select,
   Space,
@@ -26,7 +27,7 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import type { ModelConfig } from '@/services/api';
-import { fetchModelConfig, testModelConnection, updateModelConfig } from '@/services/api';
+import { fetchModelConfig, testModelConnection, updateModelConfig, fetchSystemConfig, updateSystemConfig } from '@/services/api';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
 
@@ -50,10 +51,13 @@ const PROVIDER_DEFAULTS: Record<string, { base_url: string; model: string }> = {
 
 export default function SettingsPage() {
   const [form] = Form.useForm<ModelConfig>();
+  const [sysForm] = Form.useForm();
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [sysLoading, setSysLoading] = useState(false);
+  const [sysSaving, setSysSaving] = useState(false);
 
   const loadConfig = async () => {
     setLoading(true);
@@ -69,7 +73,38 @@ export default function SettingsPage() {
 
   useEffect(() => {
     void loadConfig();
+    void loadSysConfig();
   }, []);
+
+  const loadSysConfig = async () => {
+    setSysLoading(true);
+    try {
+      const cfg = await fetchSystemConfig();
+      sysForm.setFieldsValue(cfg);
+    } catch {
+      message.error('加载系统配置失败');
+    } finally {
+      setSysLoading(false);
+    }
+  };
+
+  const onSysSave = async () => {
+    let values;
+    try {
+      values = await sysForm.validateFields();
+    } catch {
+      return;
+    }
+    setSysSaving(true);
+    try {
+      await updateSystemConfig(values);
+      message.success('系统配置已保存');
+    } catch (err) {
+      message.error(`保存失败：${describeError(err)}`);
+    } finally {
+      setSysSaving(false);
+    }
+  };
 
   // 切换 LLM 提供商时自动填充默认 Base URL 和模型名
   const onProviderChange = (provider: string) => {
@@ -382,6 +417,82 @@ export default function SettingsPage() {
           </Button>
         </Space>
       </Form>
+
+      {/* ── 系统级配置（BUSINESS_RULES §8）── */}
+      <Card
+        title={<Space><SettingOutlined /> 系统配置</Space>}
+        style={{ maxWidth: 900, marginTop: 24 }}
+        loading={sysLoading}
+      >
+        <Form
+          form={sysForm}
+          layout="vertical"
+        >
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item
+                name="trash_retention_days"
+                label="回收站保留期（天）"
+                rules={[{ required: true, message: '请输入保留天数' }, { type: 'number', min: 1, max: 30, message: '1-30 天' }]}
+              >
+                <InputNumber min={1} max={30} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item
+                name="max_file_size_mb"
+                label="文件大小限制（MB）"
+                rules={[{ required: true, message: '请输入文件大小限制' }, { type: 'number', min: 1, max: 500, message: '1-500 MB' }]}
+              >
+                <InputNumber min={1} max={500} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item
+                name="history_window"
+                label="多轮对话历史轮数"
+                rules={[{ required: true, message: '请输入历史轮数' }, { type: 'number', min: 0, max: 20, message: '0-20 轮' }]}
+              >
+                <InputNumber min={0} max={20} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Form.Item
+                name="recall_top_k"
+                label="检索召回数量（Top-K）"
+                rules={[{ required: true, message: '请输入召回数量' }, { type: 'number', min: 1, max: 200 }]}
+              >
+                <InputNumber min={1} max={200} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item
+                name="rerank_top_n"
+                label="精排返回数量（Top-N）"
+                rules={[{ required: true, message: '请输入精排数量' }, { type: 'number', min: 1, max: 50 }]}
+              >
+                <InputNumber min={1} max={50} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+            <Col span={8}>
+              <Form.Item
+                name="relevance_threshold"
+                label="相似度拒答阈值"
+                rules={[{ required: true, message: '请输入阈值' }, { type: 'number', min: 0, max: 1 }]}
+              >
+                <InputNumber min={0} max={1} step={0.05} style={{ width: '100%' }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Space>
+            <Button type="primary" icon={<SaveOutlined />} onClick={() => void onSysSave()} loading={sysSaving} disabled={sysLoading}>
+              保存系统配置
+            </Button>
+          </Space>
+        </Form>
+      </Card>
     </AppLayout>
   );
 }

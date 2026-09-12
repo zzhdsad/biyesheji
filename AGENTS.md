@@ -4,7 +4,7 @@ markdown
 ## 项目概述
 
 本项目是一个基于 RAG 的企业级智能知识问答平台，包含：
-- **后端**：Python FastAPI + LangGraph + Milvus + PostgreSQL
+- **后端**：Python FastAPI + 自研状态化 RAG 编排（HyDE → BGE-M3 稠密/稀疏混合检索 → RRF 融合 → BGE-Reranker 精排 → 相关性拒答 → 生成）+ Milvus + PostgreSQL
 - **前端**：Next.js 14 + Ant Design + Tailwind
 - **部署**：开发期采用本地运行模式，生产交付使用 Docker Compose
 

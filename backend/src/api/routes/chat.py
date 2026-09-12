@@ -73,6 +73,28 @@ class MessageOut(BaseModel):
 
 # ── 公共安全校验 ─────────────────────────────────────────────────────────────
 
+
+async def _check_model_configured(db: AsyncSession) -> None:
+    """BUSINESS_RULES §10：模型未配置时禁止提问。
+
+    mock 模式允许（开发/测试）；非 mock 模式必须有 base_url 和 model。
+    """
+    from src.application.model_config_service import get_effective_config_cached
+    from src.core.exceptions import AppException
+
+    config = await get_effective_config_cached(db)
+    provider = config.get("llm_provider", "mock")
+    if provider == "mock":
+        return  # mock 模式视为已配置（开发/测试用）
+    base_url = config.get("llm_base_url", "")
+    model = config.get("llm_model", "")
+    if not base_url or not model:
+        raise AppException(
+            412,
+            "模型尚未配置，请先在管理中心-系统设置中配置模型参数",
+        )
+
+
 async def _validate_kb_access(
     db: AsyncSession, user: User, kb_ids: list[uuid.UUID]
 ) -> None:
@@ -124,6 +146,7 @@ async def ask(
         raise AppException(422, "kb_ids 不能为空：必须指定检索的知识库范围")
 
     user: User = request.state.user
+    await _check_model_configured(db)
     await _validate_kb_access(db, user, payload.kb_ids)
 
     if payload.conversation_id is not None:
@@ -161,6 +184,7 @@ async def ask_stream(
         raise AppException(422, "kb_ids 不能为空：必须指定检索的知识库范围")
 
     user: User = request.state.user
+    await _check_model_configured(db)
     await _validate_kb_access(db, user, payload.kb_ids)
 
     if payload.conversation_id is not None:

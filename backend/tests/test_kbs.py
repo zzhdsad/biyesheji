@@ -121,7 +121,11 @@ def test_delete_kb_success(client):
     kb_id = _make_kb(client)
     resp = client.delete(f"/api/v1/kb/{kb_id}")
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"id": kb_id, "deleted": True}
+    body = resp.json()
+    assert body["id"] == kb_id
+    assert body["deleted"] is True
+    # BUSINESS_RULES §3：删除移入回收站，返回保留天数提示
+    assert "message" in body
 
     listing = client.get("/api/v1/kb").json()
     ids = [it["id"] for it in listing]

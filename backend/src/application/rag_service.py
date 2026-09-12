@@ -244,13 +244,18 @@ class RagService:
         return True
 
     def _hits_to_citations(self, hits: list[dict]) -> list[dict]:
-        """将全部检索命中转为引用来源（不按标记过滤，source_index 1-based）。
+        """将检索命中转为引用来源（BUSINESS_RULES §6：只展示相关度 ≥ 0.3 的引用）。
 
         流式路径用：citations 在生成前推送，实现引用卡片实时展示。
         DB 持久化用同一份，保证历史回看与流式一致。
         """
+        threshold = settings.RELEVANCE_THRESHOLD
         citations = []
         for i, h in enumerate(hits, start=1):
+            score = h.get("rerank_score", h.get("score", 0.0))
+            # BUSINESS_RULES §6 引用过滤：只展示相关度 ≥ 阈值的引用
+            if score < threshold:
+                continue
             citations.append(
                 {
                     "chunk_id": h["id"],
@@ -260,7 +265,7 @@ class RagService:
                     "page_num": h["page_num"],
                     "title_path": h["title_path"],
                     "content": h["content"],
-                    "score": h.get("rerank_score", h.get("score", 0.0)),
+                    "score": score,
                 }
             )
         return citations
@@ -523,6 +528,7 @@ class RagService:
         - 编号对应 _build_user_prompt 中的资料编号（1-based）。
         - 页码以检索命中的权威 page_num 为准（模型标注仅作提示，不信任）。
         - 无标记但有资料时兜底返回全部来源（前端仍可展示引用卡片）。
+        - BUSINESS_RULES §6：只展示相关度 ≥ 阈值的引用。
         """
         if not hits:
             return []
@@ -534,9 +540,15 @@ class RagService:
                 idxs.append(n - 1)
         picked = idxs or list(range(len(hits)))
 
+        threshold = settings.RELEVANCE_THRESHOLD
+
         citations = []
         for i in picked:
             h = hits[i]
+            score = h.get("rerank_score", h.get("score", 0.0))
+            # BUSINESS_RULES §6：只展示相关度 ≥ 阈值的引用
+            if score < threshold:
+                continue
             citations.append(
                 {
                     "chunk_id": h["id"],
@@ -546,8 +558,7 @@ class RagService:
                     "page_num": h["page_num"],
                     "title_path": h["title_path"],
                     "content": h["content"],
-                    # 优先用 Rerank 精排分（归一化 0-1），无则退回召回分
-                    "score": h.get("rerank_score", h.get("score", 0.0)),
+                    "score": score,
                 }
             )
         return citations

@@ -95,3 +95,72 @@ async def test_model_connection(
         return {"ok": False, "message": "请求超时（30s），请检查网络或 Base URL"}
     except Exception as exc:
         return {"ok": False, "message": f"连通失败：{exc}"}
+
+
+# ── 系统级配置（BUSINESS_RULES §8）────────────────────────────────────────────
+
+
+class SystemConfigUpdate(BaseModel):
+    """系统级配置更新（回收站保留期、文件大小限制、检索参数等）。"""
+
+    trash_retention_days: int | None = Field(default=None, ge=1, le=30)
+    max_file_size_mb: int | None = Field(default=None, ge=1, le=500)
+    recall_top_k: int | None = Field(default=None, ge=1, le=200)
+    rerank_top_n: int | None = Field(default=None, ge=1, le=50)
+    relevance_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    history_window: int | None = Field(default=None, ge=0, le=20)
+
+
+@router.get("/system")
+async def get_system_config(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """获取系统级配置（fallback 到 .env 默认值）。"""
+    from src.domain.models import SystemConfig
+    from src.core.config import settings as cfg
+
+    row = await db.get(SystemConfig, 1)
+    if row is None:
+        return {
+            "trash_retention_days": cfg.TRASH_RETENTION_DAYS,
+            "max_file_size_mb": cfg.MAX_FILE_SIZE_MB,
+            "recall_top_k": cfg.RECALL_TOP_K,
+            "rerank_top_n": cfg.RERANK_TOP_N,
+            "relevance_threshold": cfg.RELEVANCE_THRESHOLD,
+            "history_window": cfg.HISTORY_WINDOW,
+        }
+    return {
+        "trash_retention_days": row.trash_retention_days,
+        "max_file_size_mb": row.max_file_size_mb,
+        "recall_top_k": row.recall_top_k,
+        "rerank_top_n": row.rerank_top_n,
+        "relevance_threshold": row.relevance_threshold,
+        "history_window": row.history_window,
+    }
+
+
+@router.put("/system")
+async def update_system_config(
+    payload: SystemConfigUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """更新系统级配置（仅 admin）。"""
+    from src.domain.models import SystemConfig
+    from src.core.config import settings as cfg
+    from src.core.exceptions import PermissionDeniedError
+
+    user = request.state.user
+    if user.role != "admin":
+        raise PermissionDeniedError("仅管理员可修改系统配置")
+
+    row = await db.get(SystemConfig, 1)
+    if row is None:
+        row = SystemConfig(id=1)
+        db.add(row)
+    changes = payload.model_dump(exclude_unset=True)
+    for field, value in changes.items():
+        setattr(row, field, value)
+    await db.commit()
+    return {"updated": True, "changes": changes}

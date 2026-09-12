@@ -38,7 +38,8 @@ class User(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(64), default="")  # 姓名
     department: Mapped[str] = mapped_column(String(64), default="")  # 部门
     must_change_password: Mapped[bool] = mapped_column(default=False)  # 首次登录强制修改密码
-    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)  # 软删除时间（回收站7天）
+    is_active: Mapped[bool] = mapped_column(default=True)  # 账号启用/禁用（离职=禁用，保留数据可恢复）
+    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)  # 软删除时间（回收站，到期硬删）
 
 
 class KnowledgeBase(Base, TimestampMixin):
@@ -49,6 +50,7 @@ class KnowledgeBase(Base, TimestampMixin):
     description: Mapped[str] = mapped_column(Text, default="")
     visibility: Mapped[str] = mapped_column(String(16), default="private")  # public / private
     owner_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)  # 回收站软删除时间
 
     members: Mapped[list["KBMember"]] = relationship(
         back_populates="knowledge_base", cascade="all, delete-orphan"
@@ -64,7 +66,7 @@ class KBMember(Base, TimestampMixin):
     user_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
     )
-    role: Mapped[str] = mapped_column(String(16), default="viewer")  # owner / editor / viewer
+    role: Mapped[str] = mapped_column(String(16), default="viewer")  # owner / admin / editor / viewer
 
     knowledge_base: Mapped["KnowledgeBase"] = relationship(back_populates="members")
 
@@ -84,6 +86,7 @@ class Document(Base, TimestampMixin):
     # pending / parsing / success（切片就绪）/ completed（已向量化）/ failed
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str] = mapped_column(Text, default="")
+    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)  # 回收站软删除时间
 
 
 class Chunk(Base, TimestampMixin):
@@ -191,3 +194,40 @@ class ModelConfig(Base, TimestampMixin):
     hyde_backend: Mapped[str] = mapped_column(String(32), default="mock")  # mock/openai
     hyde_model: Mapped[str] = mapped_column(String(128), default="")
     hyde_base_url: Mapped[str] = mapped_column(String(512), default="")
+
+
+class AuditLog(Base):
+    """审计日志：记录所有关键数据变更操作（用户管理、知识库增删改、文档增删改、问答、系统配置）。"""
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    operator_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    operator_name: Mapped[str] = mapped_column(String(64), default="")  # 冗余存储，用户删除后仍可追溯
+    operation: Mapped[str] = mapped_column(String(64), index=True)  # create/update/delete/disable/restore/login 等
+    target_type: Mapped[str] = mapped_column(String(32), index=True)  # user/kb/document/message/config
+    target_id: Mapped[str] = mapped_column(String(64), default="", index=True)  # 目标对象 ID
+    detail: Mapped[dict] = mapped_column(JSONB, default=dict)  # 变更详情（前后值、额外参数）
+    ip: Mapped[str] = mapped_column(String(64), default="")  # 操作来源 IP
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), index=True
+    )
+
+
+class SystemConfig(Base):
+    """系统级配置（单行表，id=1）：回收站保留期、文件大小限制、检索参数等。
+
+    运行时优先读此表；为空时 fallback 到 .env 环境变量。
+    """
+
+    __tablename__ = "system_configs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    trash_retention_days: Mapped[int] = mapped_column(Integer, default=7)  # 回收站保留天数 1-30
+    max_file_size_mb: Mapped[int] = mapped_column(Integer, default=50)  # 文件大小限制
+    recall_top_k: Mapped[int] = mapped_column(Integer, default=50)  # 每路召回数量
+    rerank_top_n: Mapped[int] = mapped_column(Integer, default=5)  # 精排后送 LLM 数量
+    relevance_threshold: Mapped[float] = mapped_column(Float, default=0.3)  # 相似度拒答阈值
+    history_window: Mapped[int] = mapped_column(Integer, default=5)  # 多轮对话历史轮数

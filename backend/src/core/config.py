@@ -54,9 +54,8 @@ class Settings(BaseSettings):
     RECALL_TOP_K: int = 50  # 每路召回数量（送入 RRF 融合）
     RERANK_TOP_N: int = 5  # 精排后返回给 LLM 的最终数量
     RRF_K: int = 60  # RRF 融合平滑常数
-    # 相关性门槛（PRD §8.3 幻觉兜底）：Top 候选的稠密语义相似度均低于该值时拒答，
-    # 防止"仅词语重叠、答非所问"的检索结果（如问"你觉得产品如何"命中 PRD 描述）送入 LLM
-    RELEVANCE_THRESHOLD: float = 0.5
+    # 相关性门槛（BUSINESS_RULES §6：检索相关度 < 0.3 时拒答）
+    RELEVANCE_THRESHOLD: float = 0.3
     # mock（确定性伪重排，开发/测试）/ flagreranker（BGE-Reranker-v2-m3 真实精排）
     RERANK_BACKEND: str = "mock"
     RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"  # HuggingFace 模型 ID
@@ -74,13 +73,16 @@ class Settings(BaseSettings):
     # Ollama：http://localhost:11434/v1（Ollama ≥0.1.x 兼容 OpenAI /v1）
     # vLLM  ：http://localhost:8001/v1（vllm serve Qwen/Qwen2.5-1.5B-Instruct --port 8001）
     HYDE_BASE_URL: str | None = None
-    HISTORY_WINDOW: int = 3
+    HISTORY_WINDOW: int = 5  # BUSINESS_RULES §6：默认携带最近 5 轮历史
     # 会话缓存（TECH_DESIGN：conversation:{conv_id}:history TTL 24h）
     HISTORY_TTL_SECONDS: int = 86400
 
+    # 回收站
+    TRASH_RETENTION_DAYS: int = 7  # BUSINESS_RULES §5：默认 7 天，可配置 1-30 天
+
     # 文档
     UPLOAD_DIR: str = "uploads"
-    MAX_FILE_SIZE_MB: int = 50
+    MAX_FILE_SIZE_MB: int = 50  # BUSINESS_RULES §4：默认 50MB（可配置）
 
     # 解析 / 切片（TECH_DESIGN：结构感知切片，512~1024 tokens，overlap 50~100）
     PARSE_BACKEND: str = "background"  # background（进程内线程池）/ celery（Redis 队列）

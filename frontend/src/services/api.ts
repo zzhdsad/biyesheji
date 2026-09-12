@@ -1,5 +1,6 @@
 import axios from 'axios';
 import type {
+  AuditLog,
   ChatMessage,
   Citation,
   Conversation,
@@ -8,9 +9,13 @@ import type {
   EvaluationReport,
   EvalTestCaseItem,
   HealthResponse,
+  KBMember,
+  KBMemberRole,
   KnowledgeBase,
   MessageOut,
   Role,
+  SystemConfig,
+  UserOut,
 } from '@/types';
 import { clearToken, getToken } from './token';
 
@@ -436,4 +441,147 @@ export async function downloadUserTemplate(): Promise<void> {
   a.download = 'user_import_template.csv';
   a.click();
   URL.revokeObjectURL(url);
+}
+
+/** 禁用用户账号（BUSINESS_RULES §2 离职处理=禁用）。 */
+export async function disableUser(userId: string): Promise<void> {
+  await api.post(`/users/${userId}/disable`);
+}
+
+/** 启用用户账号（恢复已禁用的用户）。 */
+export async function enableUser(userId: string): Promise<void> {
+  await api.post(`/users/${userId}/enable`);
+}
+
+// ─────────────────────────── 知识库成员管理 ───────────────────────────
+
+/** 知识库成员列表。 */
+export async function fetchKbMembers(kbId: string): Promise<KBMember[]> {
+  const { data } = await api.get<KBMember[]>(`/kb/${kbId}/members`);
+  return data;
+}
+
+/** 添加知识库成员。 */
+export async function addKbMember(
+  kbId: string,
+  userId: string,
+  role: KBMemberRole,
+): Promise<KBMember> {
+  const { data } = await api.post<KBMember>(`/kb/${kbId}/members`, {
+    user_id: userId,
+    role,
+  });
+  return data;
+}
+
+/** 批量添加知识库成员。 */
+export async function batchAddKbMembers(
+  kbId: string,
+  userIds: string[],
+  role: KBMemberRole,
+): Promise<{ added: number; skipped: number }> {
+  const { data } = await api.post(`/kb/${kbId}/members/batch`, {
+    user_ids: userIds,
+    role,
+  });
+  return data;
+}
+
+/** 移除知识库成员。 */
+export async function removeKbMember(
+  kbId: string,
+  userId: string,
+): Promise<void> {
+  await api.delete(`/kb/${kbId}/members/${userId}`);
+}
+
+/** 修改成员角色。 */
+export async function updateKbMemberRole(
+  kbId: string,
+  userId: string,
+  role: KBMemberRole,
+): Promise<KBMember> {
+  const { data } = await api.put<KBMember>(`/kb/${kbId}/members/${userId}`, {
+    role,
+  });
+  return data;
+}
+
+/** 转移知识库所有权。 */
+export async function transferKbOwnership(
+  kbId: string,
+  newOwnerId: string,
+): Promise<void> {
+  await api.post(`/kb/${kbId}/transfer-ownership`, {
+    new_owner_user_id: newOwnerId,
+  });
+}
+
+// ─────────────────────────── 知识库回收站 ───────────────────────────
+
+/** 回收站知识库列表。 */
+export async function fetchTrashKbs(): Promise<KnowledgeBase[]> {
+  const { data } = await api.get<KnowledgeBase[]>('/kb/trash');
+  return data;
+}
+
+/** 恢回收站知识库。 */
+export async function restoreKb(kbId: string): Promise<KnowledgeBase> {
+  const { data } = await api.post<KnowledgeBase>(`/kb/${kbId}/restore`);
+  return data;
+}
+
+/** 彻底删除知识库（不可恢复）。 */
+export async function purgeKb(kbId: string): Promise<void> {
+  await api.delete(`/kb/${kbId}/purge`);
+}
+
+// ─────────────────────────── 文档回收站 ───────────────────────────
+
+/** 回收站文档列表。 */
+export async function fetchTrashDocuments(): Promise<DocumentItem[]> {
+  const { data } = await api.get<DocumentItem[]>('/documents/trash/list');
+  return data;
+}
+
+/** 恢回收站文档。 */
+export async function restoreDocument(docId: string): Promise<DocumentItem> {
+  const { data } = await api.post<DocumentItem>(`/documents/${docId}/restore`);
+  return data;
+}
+
+/** 彻底删除文档（不可恢复）。 */
+export async function purgeDocument(docId: string): Promise<void> {
+  await api.delete(`/documents/${docId}/purge`);
+}
+
+// ─────────────────────────── 审计日志 ───────────────────────────
+
+/** 查询审计日志（仅 admin，支持筛选）。 */
+export async function fetchAuditLogs(params?: {
+  operation?: string;
+  target_type?: string;
+  start_time?: string;
+  end_time?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<AuditLog[]> {
+  const { data } = await api.get<AuditLog[]>('/audit', { params });
+  return data;
+}
+
+// ─────────────────────────── 系统配置 ───────────────────────────
+
+/** 获取系统级配置。 */
+export async function fetchSystemConfig(): Promise<SystemConfig> {
+  const { data } = await api.get<SystemConfig>('/settings/system');
+  return data;
+}
+
+/** 更新系统级配置。 */
+export async function updateSystemConfig(
+  payload: Partial<SystemConfig>,
+): Promise<SystemConfig> {
+  const { data } = await api.put<SystemConfig>('/settings/system', payload);
+  return data;
 }

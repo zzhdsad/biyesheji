@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends
 
 from src.api.routes import (
     admin,
+    audit,
     auth,
     chat,
     documents,
@@ -40,6 +41,7 @@ protected_router.include_router(feedbacks.router)  # PRD §3.6：用户反馈收
 protected_router.include_router(admin.router)  # PRD §5.2：系统仪表盘统计（仅 admin）
 protected_router.include_router(settings.router)  # 模型配置（LLM/Embedding/Rerank/HyDE）
 protected_router.include_router(users.router)  # 用户管理（仅 admin）
+protected_router.include_router(audit.router)  # 审计日志（仅 admin）
 
 # ── 聚合 ─────────────────────────────────────────────────────────────────────
 api_router = APIRouter()

@@ -9,7 +9,7 @@
 | 层级 | 选型 |
 | --- | --- |
 | 前端 | Next.js 14 (App Router) + React 18 + Ant Design 5 + Tailwind CSS + Zustand + React Query |
-| 后端 | Python 3.10+ / FastAPI + LangGraph + SQLAlchemy 2.0 (async) |
+| 后端 | Python 3.10+ / FastAPI + 自研状态化 RAG 编排（HyDE → BGE-M3 稠密/稀疏混合检索 → RRF 融合 → BGE-Reranker 精排 → 相关性拒答 → 生成）+ SQLAlchemy 2.0 (async) |
 | 存储 | PostgreSQL 15（元数据）、Milvus 2.4（向量）、Redis 7（缓存/队列） |
 | 部署 | Docker Compose 一键启动 |
 
@@ -60,8 +60,7 @@ backend/
 │   ├── domain/           # ORM 模型（users/kb/documents/messages...）
 │   ├── application/      # 用例服务
 │   ├── infrastructure/   # 数据库/向量库/LLM 客户端
-│   ├── graph/            # LangGraph 检索-生成流水线
-│   └── utils/
+│   └── utils/            # RRF 融合、结构感知切片（RAG 编排在 application/rag_service.py）
 ├── tests/                # pytest 单元/集成测试
 └── requirements.txt      # 重依赖见 requirements-ai.txt
 

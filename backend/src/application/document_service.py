@@ -13,9 +13,8 @@ from src.core.exceptions import AppException, NotFoundError, PermissionDeniedErr
 from src.domain.models import Document, KnowledgeBase, User
 from src.infrastructure.storage import BaseStorage, get_storage
 
-# 当前阶段支持格式（PRD 3.1 的 Must-have 子集：PDF/DOCX/TXT/MD）
-# .md 走 FallbackParser 的纯文本解码分支（UTF-8/GBK 兼容），可正常切片入库
-ALLOWED_EXTENSIONS = {"pdf", "docx", "txt", "md"}
+# BUSINESS_RULES §4 支持格式：PDF/DOCX/PPTX/XLSX/TXT/MD/HTML/CSV
+ALLOWED_EXTENSIONS = {"pdf", "docx", "pptx", "xlsx", "txt", "md", "html", "csv"}
 
 
 class DocumentService:
@@ -46,7 +45,7 @@ class DocumentService:
         filename = file.filename or ""
         suffix = Path(filename).suffix.lstrip(".").lower()
         if suffix not in ALLOWED_EXTENSIONS:
-            raise AppException(400, f"不支持的文件类型 .{suffix}，仅支持 PDF/DOCX/TXT/MD")
+            raise AppException(400, f"不支持的文件类型 .{suffix}，仅支持 PDF/DOCX/PPTX/XLSX/TXT/MD/HTML/CSV")
 
         # 2. 大小校验（先落盘到临时文件，read 进内存判断；超大文件分片上传见 PRD 8）
         content = await file.read()

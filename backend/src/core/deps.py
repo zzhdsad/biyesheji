@@ -77,6 +77,8 @@ async def get_current_user(
     )
     if user is None:
         raise HTTPException(status_code=401, detail="用户不存在")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="账号已被禁用，请联系管理员")
 
     # 挂到 request.state，后续业务 handler 可直接用
     request.state.user = user
@@ -94,16 +96,17 @@ async def get_accessible_kb_ids(db: AsyncSession, user: User) -> set[uuid.UUID]:
         set[uuid.UUID] — 当前用户可访问的 kb_id 集合
     """
     if user.role == "admin":
-        rows = (await db.scalars(select(KnowledgeBase))).all()
+        rows = (await db.scalars(select(KnowledgeBase).where(KnowledgeBase.deleted_at.is_(None)))).all()
         return {kb.id for kb in rows}
 
-    # 非 admin：owner + member + public 的并集
+    # 非 admin：owner + member + public 的并集（排除回收站）
     stmt = select(KnowledgeBase.id).where(
+        KnowledgeBase.deleted_at.is_(None),
         (KnowledgeBase.owner_id == user.id)
         | (KnowledgeBase.visibility == "public")
         | KnowledgeBase.id.in_(
             select(KBMember.kb_id).where(KBMember.user_id == user.id)
-        )
+        ),
     )
     rows = (await db.scalars(stmt)).all()
     return set(rows)

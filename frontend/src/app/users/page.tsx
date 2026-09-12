@@ -28,6 +28,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
   RollbackOutlined,
+  StopOutlined,
   TeamOutlined,
   UploadOutlined,
 } from '@ant-design/icons';
@@ -40,7 +41,9 @@ import {
   batchRestoreUsers,
   createUser,
   deleteUser,
+  disableUser,
   downloadUserTemplate,
+  enableUser,
   fetchTrashUsers,
   fetchUsers,
   purgeUser,
@@ -221,6 +224,22 @@ export default function UsersPage() {
     }
   };
 
+  const onToggleActive = async (user: UserOut, enable: boolean) => {
+    try {
+      if (enable) {
+        await enableUser(user.id);
+        message.success(`用户「${user.username}」已启用`);
+      } else {
+        await disableUser(user.id);
+        message.success(`用户「${user.username}」已禁用（离职处理）`);
+      }
+      await loadActive();
+    } catch (e) {
+      const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      message.error(detail ?? '操作失败，请稍后再试');
+    }
+  };
+
   // ── 重置密码 ──
   const openReset = async (user: UserOut) => {
     setResetTarget(user);
@@ -250,7 +269,7 @@ export default function UsersPage() {
       setSelectedRowKeys([]);
       await loadActive();
     } catch (e) {
-      const err = e as { response?: { data?: { detail?: string | { errors?: string[] } } } };
+      const err = e as { response?: { data?: { detail?: string | { message?: string; errors?: string[] } } } };
       const detail = err?.response?.data?.detail;
       // 预检失败：后端返回 { message, errors }
       if (typeof detail === 'object' && detail?.errors) {
@@ -277,7 +296,7 @@ export default function UsersPage() {
       setTrashSelectedRowKeys([]);
       await loadTrash();
     } catch (e) {
-      const err = e as { response?: { data?: { detail?: string | { errors?: string[] } } } };
+      const err = e as { response?: { data?: { detail?: string | { message?: string; errors?: string[] } } } };
       const detail = err?.response?.data?.detail;
       if (typeof detail === 'object' && detail?.errors) {
         setBatchRestoreErrors(detail.errors);
@@ -346,17 +365,30 @@ export default function UsersPage() {
       render: (r: UserRole) => <Tag color={ROLE_COLORS[r]}>{ROLE_LABELS[r] ?? r}</Tag>,
     },
     {
+      title: '状态', dataIndex: 'is_active', key: 'is_active', width: 90,
+      render: (v: boolean) => v ? <Tag color="success">启用</Tag> : <Tag color="volcano">禁用</Tag>,
+    },
+    {
       title: '首次改密', dataIndex: 'must_change_password', key: 'must_change_password', width: 100,
       render: (v: boolean) => v ? <Tag color="orange">待修改</Tag> : <Tag color="success">已设置</Tag>,
     },
     {
-      title: '操作', key: 'action', width: 250,
+      title: '操作', key: 'action', width: 320,
       render: (_, row) => (
-        <Space size={4}>
+        <Space size={4} wrap>
           <Button size="small" icon={<EditOutlined />} onClick={() => openEdit(row)}>编辑</Button>
           <Popconfirm title="确认重置该用户的密码？" description="将生成新的随机密码，用户下次登录需重新修改。" okText="重置" cancelText="取消" onConfirm={() => void openReset(row)}>
             <Button size="small" icon={<KeyOutlined />}>重置密码</Button>
           </Popconfirm>
+          {row.is_active === false ? (
+            <Popconfirm title="确认启用该用户？" description="启用后用户可正常登录。" okText="启用" cancelText="取消" onConfirm={() => void onToggleActive(row, true)}>
+              <Button size="small" type="primary" ghost icon={<ReloadOutlined />}>启用</Button>
+            </Popconfirm>
+          ) : (
+            <Popconfirm title="确认禁用该用户（离职处理）？" description="禁用后用户无法登录，但数据保留，可随时启用恢复。" okText="禁用" okButtonProps={{ danger: true }} cancelText="取消" onConfirm={() => void onToggleActive(row, false)}>
+              <Button size="small" danger icon={<StopOutlined />}>禁用</Button>
+            </Popconfirm>
+          )}
           <Popconfirm title="确认删除该用户？" description="用户将移入回收站，7 天内可恢复。" okText="删除" okButtonProps={{ danger: true }} cancelText="取消" onConfirm={() => onDelete(row)}>
             <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
           </Popconfirm>

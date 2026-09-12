@@ -8,7 +8,7 @@
 | **UI 组件** | Ant Design 5 + Tailwind CSS | 后台成熟、定制灵活 |
 | **状态管理** | Zustand + React Query | 轻量全局 + 服务端缓存 |
 | **后端框架** | Python 3.10+ / FastAPI | 异步、自动文档、AI 生态 |
-| **RAG 编排** | LangGraph | 有状态复杂流程（HyDE/多路召回） |
+| **RAG 编排** | 自研状态化 RAG 编排（HyDE → BGE-M3 稠密/稀疏混合检索 → RRF 融合 → BGE-Reranker 精排 → 相关性拒答 → 生成） | 有状态复杂流程（HyDE/多路召回），不依赖第三方编排框架，核心实现见 application/rag_service.py |
 | **大模型** | Qwen2.5-14B-Instruct (AWQ 量化) | 中文 SOTA，单卡 24GB 可跑 |
 | **Embedding** | BAAI/bge-m3 | 稠密+稀疏向量，检索精度高 |
 | **Rerank** | BAAI/bge-reranker-v2-m3 | 精排提升准确率 |
@@ -30,8 +30,7 @@ knowledge-platform/
 │ │ ├── domain/ # 业务实体（Document, Chunk, KB...）
 │ │ ├── application/ # 用例服务（上传、问答、评估）
 │ │ ├── infrastructure/ # 向量库、LLM、解析器、DB、缓存
-│ │ ├── graph/ # LangGraph 节点（检索/重排/生成/HyDE）
-│ │ └── utils/ # 日志、切分工具
+│ │ └── utils/ # 日志、切分工具（RAG 编排在 application/rag_service.py）
 │ ├── tests/
 │ └── Dockerfile
 ├── frontend/

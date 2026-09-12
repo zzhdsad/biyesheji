@@ -131,7 +131,7 @@ def test_hyde_rewrites_retrieval_query(client, monkeypatch):
         return orig_encode(texts)
 
     real_emb.encode = spy_encode  # type: ignore[assignment]
-    monkeypatch.setattr(rag_module, "get_embedding", lambda: real_emb)
+    monkeypatch.setattr(rag_module, "get_embedding", lambda config=None: real_emb)
 
     try:
         kb_id = _make_kb(client)
@@ -163,7 +163,7 @@ def test_hyde_disabled_uses_raw_question(client, monkeypatch):
         return orig_encode(texts)
 
     real_emb.encode = spy_encode  # type: ignore[assignment]
-    monkeypatch.setattr(rag_module, "get_embedding", lambda: real_emb)
+    monkeypatch.setattr(rag_module, "get_embedding", lambda config=None: real_emb)
 
     kb_id = _make_kb(client)
     _upload(client, kb_id, "考勤.txt", "# 考勤\n公司考勤制度规定每日工作八小时。")

@@ -93,7 +93,7 @@
 | 层级 | 组件 | 选型理由 |
 | :--- | :--- | :--- |
 | **后端框架** | Python 3.10+ / FastAPI | 异步高性能，自动生成 OpenAPI 文档，便于前后端联调 |
-| **RAG 编排** | LangGraph | 支持复杂状态流转，便于实现 HyDE、多路召回等高级流程 |
+| **RAG 编排** | 自研状态化 RAG 编排（HyDE → BGE-M3 稠密/稀疏混合检索 → RRF 融合 → BGE-Reranker 精排 → 相关性拒答 → 生成） | 支持复杂状态流转，便于实现 HyDE、多路召回等高级流程，不依赖第三方编排框架 |
 | **大语言模型** | Qwen2.5-14B-Instruct（AWQ 量化）或 DeepSeek-V3 | 中文能力强，单卡 24GB 显存可运行，商业友好 |
 | **Embedding 模型** | BAAI/bge-m3 或 text2vec-large-chinese | 中文语义理解 SOTA，支持稠密与稀疏向量 |
 | **向量数据库** | Milvus（或 Pgvector + pgAdmin） | 支持百万级向量、混合检索、高可用，企业级标配 |
@@ -114,9 +114,8 @@ backend/
 ├── api/ # 路由层（FastAPI 端点）
 ├── core/ # 配置、常量、异常定义
 ├── domain/ # 业务实体（Document, Chunk, Answer）
-├── application/ # 用例服务（上传、问答、评估）
-├── infrastructure/ # 基础设施（向量库客户端、LLM 客户端、解析器）
-└── graph/ # LangGraph 状态图定义
+├── application/ # 用例服务（上传、问答、RAG 编排 rag_service、评估）
+└── infrastructure/ # 基础设施（向量库客户端、LLM 客户端、解析器）
 ```
 
 

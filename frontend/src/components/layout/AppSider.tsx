@@ -26,6 +26,7 @@ import {
   ControlOutlined,
   DashboardOutlined,
   DatabaseOutlined,
+  AuditOutlined,
   DesktopOutlined,
   DeleteOutlined,
   DownOutlined,
@@ -74,7 +75,8 @@ const NAV_ITEMS: Required<MenuProps>['items'] = [
       { key: '/users', icon: <TeamOutlined />, label: '用户管理' },
       { key: '/evaluation', icon: <ExperimentOutlined />, label: '评估面板' },
       { key: '/admin', icon: <DashboardOutlined />, label: '系统仪表盘' },
-      { key: '/settings', icon: <ControlOutlined />, label: '模型设置' },
+      { key: '/audit', icon: <AuditOutlined />, label: '审计日志' },
+      { key: '/settings', icon: <ControlOutlined />, label: '系统设置' },
     ],
   },
 ];
@@ -199,6 +201,7 @@ export function AppSider() {
     if (pathname.startsWith('/users')) return ['/users'];
     if (pathname.startsWith('/evaluation')) return ['/evaluation'];
     if (pathname.startsWith('/admin')) return ['/admin'];
+    if (pathname.startsWith('/audit')) return ['/audit'];
     if (pathname.startsWith('/settings')) return ['/settings'];
     return ['chat'];
   })();
