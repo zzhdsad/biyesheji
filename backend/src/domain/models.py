@@ -5,6 +5,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     BigInteger,
+    Column,
     DateTime,
     Float,
     ForeignKey,
@@ -12,6 +13,7 @@ from sqlalchemy import (
     Integer,
     SmallInteger,
     String,
+    Table,
     Text,
     func,
     text,
@@ -302,3 +304,63 @@ class Tag(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     color: Mapped[str] = mapped_column(String(16), default="")
     description: Mapped[str] = mapped_column(Text, default="")
+
+
+# 中药 ↔ 标签 多对多关联表（TASK-003）。
+# - herb_id CASCADE：删除中药时关联行自动清理
+# - tag_id RESTRICT：标签仍被中药引用时数据库层阻止删除（应用层 409 之外的兜底）
+herb_tags = Table(
+    "herb_tags",
+    Base.metadata,
+    Column(
+        "herb_id",
+        UUID(as_uuid=True),
+        ForeignKey("herbs.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "tag_id",
+        UUID(as_uuid=True),
+        ForeignKey("tags.id", ondelete="RESTRICT"),
+        primary_key=True,
+    ),
+)
+
+
+class Herb(Base, TimestampMixin):
+    """中药资源（TASK-003）。
+
+    分类通过 category_id 多对一关联 categories（resource_type='herb' 的树节点）；
+    标签通过 herb_tags 与 Tag 多对多。不使用 JSONB、不做软删除/多态关联。
+    """
+
+    __tablename__ = "herbs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    aliases: Mapped[list[str]] = mapped_column(
+        ARRAY(String(128)), default=list
+    )
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    properties: Mapped[str] = mapped_column(String(255), default="")  # 性味，如“苦，寒”
+    channels: Mapped[list[str]] = mapped_column(
+        ARRAY(String(32)), default=list
+    )  # 归经，如 ['肺经', '胃经']
+    effects: Mapped[str] = mapped_column(Text, default="")  # 功效
+    source: Mapped[str] = mapped_column(String(255), default="")  # 出处/基原
+    description: Mapped[str] = mapped_column(Text, default="")
+
+    __table_args__ = (
+        Index("ix_herbs_aliases_gin", "aliases", postgresql_using="gin"),
+        Index("ix_herbs_channels_gin", "channels", postgresql_using="gin"),
+    )
+
+    # selectin 预加载，避免异步会话中隐式懒加载触发 MissingGreenlet；
+    # 不建 back_populates，Tag 模型保持不变
+    tags: Mapped[list[Tag]] = relationship(
+        secondary=herb_tags, lazy="selectin"
+    )
+    # 分类对象（多对一），仅用于响应序列化；category_id 的 FK RESTRICT 不变
+    category: Mapped[Category | None] = relationship(lazy="selectin")

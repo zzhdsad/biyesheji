@@ -17,6 +17,7 @@ from src.api.routes import (
     documents,
     evaluation,
     feedbacks,
+    herbs,
     knowledge_bases,
     settings,
     taxonomy,
@@ -38,6 +39,7 @@ protected_router.include_router(documents.router)
 protected_router.include_router(chat.router)
 protected_router.include_router(knowledge_bases.router)
 protected_router.include_router(taxonomy.router)  # TASK-002：分类与标签
+protected_router.include_router(herbs.router)  # TASK-003：中药管理
 protected_router.include_router(evaluation.router)
 protected_router.include_router(feedbacks.router)  # PRD §3.6：用户反馈收集
 protected_router.include_router(admin.router)  # PRD §5.2：系统仪表盘统计（仅 admin）
