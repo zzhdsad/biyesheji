@@ -4,6 +4,7 @@ import { useState, type ReactNode } from 'react';
 import { Avatar, Collapse, Tag, Typography } from 'antd';
 import { RobotOutlined, UserOutlined, FileTextOutlined } from '@ant-design/icons';
 import type { Citation, ChatMessage } from '@/types';
+import { credibilityColor } from '@/constants/source';
 import { FeedbackButtons } from './FeedbackButtons';
 
 const { Text, Paragraph } = Typography;
@@ -69,6 +70,16 @@ function cardLabel(c: Citation): ReactNode {
       </Text>
       {c.page_num != null && c.page_num > 0 && (
         <Text type="secondary">第 {c.page_num} 页</Text>
+      )}
+      {c.source_type && (
+        <Tag
+          color={credibilityColor(c.credibility_level)}
+          style={{ margin: 0, fontSize: 12 }}
+        >
+          {c.source_type}
+          {c.era ? `·${c.era}` : ''}
+          {c.credibility_level != null ? `·Lv${c.credibility_level}` : ''}
+        </Tag>
       )}
       {c.title_path && <Text type="secondary" style={{ fontSize: 12 }}>· {c.title_path}</Text>}
       {c.score != null && (

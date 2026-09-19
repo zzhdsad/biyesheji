@@ -28,6 +28,7 @@ from src.core.deps import get_accessible_kb_ids
 from src.core.exceptions import NotFoundError, PermissionDeniedError
 from src.domain.models import KBMember, KnowledgeBase, User
 from src.infrastructure.database import get_db
+from src.utils.timeutil import utcnow
 
 router = APIRouter(prefix="/kb", tags=["knowledge-bases"])
 
@@ -219,7 +220,7 @@ async def delete_kb(
     user: User = request.state.user
     kb = await _require_kb_owner_or_admin(db, request, kb_id)
 
-    kb.deleted_at = datetime.utcnow()
+    kb.deleted_at = utcnow()
     await db.commit()
 
     audit = AuditService(db)
@@ -246,7 +247,7 @@ async def list_trash_kbs(
         raise PermissionDeniedError("仅管理员可查看回收站")
 
     # 清理过期项
-    cutoff = datetime.utcnow() - timedelta(days=TRASH_RETENTION_DAYS)
+    cutoff = utcnow() - timedelta(days=TRASH_RETENTION_DAYS)
     expired = (await db.scalars(select(KnowledgeBase).where(KnowledgeBase.deleted_at < cutoff))).all()
     for kb in expired:
         await db.delete(kb)

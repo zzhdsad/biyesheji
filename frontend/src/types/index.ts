@@ -29,6 +29,17 @@ export interface TokenResponse {
 
 export type Role = 'user' | 'assistant';
 
+/** 中医文献来源类型（与后端 src.core.source_meta 受控枚举一致）。 */
+export type SourceType =
+  | '国家标准'
+  | '规划教材'
+  | '经典古籍'
+  | '后世医家'
+  | '民间偏方';
+
+/** 成书/出版年代（受控枚举）。 */
+export type SourceEra = '先秦' | '汉' | '唐' | '宋' | '明' | '清' | '现代';
+
 export interface Citation {
   chunk_id: string;
   source_index: number; // 来源编号（对应答案内联 [citation: 编号, 页码]）
@@ -38,6 +49,9 @@ export interface Citation {
   title_path?: string | null;
   content: string;
   score?: number;
+  source_type?: SourceType | null;
+  era?: SourceEra | null;
+  credibility_level?: number | null;
 }
 
 export interface ChatMessage {
@@ -102,6 +116,9 @@ export interface DocumentItem {
   parse_status: ParseStatus;
   chunk_count: number;
   error_message?: string;
+  source_type?: SourceType | null;
+  era?: SourceEra | null;
+  credibility_level?: number | null;
   created_at: string;
 }
 
@@ -172,4 +189,32 @@ export interface EvaluationHistoryItem {
   answer_correctness: number;
   context_relevancy: number;
   created_at: string | null;
+}
+
+// ─────────────────────────── 分类与标签（TASK-002）───────────────────────────
+
+/** 分类适用的资源域（与后端 taxonomy RESOURCE_TYPES 一致，区别于中文 SourceType）。 */
+export type TaxonomyResourceType = 'herb' | 'prescription' | 'theory' | 'literature';
+
+/** 分类（tree=true 时 children 有值）。 */
+export interface Category {
+  id: string;
+  resource_type: TaxonomyResourceType;
+  name: string;
+  parent_id: string | null;
+  sort_order: number;
+  description: string;
+  created_at: string;
+  updated_at: string;
+  children?: Category[];
+}
+
+/** 标签（扁平、跨资源域）。 */
+export interface Tag {
+  id: string;
+  name: string;
+  color: string;
+  description: string;
+  created_at: string;
+  updated_at: string;
 }

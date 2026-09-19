@@ -1,105 +1,301 @@
-# 技术设计文档（TECH_DESIGN.md）— 精简版
+技术设计文档（TECH_DESIGN）
 
-## 1. 技术栈选择
+项目：中医药知识资源管理与智能问答系统
+更新时间：2026-09-18
+作用：说明系统整体技术架构与核心实现方式。
+产品需求以 PRD.md 为准，AI 开发规则以 AGENTS.md 为准。
 
-| 层级 | 选型 | 简要理由 |
-| :--- | :--- | :--- |
-| **前端框架** | Next.js 14 (App Router) + React | SSR、API Routes、企业级 |
-| **UI 组件** | Ant Design 5 + Tailwind CSS | 后台成熟、定制灵活 |
-| **状态管理** | Zustand + React Query | 轻量全局 + 服务端缓存 |
-| **后端框架** | Python 3.10+ / FastAPI | 异步、自动文档、AI 生态 |
-| **RAG 编排** | 自研状态化 RAG 编排（HyDE → BGE-M3 稠密/稀疏混合检索 → RRF 融合 → BGE-Reranker 精排 → 相关性拒答 → 生成） | 有状态复杂流程（HyDE/多路召回），不依赖第三方编排框架，核心实现见 application/rag_service.py |
-| **大模型** | Qwen2.5-14B-Instruct (AWQ 量化) | 中文 SOTA，单卡 24GB 可跑 |
-| **Embedding** | BAAI/bge-m3 | 稠密+稀疏向量，检索精度高 |
-| **Rerank** | BAAI/bge-reranker-v2-m3 | 精排提升准确率 |
-| **向量数据库** | Milvus 2.4 | 分布式、混合检索、高可用 |
-| **关系数据库** | PostgreSQL 15 | 元数据、用户、会话 |
-| **缓存/队列** | Redis 7 (Celery broker) | 异步任务 + 会话缓存 |
-| **文档解析** | Docling (IBM) + PaddleOCR | 表格/OCR 强，降级方案 |
-| **部署** | Docker Compose + Nginx | 一键私有化部署 |
-| **评估** | RAGAS（中文适配） | 自动化质量评估 |
+1. 总体架构
 
----
+系统采用前后端分离架构：
 
-## 2. 项目结构
-knowledge-platform/
-├── backend/
-│ ├── src/
-│ │ ├── api/routes/ # FastAPI 路由（documents, chat, kb, eval）
-│ │ ├── core/ # 配置、常量、异常
-│ │ ├── domain/ # 业务实体（Document, Chunk, KB...）
-│ │ ├── application/ # 用例服务（上传、问答、评估）
-│ │ ├── infrastructure/ # 向量库、LLM、解析器、DB、缓存
-│ │ └── utils/ # 日志、切分工具（RAG 编排在 application/rag_service.py）
-│ ├── tests/
-│ └── Dockerfile
-├── frontend/
-│ ├── src/app/ # Next.js App Router（chat/documents/kb/admin）
-│ ├── src/components/ # 原子/分子/页面组件
-│ ├── src/hooks/ # useChat, useDocuments
-│ ├── src/stores/ # Zustand stores
-│ ├── src/services/ # API 调用（Axios）
-│ └── Dockerfile
-├── docker-compose.yml
-└── .env.example
+Next.js
+   ↓ HTTP / SSE
+FastAPI
+   ↓
+PostgreSQL ─── Redis
+   ↓
+Milvus
+   ↓
+Embedding / Reranker / LLM
+技术栈
+前端：Next.js + React + Ant Design
+后端：FastAPI + SQLAlchemy Async
+关系数据库：PostgreSQL
+缓存与会话：Redis
+向量数据库：Milvus
+部署：Docker Compose
+Embedding：BGE-M3
+Reranker：BGE-Reranker
+大语言模型：LLM
+不使用 LangChain
+2. 系统分层
+2.1 传统业务层
 
-text
+传统系统是项目主体，负责：
 
----
+用户管理
+角色与权限
+知识资源管理
+中药管理
+方剂管理
+中医理论知识管理
+文献管理
+分类与标签
+普通检索
 
-## 3. 数据模型
+结构化业务数据主要使用 PostgreSQL 存储。
 
-### PostgreSQL（核心表）
-- **users**：id, email, username, hashed_password, role
-- **knowledge_bases**：id, name, description, visibility, owner_id
-- **kb_members**：(kb_id, user_id), role
-- **documents**：id, kb_id, file_name, parse_status, chunk_count
-- **conversations**：id, user_id, title, kb_ids[]
-- **messages**：id, conversation_id, role, content, citations (JSON)
-- **test_cases**：id, kb_id, question, golden_answer, golden_contexts
-- **evaluation_results**：id, test_case_id, retrieved_contexts, context_relevancy, answer_correctness
-- **feedbacks**：id, message_id, rating, comment
+2.2 AI 能力层
 
-### Milvus（向量集合）
-**Collection: `document_chunks`**
-- `id`, `doc_id`, `kb_id`, `chunk_index`, `content`, `page_num`, `title_path`
-- **`dense_vector`** (FLOAT_VECTOR, 1024d) — BGE-m3 稠密向量
-- **`sparse_vector`** (SPARSE_FLOAT_VECTOR) — BGE-m3 稀疏向量
-- 索引：dense→HNSW, sparse→SPARSE_INVERTED_INDEX
+AI 作为传统知识管理系统的增强模块。
 
-### Redis
-- `session:{user_id}` → 用户会话（7d TTL）
-- `conversation:{conv_id}:history` → 最近 N 轮消息（24h TTL）
-- Celery 任务队列 + 限频计数
+基本流程：
 
----
+用户问题
+ ↓
+Query Processing
+ ↓
+Retriever
+ ↓
+Reranker
+ ↓
+Evidence Gate
+ ↓
+LLM
+ ↓
+Citation
 
-## 4. 关键技术点
+AI 问答优先基于系统已有知识资源生成回答，不将 LLM 作为主要知识来源。
 
-| 技术难点 | 解决方案 |
-| :--- | :--- |
-| **文档解析鲁棒性** | Docling 为主 + PyPDF2/docx 降级；失败支持重试 |
-| **语义切片粒度** | 结构感知（按标题） + 递归切分（512~1024 tokens, overlap 50-100） |
-| **混合检索+重排** | 多路召回（稠密+稀疏）→ RRF 融合 → bge-reranker 精排 → 标量过滤（kb_id） |
-| **多轮对话上下文** | 历史窗口（最近3-5轮）+ 查询改写（用历史摘要生成检索 Query） |
-| **HyDE 实现** | 小模型（1.5B）生成假设答案 → 检索 → 主模型生成最终回答（可配置开关） |
-| **引用溯源** | Prompt 强制标注 `[citation: doc_id, page]`；后处理匹配；前端渲染引用卡片 |
-| **防幻觉** | System Prompt 强约束：“仅根据资料回答，找不到就说不知道”，并检查引用 |
-| **异步文档处理** | 上传后 Celery 任务异步解析 → 状态轮询/SSE 推送进度 |
-| **权限隔离** | RBAC（Admin/Owner/Editor/Viewer），所有检索加 kb_id 过滤，API 中间件鉴权 |
-| **私有化交付** | Docker Compose 一键启动，离线模型打包，数据持久化挂载，备份恢复脚本 |
-| **性能优化** | Milvus HNSW 索引；vLLM 连续批处理；Nginx 负载均衡（水平扩展） |
-| **质量评估** | RAGAS 指标（Context Relevancy / Answer Correctness / Faithfulness），支持测试集批量运行 |
+3. 数据存储
+PostgreSQL
 
----
+保存结构化业务数据：
 
-## 附：快速启动命令
+用户
+角色
+权限
+知识库
+知识资源
+中药
+方剂
+理论知识
+文献
+分类
+标签
+文档
+Chunk 元数据
+问答记录
+操作记录
+Redis
 
-```bash
-git clone <repo>
-cp .env.example .env
-docker compose up -d          # 启动 PostgreSQL + Milvus + Redis + 模型
-cd backend && pip install -r requirements.txt && uvicorn src.main:app --reload
-cd frontend && npm install && npm run dev
-# 访问 http://localhost:3000
-```
+主要用于：
+
+会话历史
+缓存
+临时状态
+Milvus
+
+用于 AI 语义检索。
+
+主要保存：
+
+Chunk 向量
+Chunk 标识
+文档标识
+知识库标识
+必要来源信息
+
+PostgreSQL 是业务数据的主要来源，Milvus 是 AI 检索索引。
+
+4. 文档处理流程
+上传文档
+ ↓
+文件解析
+ ↓
+结构感知切分
+ ↓
+保存 Chunk
+ ↓
+BGE-M3 向量化
+ ↓
+Dense + Sparse
+ ↓
+写入 Milvus
+
+文档处理需要保证：
+
+文档与 Chunk 可以关联
+Chunk 可以追溯到原始文档
+来源信息不会在处理过程中丢失
+
+具体支持的文件类型以当前代码实现为准。
+
+5. 普通检索
+
+传统检索不依赖 AI。
+
+关键词
+ ↓
+PostgreSQL
+ ↓
+分类 / 标签 / 类型过滤
+ ↓
+结果列表
+
+普通检索主要用于：
+
+知识资源查询
+文献查询
+分类查询
+标签查询
+6. RAG Baseline
+
+当前 RAG Baseline：
+
+用户问题
+ ↓
+HyDE
+ ↓
+BGE-M3
+ ↓
+Dense + Sparse
+ ↓
+RRF
+ ↓
+Reranker
+ ↓
+相似度 Gate
+ ↓
+LLM
+ ↓
+Citation
+
+现有 RAG 能力包括：
+
+HyDE 查询增强
+Dense Retrieval
+Sparse Retrieval
+RRF 融合
+Reranker 重排序
+证据不足限制生成
+来源引用
+多轮会话
+SSE 流式回答
+
+Baseline 应保持稳定，后续研究功能在其基础上扩展。
+
+7. AI 问答接口
+
+主要接口：
+
+POST /ask
+POST /ask-stream
+
+流式接口使用 SSE。
+
+主要事件：
+
+citation
+delta
+done
+
+多轮对话保留最近若干轮历史，具体实现以当前代码为准。
+
+8. 未来研究架构
+
+Baseline 稳定后，可以逐步增加动态检索和证据增强。
+
+Query
+ ↓
+Query Analyzer
+ ↓
+Dynamic Router
+ ↓
+┌─────────────────┐
+│ Hybrid RAG      │
+│ KG Retrieval    │
+│ Other Retrieval │
+└─────────────────┘
+ ↓
+Fusion
+ ↓
+Reranker
+ ↓
+Evidence Gate
+ ↓
+LLM
+ ↓
+Citation
+
+其中：
+
+Query Analyzer：分析问题类型
+Dynamic Router：选择检索策略
+Retriever：执行具体检索
+Evidence Gate：判断证据是否足够
+LLM：根据证据生成回答
+Citation：提供来源信息
+
+研究功能应支持关闭或固定策略，方便进行对比实验。
+
+9. 知识图谱
+
+如果后续需要加入知识图谱，知识图谱作为检索来源之一，不作为整个系统的核心架构。
+
+原则：
+
+数据来源可追溯
+优先使用公开或经过审核的数据
+控制图谱规模
+不伪造大量知识三元组
+可以与文本 RAG 并行使用
+10. 安全与领域约束
+
+系统定位为中医知识学习与查询辅助工具。
+
+不实现：
+
+根据症状进行疾病诊断
+自动生成处方
+针对具体患者制定治疗方案
+
+知识来源需要尽可能保留。
+
+来源等级属于内部管理信息，不代表绝对正确。
+
+11. 实验设计
+
+研究实验采用逐步增加能力的方式：
+
+Baseline
+ ↓
+Dense Retrieval
+ ↓
+Hybrid Retrieval
+ ↓
++ Reranker
+ ↓
++ HyDE
+ ↓
++ Research Method
+
+实验需要使用真实测试数据，并记录：
+
+测试集
+实验配置
+实验结果
+对比结果
+
+不得在没有实验数据的情况下预先声称某方法一定有效。
+
+12. 开发原则
+优先复用现有代码，不推倒重做。
+传统业务优先保证稳定和完整。
+AI 功能作为传统系统的增强模块。
+不为了技术先进而随意增加框架、服务和依赖。
+数据库结构修改必须考虑已有数据。
+API 修改需要考虑前端兼容性。
+RAG 核心链路修改后必须进行完整问答测试。
+新研究功能应尽量模块化，并支持实验开关。

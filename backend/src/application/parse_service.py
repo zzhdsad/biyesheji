@@ -74,6 +74,9 @@ class ParseService:
                     token_count=estimate_tokens(rc.content),
                     title_path=rc.title_path,
                     # page_num 待 Docling 页码映射（TODO: 下个迭代）
+                    # 来源可信度冗余自文档，保证重新解析后与 documents 一致
+                    source_type=doc.source_type,
+                    credibility_level=doc.credibility_level,
                 )
             )
         doc.parse_status = "success"

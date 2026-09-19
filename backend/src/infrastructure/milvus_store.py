@@ -4,6 +4,9 @@ Collection: document_chunks
 - 标量：id(PK), doc_id, kb_id, chunk_index, content, page_num, title_path
 - dense_vector (FLOAT_VECTOR, 1024d) → HNSW/COSINE
 - sparse_vector (SPARSE_FLOAT_VECTOR) → SPARSE_INVERTED_INDEX/IP
+- 动态标量（enable_dynamic_field=True 的集合）：source_type(VARCHAR)、
+  credibility_level(INT64)，来源可信度标注随向量写入、检索带回；
+  老集合（未开启动态字段）自动降级：不写/不取这两个字段，由 PG enrichment 兜底
 """
 
 from abc import ABC, abstractmethod
@@ -31,6 +34,9 @@ class VectorRow:
     title_path: str | None
     dense_vector: list[float]
     sparse_vector: dict[int, float] = field(default_factory=dict)
+    # 来源可信度（动态字段；None/0 表示该文档未标注，写入时降级为缺省值）
+    source_type: str | None = None
+    credibility_level: int | None = None
 
 
 class BaseVectorStore(ABC):
@@ -82,6 +88,25 @@ class MilvusStore(BaseVectorStore):
     def __init__(self, uri: str | None = None) -> None:
         self._uri = uri or settings.MILVUS_URI
         self._client = None
+        # 动态字段能力缓存：None=未探测 / True=已开启 / False=老集合不支持
+        self._dynamic_enabled: bool | None = None
+
+    def _supports_dynamic_fields(self) -> bool:
+        """探测集合是否开启动态字段（老集合无法事后加列，需降级）。结果缓存。"""
+        if self._dynamic_enabled is not None:
+            return self._dynamic_enabled
+        client = self._get_client()
+        try:
+            if not client.has_collection(self.COLLECTION):
+                # 集合不存在：ensure_collection 会以动态字段方式创建
+                self._dynamic_enabled = True
+            else:
+                desc = client.describe_collection(self.COLLECTION)
+                self._dynamic_enabled = bool(desc.get("enable_dynamic_field", False))
+        except Exception as exc:
+            logger.warning(f"Milvus 动态字段能力探测失败，按不支持降级：{exc}")
+            self._dynamic_enabled = False
+        return self._dynamic_enabled
 
     def _get_client(self):
         if self._client is None:
@@ -98,11 +123,14 @@ class MilvusStore(BaseVectorStore):
     def ensure_collection(self) -> None:
         client = self._get_client()
         if client.has_collection(self.COLLECTION):
+            self._supports_dynamic_fields()
             return
         try:
             from pymilvus import DataType
 
-            schema = client.create_schema(auto_id=False, enable_dynamic_field=False)
+            # 动态字段开启：来源可信度标量（source_type/credibility_level）
+            # 直接随实体写入，无需显式建列，避免后续加字段时重建集合
+            schema = client.create_schema(auto_id=False, enable_dynamic_field=True)
             schema.add_field("id", DataType.VARCHAR, is_primary=True, max_length=64)
             schema.add_field("doc_id", DataType.VARCHAR, max_length=64)
             schema.add_field("kb_id", DataType.VARCHAR, max_length=64)
@@ -130,7 +158,10 @@ class MilvusStore(BaseVectorStore):
             client.create_collection(
                 collection_name=self.COLLECTION, schema=schema, index_params=index_params
             )
-            logger.info(f"Milvus 集合已创建：{self.COLLECTION}（dense HNSW + sparse 倒排）")
+            self._dynamic_enabled = True
+            logger.info(
+                f"Milvus 集合已创建：{self.COLLECTION}（dense HNSW + sparse 倒排 + 动态字段）"
+            )
         except Exception as exc:
             raise VectorStoreError(f"创建 Milvus 集合失败：{exc}") from exc
 
@@ -138,8 +169,11 @@ class MilvusStore(BaseVectorStore):
         if not rows:
             return 0
         client = self._get_client()
-        data = [
-            {
+        # 老集合（未开启动态字段）无法写入来源标量：降级跳过，来源信息由 PG 兜底
+        dynamic = self._supports_dynamic_fields()
+        data = []
+        for r in rows:
+            item = {
                 "id": r.id,
                 "doc_id": r.doc_id,
                 "kb_id": r.kb_id,
@@ -150,8 +184,11 @@ class MilvusStore(BaseVectorStore):
                 "dense_vector": r.dense_vector,
                 "sparse_vector": r.sparse_vector,
             }
-            for r in rows
-        ]
+            if dynamic:
+                # 动态字段缺省值与 page_num 约定一致："" / 0 表示未标注
+                item["source_type"] = r.source_type or ""
+                item["credibility_level"] = r.credibility_level or 0
+            data.append(item)
         try:
             # 分批插入，避免超大 payload
             total = 0
@@ -170,20 +207,23 @@ class MilvusStore(BaseVectorStore):
         client = self._get_client()
         if not client.has_collection(self.COLLECTION):
             return []
+        output_fields = [
+            "id",
+            "doc_id",
+            "kb_id",
+            "chunk_index",
+            "content",
+            "page_num",
+            "title_path",
+            "dense_vector",
+            "sparse_vector",
+        ]
+        if self._supports_dynamic_fields():
+            output_fields += ["source_type", "credibility_level"]
         rows = client.query(
             collection_name=self.COLLECTION,
             filter=f'doc_id == "{doc_id}"',
-            output_fields=[
-                "id",
-                "doc_id",
-                "kb_id",
-                "chunk_index",
-                "content",
-                "page_num",
-                "title_path",
-                "dense_vector",
-                "sparse_vector",
-            ],
+            output_fields=output_fields,
             limit=16384,
         )
         return [
@@ -195,6 +235,8 @@ class MilvusStore(BaseVectorStore):
                 "content": r["content"],
                 "page_num": r["page_num"],
                 "title_path": r["title_path"],
+                "source_type": r.get("source_type") or None,
+                "credibility_level": r.get("credibility_level") or None,
                 "dense_vector": [float(x) for x in r["dense_vector"]],
                 "sparse_vector": {int(k): float(v) for k, v in r["sparse_vector"].items()},
             }
@@ -232,6 +274,17 @@ class MilvusStore(BaseVectorStore):
             return []
         # 强制 kb_id 过滤（TECH_DESIGN：所有检索加 kb_id 过滤，禁止越权访问）
         kb_filter = "kb_id in [" + ", ".join(f'"{k}"' for k in kb_ids) + "]"
+        output_fields = [
+            "id",
+            "doc_id",
+            "kb_id",
+            "chunk_index",
+            "content",
+            "page_num",
+            "title_path",
+        ]
+        if self._supports_dynamic_fields():
+            output_fields += ["source_type", "credibility_level"]
         try:
             results = client.search(
                 collection_name=self.COLLECTION,
@@ -239,36 +292,11 @@ class MilvusStore(BaseVectorStore):
                 anns_field="dense_vector",
                 limit=top_k,
                 filter=kb_filter,
-                output_fields=[
-                    "id",
-                    "doc_id",
-                    "kb_id",
-                    "chunk_index",
-                    "content",
-                    "page_num",
-                    "title_path",
-                ],
+                output_fields=output_fields,
             )[0]
         except Exception as exc:
             raise VectorStoreError(f"Milvus 检索失败：{exc}") from exc
-        hits = []
-        for hit in results:
-            entity = hit.get("entity", {})
-            page_num = entity.get("page_num")
-            hits.append(
-                {
-                    "id": entity.get("id"),
-                    "doc_id": entity.get("doc_id"),
-                    "kb_id": entity.get("kb_id"),
-                    "chunk_index": entity.get("chunk_index"),
-                    "content": entity.get("content", ""),
-                    # page_num=0 表示暂无页码（见 insert 注释），对调用方还原为 None
-                    "page_num": page_num if page_num else None,
-                    "title_path": entity.get("title_path") or None,
-                    "score": float(hit.get("distance", 0.0)),
-                }
-            )
-        return hits
+        return [self._parse_hit(hit) for hit in results]
 
     def search_sparse(
         self, query_sparse: dict, kb_ids: list[str], top_k: int
@@ -278,6 +306,17 @@ class MilvusStore(BaseVectorStore):
         if not client.has_collection(self.COLLECTION) or not kb_ids or not query_sparse:
             return []
         kb_filter = "kb_id in [" + ", ".join(f'"{k}"' for k in kb_ids) + "]"
+        output_fields = [
+            "id",
+            "doc_id",
+            "kb_id",
+            "chunk_index",
+            "content",
+            "page_num",
+            "title_path",
+        ]
+        if self._supports_dynamic_fields():
+            output_fields += ["source_type", "credibility_level"]
         try:
             results = client.search(
                 collection_name=self.COLLECTION,
@@ -285,35 +324,33 @@ class MilvusStore(BaseVectorStore):
                 anns_field="sparse_vector",
                 limit=top_k,
                 filter=kb_filter,
-                output_fields=[
-                    "id",
-                    "doc_id",
-                    "kb_id",
-                    "chunk_index",
-                    "content",
-                    "page_num",
-                    "title_path",
-                ],
+                output_fields=output_fields,
             )[0]
         except Exception as exc:
             raise VectorStoreError(f"Milvus 稀疏检索失败：{exc}") from exc
-        hits = []
-        for hit in results:
-            entity = hit.get("entity", {})
-            page_num = entity.get("page_num")
-            hits.append(
-                {
-                    "id": entity.get("id"),
-                    "doc_id": entity.get("doc_id"),
-                    "kb_id": entity.get("kb_id"),
-                    "chunk_index": entity.get("chunk_index"),
-                    "content": entity.get("content", ""),
-                    "page_num": page_num if page_num else None,
-                    "title_path": entity.get("title_path") or None,
-                    "score": float(hit.get("distance", 0.0)),
-                }
-            )
-        return hits
+        return [self._parse_hit(hit) for hit in results]
+
+    @staticmethod
+    def _parse_hit(hit: dict) -> dict:
+        """标准化检索命中：page_num=0/source 缺省值还原为 None。"""
+        entity = hit.get("entity", {})
+        page_num = entity.get("page_num")
+        source_type = entity.get("source_type")
+        credibility_level = entity.get("credibility_level")
+        return {
+            "id": entity.get("id"),
+            "doc_id": entity.get("doc_id"),
+            "kb_id": entity.get("kb_id"),
+            "chunk_index": entity.get("chunk_index"),
+            "content": entity.get("content", ""),
+            # page_num=0 表示暂无页码（见 insert 注释），对调用方还原为 None
+            "page_num": page_num if page_num else None,
+            "title_path": entity.get("title_path") or None,
+            # 动态字段缺省值 "" / 0 同样还原为 None（未标注）
+            "source_type": source_type or None,
+            "credibility_level": credibility_level or None,
+            "score": float(hit.get("distance", 0.0)),
+        }
 
 
 class InMemoryVectorStore(BaseVectorStore):
@@ -362,6 +399,8 @@ class InMemoryVectorStore(BaseVectorStore):
                 "content": v.content,
                 "page_num": v.page_num,
                 "title_path": v.title_path,
+                "source_type": v.source_type,
+                "credibility_level": v.credibility_level,
                 "score": round(score, 6),
             }
             for score, v in scored[:top_k]
@@ -394,6 +433,8 @@ class InMemoryVectorStore(BaseVectorStore):
                 "content": v.content,
                 "page_num": v.page_num,
                 "title_path": v.title_path,
+                "source_type": v.source_type,
+                "credibility_level": v.credibility_level,
                 "score": round(score, 6),
             }
             for score, v in scored[:top_k]
@@ -409,6 +450,8 @@ class InMemoryVectorStore(BaseVectorStore):
                 "content": r.content,
                 "page_num": r.page_num,
                 "title_path": r.title_path,
+                "source_type": r.source_type,
+                "credibility_level": r.credibility_level,
                 "dense_vector": list(r.dense_vector),
                 "sparse_vector": dict(r.sparse_vector),
             }

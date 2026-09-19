@@ -21,6 +21,7 @@ from src.core.deps import get_accessible_kb_ids
 from src.core.exceptions import NotFoundError, PermissionDeniedError
 from src.domain.models import Chunk, Document, KnowledgeBase, User
 from src.infrastructure.database import get_db
+from src.utils.timeutil import utcnow
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -36,6 +37,9 @@ class DocumentOut(BaseModel):
     parse_status: str
     chunk_count: int
     error_message: str
+    source_type: str | None = None
+    era: str | None = None
+    credibility_level: int | None = None
     created_at: datetime
 
 
@@ -49,6 +53,24 @@ class ChunkOut(BaseModel):
     token_count: int
     title_path: str | None
     page_num: int | None
+    source_type: str | None = None
+    credibility_level: int | None = None
+
+
+class BackfillSourceRequest(BaseModel):
+    """历史文档来源可信度批量补标请求（三选一筛选，至少给一个）。"""
+
+    source_type: str
+    era: str | None = None
+    doc_ids: list[uuid.UUID] | None = None
+    file_names: list[str] | None = None
+    kb_id: uuid.UUID | None = None
+
+
+class BackfillSourceResponse(BaseModel):
+    updated: int
+    doc_ids: list[str]
+    reindex_doc_ids: list[str]
 
 
 # ── 公共安全校验 ─────────────────────────────────────────────────────────────
@@ -171,18 +193,55 @@ async def upload_document(
     background_tasks: BackgroundTasks,
     kb_id: uuid.UUID = Form(...),
     file: UploadFile = File(...),
+    source_type: str | None = Form(None),
+    era: str | None = Form(None),
     db: AsyncSession = Depends(get_db),
 ) -> Document:
     """上传文档（PDF/DOCX/TXT/MD）。
 
+    可选来源标注：source_type（受控枚举）+ era；credibility_level 由后端按
+    固定映射自动推导，不接受表单传入。
+
     安全：权限校验已集成到 DocumentService.upload 内部，
-    校验顺序为：文件类型 (400) → 文件大小 (400) → KB 存在性 (404) → KB 权限 (403)。
+    校验顺序为：来源枚举 (400) → 文件类型 (400) → 文件大小 (400)
+    → KB 存在性 (404) → KB 权限 (403)。
     """
     user: User = request.state.user
     service = DocumentService(db)
-    doc = await service.upload(kb_id=kb_id, file=file, user=user)
+    doc = await service.upload(
+        kb_id=kb_id, file=file, user=user, source_type=source_type, era=era
+    )
     _dispatch_parse(background_tasks, doc.id)
     return doc
+
+
+@router.post("/backfill-source", response_model=BackfillSourceResponse)
+async def backfill_document_source(
+    body: BackfillSourceRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """历史文档来源可信度批量补标（按文档 id / 文档名 / 知识库批次）。
+
+    - 枚举外取值 400；credibility_level 后端固定映射推导
+    - documents 与 chunks 同步更新；completed 文档自动派发重新向量化以更新 Milvus
+    - 安全：非管理员仅能补标自己可访问知识库内的文档
+    """
+    user: User = request.state.user
+    accessible = None if user.role == "admin" else await get_accessible_kb_ids(db, user)
+    result = await DocumentService(db).backfill_source(
+        source_type=body.source_type,
+        era=body.era,
+        doc_ids=body.doc_ids,
+        file_names=body.file_names,
+        kb_id=body.kb_id,
+        accessible_kb_ids=accessible,
+    )
+    # 已向量化文档需重新写入 Milvus 才能让来源标量生效（幂等：先清旧向量）
+    for doc_id in result["reindex_doc_ids"]:
+        _dispatch_vectorize(background_tasks, uuid.UUID(doc_id))
+    return result
 
 
 @router.get("/{doc_id}", response_model=DocumentOut)
@@ -275,7 +334,7 @@ async def delete_document(
     user: User = request.state.user
     doc = await _get_doc_with_access_check(db, user, doc_id)
 
-    doc.deleted_at = datetime.utcnow()
+    doc.deleted_at = utcnow()
     await db.commit()
     return {"id": str(doc_id), "deleted": True, "message": "已移入回收站，7天内可恢复"}
 
@@ -295,7 +354,7 @@ async def list_trash_documents(
         raise PermissionDeniedError("仅管理员可查看回收站")
 
     # 清理过期项
-    cutoff = datetime.utcnow() - timedelta(days=cfg.TRASH_RETENTION_DAYS)
+    cutoff = utcnow() - timedelta(days=cfg.TRASH_RETENTION_DAYS)
     expired = (await db.scalars(select(Document).where(Document.deleted_at < cutoff))).all()
     for d in expired:
         await db.delete(d)

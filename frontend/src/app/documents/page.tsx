@@ -10,6 +10,7 @@ import {
   Table,
   Tag,
   Tooltip,
+  Typography,
   Upload,
   message,
   type UploadProps,
@@ -22,11 +23,19 @@ import {
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import type { RcFile, UploadFile } from 'antd/es/upload';
-import type { DocumentItem, ParseStatus } from '@/types';
+import type { DocumentItem, ParseStatus, SourceEra, SourceType } from '@/types';
 import { uploadDocument } from '@/services/api';
 import { isParsing, useDocumentStore } from '@/stores/documentStore';
+import {
+  CREDIBILITY_MAP,
+  SOURCE_ERA_OPTIONS,
+  SOURCE_TYPE_OPTIONS,
+  credibilityColor,
+} from '@/constants/source';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
+
+const { Text } = Typography;
 
 const STATUS_MAP: Record<ParseStatus, { label: string; color: string }> = {
   pending: { label: '待解析', color: 'default' },
@@ -76,6 +85,10 @@ export default function DocumentsPage() {
     clearError,
   } = useDocumentStore();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
+  // 本批上传的来源标注（作用于随后选择的所有文件；credibility 只读、由类型带出）
+  const [sourceType, setSourceType] = useState<SourceType | null>(null);
+  const [era, setEra] = useState<SourceEra | null>(null);
+  const credibility = sourceType ? CREDIBILITY_MAP[sourceType] : null;
 
   // 初始化：加载知识库，并按 URL ?kb_id= 预选（来自「管理文档」跳转）
   useEffect(() => {
@@ -123,8 +136,11 @@ export default function DocumentsPage() {
       return;
     }
     try {
-      await uploadDocument(file as RcFile, selectedKbId, (p) =>
-        onProgress?.({ percent: p }),
+      await uploadDocument(
+        file as RcFile,
+        selectedKbId,
+        (p) => onProgress?.({ percent: p }),
+        { sourceType, era },
       );
       onSuccess?.({}, file);
     } catch (err) {
@@ -145,6 +161,29 @@ export default function DocumentsPage() {
       key: 'file_type',
       width: 80,
       render: (t: string) => t.toUpperCase(),
+    },
+    {
+      title: '来源类型',
+      dataIndex: 'source_type',
+      key: 'source_type',
+      width: 100,
+      render: (t?: SourceType | null) =>
+        t ? <Tag color={credibilityColor(CREDIBILITY_MAP[t])}>{t}</Tag> : <Text type="secondary">-</Text>,
+    },
+    {
+      title: '年代',
+      dataIndex: 'era',
+      key: 'era',
+      width: 70,
+      render: (t?: SourceEra | null) => t ?? '-',
+    },
+    {
+      title: '可信度',
+      dataIndex: 'credibility_level',
+      key: 'credibility_level',
+      width: 90,
+      render: (lv?: number | null) =>
+        lv ? <Tag color={credibilityColor(lv)}>Lv{lv}</Tag> : <Text type="secondary">-</Text>,
     },
     {
       title: '大小',
@@ -225,10 +264,10 @@ export default function DocumentsPage() {
 
   const headerLeft = <h2 style={{ margin: 0 }}>文档管理</h2>;
   const headerRight = (
-    <Space size="large" align="center">
+    <Space size="middle" align="center" wrap>
       <Select
         size="middle"
-        style={{ width: 220 }}
+        style={{ width: 200 }}
         placeholder="选择知识库筛选"
         value={selectedKbId ?? undefined}
         loading={loadingKbs}
@@ -236,6 +275,34 @@ export default function DocumentsPage() {
         options={knowledgeBases.map((kb) => ({ label: kb.name, value: kb.id }))}
         notFoundContent="暂无知识库"
       />
+      <Tooltip title="应用于本次选择上传的全部文件；留空则不标注（历史文档可后续补标）">
+        <Select
+          size="middle"
+          style={{ width: 120 }}
+          placeholder="来源类型"
+          allowClear
+          value={sourceType ?? undefined}
+          onChange={(v) => setSourceType((v as SourceType) ?? null)}
+          options={SOURCE_TYPE_OPTIONS}
+        />
+      </Tooltip>
+      <Select
+        size="middle"
+        style={{ width: 80 }}
+        placeholder="年代"
+        allowClear
+        value={era ?? undefined}
+        onChange={(v) => setEra((v as SourceEra) ?? null)}
+        options={SOURCE_ERA_OPTIONS}
+      />
+      <Tooltip title="可信度等级由来源类型按固定映射自动带出，不可手工修改">
+        <Tag
+          color={credibilityColor(credibility)}
+          style={{ margin: 0, minWidth: 52, textAlign: 'center' }}
+        >
+          {credibility ? `可信度 Lv${credibility}` : '可信度 -'}
+        </Tag>
+      </Tooltip>
       <Upload
         fileList={fileList}
         multiple

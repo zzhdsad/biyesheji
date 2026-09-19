@@ -3,7 +3,19 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import BigInteger, DateTime, Float, ForeignKey, Integer, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    SmallInteger,
+    String,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -86,6 +98,11 @@ class Document(Base, TimestampMixin):
     # pending / parsing / success（切片就绪）/ completed（已向量化）/ failed
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str] = mapped_column(Text, default="")
+    # 来源可信度标注（AGENTS.md 中医约束第 6 条）；历史文档可为空，经补标接口回填
+    # source_type 受控枚举见 src.core.source_meta；credibility_level 由其固定映射推导
+    source_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    era: Mapped[str | None] = mapped_column(String(8), nullable=True)  # 先秦/汉/唐/宋/明/清/现代
+    credibility_level: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)  # 1-5
     deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)  # 回收站软删除时间
 
 
@@ -107,6 +124,9 @@ class Chunk(Base, TimestampMixin):
     # 与 Milvus document_chunks collection 字段对齐，便于同步（TECH_DESIGN 数据模型）
     page_num: Mapped[int | None] = mapped_column(Integer, nullable=True)
     title_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 来源可信度冗余（自 documents 同步）：检索命中无需回表即可按来源分组/展示
+    source_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    credibility_level: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
 
 
 class Conversation(Base, TimestampMixin):
@@ -231,3 +251,54 @@ class SystemConfig(Base):
     rerank_top_n: Mapped[int] = mapped_column(Integer, default=5)  # 精排后送 LLM 数量
     relevance_threshold: Mapped[float] = mapped_column(Float, default=0.3)  # 相似度拒答阈值
     history_window: Mapped[int] = mapped_column(Integer, default=5)  # 多轮对话历史轮数
+
+
+class Category(Base, TimestampMixin):
+    """通用分类：一张表按 resource_type 区分 4 棵独立树。
+
+    resource_type 受控枚举：herb / prescription / theory / literature。
+    parent_id 自引用实现层级（不引入闭包表）；自引用 FK ondelete=RESTRICT，
+    有子节点时数据库层同样阻止删除。
+    """
+
+    __tablename__ = "categories"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    resource_type: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    description: Mapped[str] = mapped_column(Text, default="")
+
+    # 同一 resource_type + 同一父节点下 name 唯一。
+    # 普通 unique 约束对 parent_id IS NULL 的根节点不生效（SQL NULL 语义），
+    # 故用 COALESCE 表达式唯一索引，保证同域根节点重名也被阻止。
+    __table_args__ = (
+        Index(
+            "uq_categories_type_parent_name",
+            "resource_type",
+            text("coalesce(parent_id, '00000000-0000-0000-0000-000000000000')"),
+            "name",
+            unique=True,
+        ),
+    )
+
+    parent: Mapped["Category | None"] = relationship(
+        back_populates="children", remote_side=[id]
+    )
+    children: Mapped[list["Category"]] = relationship(
+        back_populates="parent", passive_deletes=True
+    )
+
+
+class Tag(Base, TimestampMixin):
+    """标签：扁平结构、跨资源域共享、name 全局唯一。不设 resource_type / 层级。"""
+
+    __tablename__ = "tags"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    name: Mapped[str] = mapped_column(String(32), unique=True, index=True)
+    color: Mapped[str] = mapped_column(String(16), default="")
+    description: Mapped[str] = mapped_column(Text, default="")

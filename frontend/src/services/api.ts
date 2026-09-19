@@ -1,6 +1,7 @@
 import axios from 'axios';
 import type {
   AuditLog,
+  Category,
   ChatMessage,
   Citation,
   Conversation,
@@ -14,7 +15,11 @@ import type {
   KnowledgeBase,
   MessageOut,
   Role,
+  SourceEra,
+  SourceType,
   SystemConfig,
+  Tag,
+  TaxonomyResourceType,
   UserOut,
 } from '@/types';
 import { clearToken, getToken } from './token';
@@ -147,15 +152,24 @@ export async function fetchDocuments(kbId?: string): Promise<DocumentItem[]> {
   return data;
 }
 
+/** 上传时的来源可信度标注（credibility_level 不由前端传入，后端按类型自动推导）。 */
+export interface UploadSourceMeta {
+  sourceType?: SourceType | null;
+  era?: SourceEra | null;
+}
+
 /** 上传单个文档（multipart/form-data）。上传后后端异步派发解析任务。 */
 export async function uploadDocument(
   file: File,
   kbId: string,
   onProgress?: (percent: number) => void,
+  sourceMeta?: UploadSourceMeta,
 ): Promise<DocumentItem> {
   const form = new FormData();
   form.append('kb_id', kbId);
   form.append('file', file);
+  if (sourceMeta?.sourceType) form.append('source_type', sourceMeta.sourceType);
+  if (sourceMeta?.era) form.append('era', sourceMeta.era);
   const { data } = await api.post<DocumentItem>('/documents/upload', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
     onUploadProgress: (e) => {
@@ -584,4 +598,73 @@ export async function updateSystemConfig(
 ): Promise<SystemConfig> {
   const { data } = await api.put<SystemConfig>('/settings/system', payload);
   return data;
+}
+
+// ─────────────────────────── 分类（TASK-002）───────────────────────────
+
+/** 查询分类列表；tree=true 返回嵌套树，可按资源域过滤。 */
+export async function fetchCategories(params?: {
+  resource_type?: TaxonomyResourceType;
+  tree?: boolean;
+}): Promise<Category[]> {
+  const { data } = await api.get<Category[]>('/categories', { params });
+  return data;
+}
+
+/** 新建分类。 */
+export async function createCategory(payload: {
+  resource_type: TaxonomyResourceType;
+  name: string;
+  parent_id?: string | null;
+  sort_order?: number;
+  description?: string;
+}): Promise<Category> {
+  const { data } = await api.post<Category>('/categories', payload);
+  return data;
+}
+
+/** 修改分类（仅 name/sort_order/description）。 */
+export async function updateCategory(
+  categoryId: string,
+  payload: Pick<Category, 'name' | 'sort_order' | 'description'>,
+): Promise<Category> {
+  const { data } = await api.put<Category>(`/categories/${categoryId}`, payload);
+  return data;
+}
+
+/** 删除分类（有子分类或被引用时后端返回 409）。 */
+export async function deleteCategory(categoryId: string): Promise<void> {
+  await api.delete(`/categories/${categoryId}`);
+}
+
+// ─────────────────────────── 标签（TASK-002）───────────────────────────
+
+/** 查询标签，支持关键词。 */
+export async function fetchTags(keyword?: string): Promise<Tag[]> {
+  const { data } = await api.get<Tag[]>('/tags', { params: { keyword } });
+  return data;
+}
+
+/** 新建标签。 */
+export async function createTag(payload: {
+  name: string;
+  color?: string;
+  description?: string;
+}): Promise<Tag> {
+  const { data } = await api.post<Tag>('/tags', payload);
+  return data;
+}
+
+/** 修改标签。 */
+export async function updateTag(
+  tagId: string,
+  payload: Partial<Pick<Tag, 'name' | 'color' | 'description'>>,
+): Promise<Tag> {
+  const { data } = await api.put<Tag>(`/tags/${tagId}`, payload);
+  return data;
+}
+
+/** 删除标签（被引用时后端返回 409）。 */
+export async function deleteTag(tagId: string): Promise<void> {
+  await api.delete(`/tags/${tagId}`);
 }

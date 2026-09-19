@@ -1,228 +1,236 @@
-markdown
-# AGENTS.md — AI 助手指引与开发规范
+AGENTS.md
 
-## 项目概述
+项目：中医药知识资源管理与智能问答系统
+更新时间：2026-09-18
+作用：约束 Cursor / Codex 等 AI Agent 的开发行为。
 
-本项目是一个基于 RAG 的企业级智能知识问答平台，包含：
-- **后端**：Python FastAPI + 自研状态化 RAG 编排（HyDE → BGE-M3 稠密/稀疏混合检索 → RRF 融合 → BGE-Reranker 精排 → 相关性拒答 → 生成）+ Milvus + PostgreSQL
-- **前端**：Next.js 14 + Ant Design + Tailwind
-- **部署**：开发期采用本地运行模式，生产交付使用 Docker Compose
+1. 文档优先级
 
-核心链路：文档上传 → 解析切片 → 向量化入库 → 混合检索 → Rerank → LLM 生成 → 引用溯源。
+开发前阅读：
 
----
+PRD.md：系统做什么
+TECH_DESIGN.md：系统怎么实现
+AGENTS.md：AI 如何修改代码
 
-## 开发规范
+三者职责：
 
-### 分支策略
-- `main`：生产稳定版，仅接受 PR
-- `develop`：集成开发分支
-- `feature/*`：新功能分支（如 `feature/hyde-optimize`）
-- `fix/*`：缺陷修复分支
+PRD → 产品需求
+TECH_DESIGN → 技术设计
+AGENTS → 开发规则
 
-### 提交信息格式
-<type>(<scope>): <subject>
+如果文档与实际代码不一致，先检查代码现状，不要自行假设。
 
-[可选 body]
-[可选 footer]
+2. 核心原则
+先传统系统，后 AI
 
-text
-- type：`feat` / `fix` / `docs` / `style` / `refactor` / `test` / `chore`
-- scope：`backend` / `frontend` / `deploy` / `docs`
-- 示例：`feat(backend): add HyDE retrieval node`
+系统主体必须首先是完整的中医药知识资源管理系统：
 
-### 代码评审要求
-- 所有 PR 必须至少 1 人 approve
-- 必须通过 CI（lint + test）
-- 变更需更新对应文档（PRD / TECH_DESIGN / API 文档）
+用户 / 权限
+知识资源
+中药
+方剂
+理论知识
+文献
+分类
+标签
+普通检索
 
----
+AI 是增强模块，不得把项目重新改造成纯 AI Chat 系统。
 
-## 开发环境与运行模式（方案一：本地开发）
+3. 修改代码前
 
-本项目采用**本地开发模式**，即前后端直接在宿主机运行，仅基础设施依赖容器化。
+执行：
 
-### 1. 基础设施（Docker 容器）
+阅读相关文档
+↓
+检查实际代码
+↓
+确定影响范围
+↓
+最小修改
+↓
+测试
 
-以下组件通过 Docker Compose 启动，保持后台运行：
+禁止：
 
-```bash
-# 仅启动基础设施（PostgreSQL + Redis + Milvus + MinIO）
-docker compose up -d postgres redis milvus minio
-组件	端口	用途
-PostgreSQL	5432	业务数据存储
-Redis	6379	缓存 + Celery Broker
-Milvus	19530	向量存储与检索
-MinIO	9000/9001	原始文件存储
-2. 后端（本地 Python 环境）
-bash
-cd backend
+没有检查代码就重构
+大面积重写已有模块
+为新功能删除已有功能
+随意增加框架、服务或依赖
 
-# 创建虚拟环境
-python -m venv venv
-source venv/bin/activate  # Windows: venv\Scripts\activate
+优先复用现有实现。
 
-# 安装依赖
-pip install -r requirements.txt
+4. 保护现有 RAG
 
-# 复制环境变量
-cp .env.example .env
-# 编辑 .env，确保数据库连接指向 localhost:5432
+除非用户明确要求，不得删除或破坏现有 RAG Baseline：
 
-# 启动后端（热加载模式，修改代码自动重启）
-uvicorn src.main:app --reload --host 0.0.0.0 --port 8000
-后端 API 文档：http://localhost:8000/docs
+HyDE
+BGE-M3 Dense Retrieval
+Sparse Retrieval
+RRF
+Reranker
+相似度 Gate
+Citation
+SSE 问答
 
-3. 前端（本地 Node.js 环境）
-bash
-cd frontend
+新研究功能应在 Baseline 上扩展，而不是直接替换。
 
-# 安装依赖
-npm install
+5. 传统业务开发
 
-# 启动前端（热加载模式，修改代码自动刷新）
-npm run dev
-前端访问地址：http://localhost:3000
+传统 CRUD 优先使用：
 
-4. Celery Worker（独立终端）
-bash
-cd backend
-source venv/bin/activate
-celery -A src.tasks.celery_app worker --loglevel=info
-5. 禁止事项
-禁止在开发期使用 docker compose up -d 启动后端或前端容器
+Next.js
+↓
+FastAPI
+↓
+SQLAlchemy
+↓
+PostgreSQL
 
-禁止将本地开发修改直接推送到 main 分支
+普通关键词检索优先使用 PostgreSQL。
 
-禁止在 .env 中硬编码敏感信息，必须使用 .env 注入
+不要为了普通检索引入 LLM、Milvus 或复杂 Agent。
 
-测试要求
-单元测试
-覆盖率目标 ≥ 80%
+6. AI 功能开发
 
-后端使用 pytest，前端使用 Jest + React Testing Library
+AI 问答优先使用系统知识库中的证据。
 
-关键模块（检索、切片、解析）必须有单元测试
+基本流程：
 
-运行测试
-bash
-# 后端测试
-cd backend
-pytest tests/ -v --cov=src --cov-report=html
+Query
+↓
+Retrieve
+↓
+Rerank
+↓
+Evidence
+↓
+LLM
+↓
+Citation
 
-# 前端测试
-cd frontend
-npm test
-集成测试
-API 端到端测试（pytest + httpx）
+证据不足时应限制生成，不允许无依据编造。
 
-测试向量库写入/检索、LLM 调用 Mock
+7. 研究功能
 
-前端使用 Playwright 做核心 UI 流程测试
+未来可能增加：
 
-评估测试（质量门禁）
-每次合并前必须运行 RAGAS 评估测试集（≥30 条）
+Query Analyzer
+Dynamic Router
+KG Retrieval
+Evidence Gate
+Self Reflection
+多来源证据展示
 
-准确率必须 ≥75% 才允许合入 develop
+要求：
 
-评估结果自动生成报告并附在 PR 中
+尽量模块化
+可以独立开关
+不破坏 Baseline
+可以固定策略进行对比实验
+不为了“创新”堆叠技术
 
-代码风格
-Python（后端）
-格式化：black（line-length=100）
+没有实验数据时，不得声称某方法效果更好。
 
-排序：isort
+8. 数据与来源
 
-Lint：ruff（替代 flake8 + pylint）
+知识资源应尽可能保留来源信息。
 
-类型注解：所有函数参数和返回值必须有类型注解
+保持：
 
-命名：snake_case 变量/函数，PascalCase 类名
+Source
+↓
+Document
+↓
+Chunk
 
-运行 Lint
-bash
-cd backend
-black src/ tests/
-isort src/ tests/
-ruff check src/ tests/
-TypeScript（前端）
-格式化：Prettier
+之间的可追溯关系。
 
-Lint：ESLint（使用 @typescript-eslint）
+禁止：
 
-命名：camelCase 变量/函数，PascalCase 组件/类，kebab-case 文件名（组件除外）
+伪造知识来源
+伪造实验数据
+伪造评测结果
 
-严格模式：strict: true
+修改数据库结构时必须考虑已有数据和迁移。
 
-运行 Lint
-bash
-cd frontend
-npm run lint
-npm run format
-注意事项（常见陷阱与约束）
-文档解析
-扫描件 PDF 可能 OCR 失败 → 必须提示用户上传可复制文本版本
+9. API 与前端兼容
 
-超大文档（>50MB）解析超时 → 实现分片上传或限制
+修改后端 API 时检查：
 
-检索与生成
-强制约束：System Prompt 必须包含“仅根据参考资料回答，找不到就说不知道”
+请求参数
+返回结构
+错误处理
+前端调用
 
-禁止模型输出任何未在检索结果中出现的事实
+SSE 事件保持：
 
-引用标注必须在答案中显式显示，且必须可追溯
+citation
+delta
+done
 
-性能
-大模型推理默认使用 AWQ 4bit 量化，确保单卡 24GB 可运行
+除非明确要求，不随意修改已有 API。
 
-检索超时设定：≤ 500ms（不含 LLM 生成）
+10. 医疗安全边界
 
-异步处理：文档解析必须走 Celery，避免阻塞 API
+系统定位为中医知识学习与查询辅助工具。
 
-安全
-所有 API 需要鉴权（除 /health 外）
+禁止实现：
 
-SQL 注入防范：使用 SQLAlchemy 参数化查询
+疾病诊断
+自动处方
+针对具体患者制定治疗方案
 
-知识库权限：检索时强制带 kb_id 过滤，禁止越权访问
+保持知识管理和知识查询定位。
 
-环境配置
-所有敏感信息（数据库密码、API Key）必须通过 .env 注入
+11. 测试要求
 
-禁止硬编码任何配置到代码中
+每次修改后：
 
-提供 .env.example 模板
+代码检查
+↓
+相关测试
+↓
+必要时完整测试
 
-日志与可观测性
-使用 Loguru（Python）和 pino（前端）记录结构化日志
+后端修改优先运行 pytest。
 
-关键链路（上传、解析、检索、生成）必须记录耗时和状态
+RAG 修改后进行实际问答链路测试。
 
-错误信息必须包含堆栈（开发环境）或仅用户友好提示（生产环境）
+前端修改后检查 lint / build。
 
-交付标准
-所有代码通过 lint + test
+12. Git 安全
 
-开发期本地运行（uvicorn --reload + npm run dev）正常
+禁止未经明确要求执行：
 
-生产交付：Docker Compose 一键启动成功
+git reset --hard
+git clean -fd
 
-准确率 ≥75%（通过内置评估）
+不得覆盖或删除用户已有修改。
 
-API 文档（Swagger）自动生成且可访问
+较大功能完成后建议提交 Git。
 
-README 包含清晰的环境要求、启动步骤、示例数据
+13. 修改规模
 
-本地开发快速参考
-组件	启动命令	访问地址
-基础设施	docker compose up -d postgres redis milvus minio	—
-后端	cd backend && uvicorn src.main:app --reload	http://localhost:8000
-Celery	cd backend && celery -A src.tasks.celery_app worker --loglevel=info	—
-前端	cd frontend && npm run dev	http://localhost:3000
-关键文件说明
-文件	用途
-PRD.md	产品需求文档，所有功能设计的来源
-TECH_DESIGN.md	技术设计文档，架构和选型的依据
-AGENTS.md	本文档，AI 助手开发规范
-docker-compose.yml	仅用于基础设施和生产部署
-.env.example	环境变量模板
+优先采用：
+
+小改动
+↓
+验证
+↓
+继续
+
+不要一次修改整个项目。
+
+涉及多个模块时，先明确修改范围，再逐步实施。
+
+14. 最终原则
+先理解
+↓
+再修改
+↓
+再测试
+↓
+再记录
+
+系统首先必须是一个完整、稳定的中医药知识资源管理系统，然后再逐步增加 AI 能力和研究功能。

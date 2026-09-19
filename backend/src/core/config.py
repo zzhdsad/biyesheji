@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     MILVUS_URI: str = "http://localhost:19530"
     MILVUS_COLLECTION: str = "document_chunks"
 
-    # 安全（JWT 鉴权）
-    SECRET_KEY: str = "change-me-in-production"
+    # 安全（JWT 鉴权）；默认值仅用于开发/测试，生产必须经 .env 覆盖为随机 ≥32 字节密钥
+    SECRET_KEY: str = "hfimJesB4aztr41rt3zgnBWKgyY7VIgq5C0LmNoUCSHnUCicRImiHt-_wDpmmbYN"
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 7 天
 

@@ -32,6 +32,7 @@ from src.core.exceptions import PermissionDeniedError
 from src.core.security import generate_random_password, hash_password
 from src.domain.models import User
 from src.infrastructure.database import get_db
+from src.utils.timeutil import utcnow
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -151,7 +152,7 @@ async def _get_active_user(db: AsyncSession, user_id: uuid.UUID) -> User | None:
 
 async def _purge_expired_trash(db: AsyncSession) -> None:
     """清理回收站中超过 7 天的用户（硬删除）。"""
-    cutoff = datetime.utcnow() - timedelta(days=TRASH_RETENTION_DAYS)
+    cutoff = utcnow() - timedelta(days=TRASH_RETENTION_DAYS)
     expired = (
         await db.scalars(
             select(User).where(User.deleted_at < cutoff)
@@ -253,7 +254,7 @@ async def delete_user(
     if user is None:
         raise HTTPException(status_code=404, detail="用户不存在或已删除")
 
-    user.deleted_at = datetime.utcnow()
+    user.deleted_at = utcnow()
     await db.commit()
     return {"message": "用户已移入回收站，7 天内可恢复"}
 
@@ -362,7 +363,7 @@ async def batch_delete_users(
         )
 
     # ── 全部通过 → 统一软删除 ──
-    now = datetime.utcnow()
+    now = utcnow()
     await db.execute(
         update(User)
         .where(User.id.in_(payload.user_ids))

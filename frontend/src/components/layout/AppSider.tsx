@@ -71,6 +71,7 @@ const NAV_ITEMS: Required<MenuProps>['items'] = [
     type: 'group',
     children: [
       { key: '/kb', icon: <DatabaseOutlined />, label: '知识库管理' },
+      { key: '/taxonomy', icon: <AppstoreOutlined />, label: '分类与标签' },
       { key: '/documents', icon: <FileTextOutlined />, label: '文档管理' },
       { key: '/users', icon: <TeamOutlined />, label: '用户管理' },
       { key: '/evaluation', icon: <ExperimentOutlined />, label: '评估面板' },

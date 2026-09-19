@@ -266,6 +266,9 @@ class RagService:
                     "title_path": h["title_path"],
                     "content": h["content"],
                     "score": score,
+                    "source_type": h.get("source_type"),
+                    "era": h.get("era"),
+                    "credibility_level": h.get("credibility_level"),
                 }
             )
         return citations
@@ -491,18 +494,33 @@ class RagService:
         return history, False
 
     async def _enrich_hits_with_doc_name(self, hits: list[dict]) -> None:
-        """为检索命中注入 doc_name（就地修改），供 Prompt 与引用卡片展示。"""
+        """为检索命中注入文档名与来源可信度信息（就地修改）。
+
+        供 Prompt 与引用卡片展示；来源元数据以 documents 表为事实源，
+        Milvus 动态字段仅作检索侧冗余（老集合无动态字段时由此处兜底）。
+        """
         if not hits:
             return
         doc_ids = {h["doc_id"] for h in hits if h.get("doc_id")}
         docs = {
-            str(d.id): d.file_name
+            str(d.id): d
             for d in (
                 await self.db.scalars(select(Document).where(Document.id.in_(doc_ids)))
             ).all()
         } if doc_ids else {}
         for h in hits:
-            h["doc_name"] = docs.get(h["doc_id"], "未知文档")
+            doc = docs.get(h["doc_id"])
+            h["doc_name"] = doc.file_name if doc is not None else "未知文档"
+            # 优先取 PG 事实源；PG 缺失（如老数据）时保留 Milvus 带回的值
+            h["source_type"] = (
+                doc.source_type if doc is not None and doc.source_type else h.get("source_type")
+            )
+            h["era"] = doc.era if doc is not None else None
+            h["credibility_level"] = (
+                doc.credibility_level
+                if doc is not None and doc.credibility_level is not None
+                else h.get("credibility_level")
+            )
 
     def _build_user_prompt(self, question: str, hits: list[dict]) -> str:
         """构造用户 Prompt：问题 + 编号参考资料（含文档名、页码、标题、原文）。
@@ -516,11 +534,25 @@ class RagService:
             source = h.get("title_path") or "未命名段落"
             page = h.get("page_num")
             page_label = f"页码：{page}" if page else "页码：0"
+            provenance = self._format_provenance(h)
             blocks.append(
-                f"[{i}] 文档：{h.get('doc_name', '未知')} | {page_label} | 标题：{source}\n{h['content']}"
+                f"[{i}] 文档：{h.get('doc_name', '未知')}{provenance} | "
+                f"{page_label} | 标题：{source}\n{h['content']}"
             )
         header = f"{_CONTEXT_MARKER}（编号即引用标识，引用时标注 [citation: 编号, 页码]）："
         return f"{question}\n\n{header}\n" + "\n\n".join(blocks)
+
+    @staticmethod
+    def _format_provenance(h: dict) -> str:
+        """格式化参考资料的来源标注片段：｜来源类型·年代·可信度LvN。"""
+        parts = []
+        if h.get("source_type"):
+            parts.append(h["source_type"])
+        if h.get("era"):
+            parts.append(h["era"])
+        if h.get("credibility_level") is not None:
+            parts.append(f"可信度Lv{h['credibility_level']}")
+        return f"（{'·'.join(parts)}）" if parts else ""
 
     async def _build_citations(self, answer: str, hits: list[dict]) -> list[dict]:
         """解析答案中的 [citation: 编号, 页码] 标记生成引用来源。
@@ -559,6 +591,9 @@ class RagService:
                     "title_path": h["title_path"],
                     "content": h["content"],
                     "score": score,
+                    "source_type": h.get("source_type"),
+                    "era": h.get("era"),
+                    "credibility_level": h.get("credibility_level"),
                 }
             )
         return citations

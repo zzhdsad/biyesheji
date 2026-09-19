@@ -121,6 +121,8 @@ class IndexingService:
                         title_path=chunk.title_path,
                         dense_vector=dv,
                         sparse_vector=sv,
+                        source_type=chunk.source_type,
+                        credibility_level=chunk.credibility_level,
                     )
                 )
         return rows

@@ -40,3 +40,10 @@ target-version = "py310"
 pythonpath = ["."]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+filterwarnings = [
+    # asyncpg 连接在事件循环关闭/连接取消路径上的已知噪音（协程对象被 GC），非业务缺陷
+    "ignore:coroutine 'Connection._cancel' was never awaited:RuntimeWarning",
+    # 第三方库导入期噪音（starlette testclient / pymilvus），非项目代码问题
+    "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",
+    "ignore:pkg_resources is deprecated as an API:UserWarning",
+]
