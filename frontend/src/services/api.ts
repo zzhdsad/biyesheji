@@ -10,6 +10,8 @@ import type {
   EvaluationReport,
   EvalTestCaseItem,
   HealthResponse,
+  Herb,
+  HerbListResponse,
   KBMember,
   KBMemberRole,
   KnowledgeBase,
@@ -667,4 +669,64 @@ export async function updateTag(
 /** 删除标签（被引用时后端返回 409）。 */
 export async function deleteTag(tagId: string): Promise<void> {
   await api.delete(`/tags/${tagId}`);
+}
+
+// ─────────────────────────── 中药（TASK-003）───────────────────────────
+
+/** 查询中药列表，支持关键词 / 分类 / 标签筛选 + 分页。 */
+export async function fetchHerbs(params?: {
+  keyword?: string;
+  category_id?: string;
+  tag_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<HerbListResponse> {
+  const { data } = await api.get<HerbListResponse>('/herbs', { params });
+  return data;
+}
+
+/** 查询中药详情。 */
+export async function getHerb(herbId: string): Promise<Herb> {
+  const { data } = await api.get<Herb>(`/herbs/${herbId}`);
+  return data;
+}
+
+/** 新建中药（POST /herbs，仅 admin）。 */
+export async function createHerb(payload: {
+  name: string;
+  aliases?: string[];
+  category_id?: string | null;
+  properties?: string;
+  channels?: string[];
+  effects?: string;
+  source?: string;
+  description?: string;
+  tag_ids?: string[];
+}): Promise<Herb> {
+  const { data } = await api.post<Herb>('/herbs', payload);
+  return data;
+}
+
+/** 更新中药（PUT /herbs/{id}，partial update，仅 admin）。 */
+export async function updateHerb(
+  herbId: string,
+  payload: Partial<{
+    name: string;
+    aliases: string[];
+    category_id: string | null;
+    properties: string;
+    channels: string[];
+    effects: string;
+    source: string;
+    description: string;
+    tag_ids: string[];
+  }>,
+): Promise<Herb> {
+  const { data } = await api.put<Herb>(`/herbs/${herbId}`, payload);
+  return data;
+}
+
+/** 删除中药（DELETE /herbs/{id}，herb_tags 由 DB CASCADE 清理，仅 admin）。 */
+export async function deleteHerb(herbId: string): Promise<void> {
+  await api.delete(`/herbs/${herbId}`);
 }

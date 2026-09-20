@@ -218,3 +218,30 @@ export interface Tag {
   created_at: string;
   updated_at: string;
 }
+
+// ─────────────────────────── 中药（TASK-003）───────────────────────────
+
+/** 中药资源（与后端 HerbOut 对应）。 */
+export interface Herb {
+  id: string;
+  name: string;
+  aliases: string[];
+  category_id: string | null;
+  category: Pick<Category, 'id' | 'name'> | null;
+  properties: string;
+  channels: string[];
+  effects: string;
+  source: string;
+  description: string;
+  tags: Pick<Tag, 'id' | 'name' | 'color'>[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** 中药分页响应（GET /herbs）。 */
+export interface HerbListResponse {
+  items: Herb[];
+  total: number;
+  limit: number;
+  offset: number;
+}

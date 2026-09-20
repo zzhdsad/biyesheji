@@ -34,6 +34,7 @@ import {
   FileTextOutlined,
   HistoryOutlined,
   LogoutOutlined,
+  MedicineBoxOutlined,
   MessageOutlined,
   PlusOutlined,
   SettingOutlined,
@@ -72,6 +73,7 @@ const NAV_ITEMS: Required<MenuProps>['items'] = [
     children: [
       { key: '/kb', icon: <DatabaseOutlined />, label: '知识库管理' },
       { key: '/taxonomy', icon: <AppstoreOutlined />, label: '分类与标签' },
+      { key: '/herbs', icon: <MedicineBoxOutlined />, label: '中药管理' },
       { key: '/documents', icon: <FileTextOutlined />, label: '文档管理' },
       { key: '/users', icon: <TeamOutlined />, label: '用户管理' },
       { key: '/evaluation', icon: <ExperimentOutlined />, label: '评估面板' },
@@ -198,6 +200,7 @@ export function AppSider() {
   // 当前在哪个管理页？（用于高亮主导航的选中子项）
   const selectedNavKeys: string[] = (() => {
     if (pathname.startsWith('/kb')) return ['/kb'];
+    if (pathname.startsWith('/herbs')) return ['/herbs'];
     if (pathname.startsWith('/documents')) return ['/documents'];
     if (pathname.startsWith('/users')) return ['/users'];
     if (pathname.startsWith('/evaluation')) return ['/evaluation'];
