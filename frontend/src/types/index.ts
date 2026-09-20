@@ -245,3 +245,43 @@ export interface HerbListResponse {
   limit: number;
   offset: number;
 }
+
+// ─────────────────────────── 方剂（TASK-004）───────────────────────────
+
+/** 方剂组成中的一味药材（与后端 PrescriptionIngredientOut 对应）。 */
+export interface PrescriptionIngredient {
+  id: string;
+  herb_id: string;
+  herb_name: string;
+  amount: number | null;
+  unit: string;
+  processing: string;
+  role: string;
+  sort_order: number;
+}
+
+/** 方剂资源（与后端 PrescriptionOut 对应）。 */
+export interface Prescription {
+  id: string;
+  name: string;
+  aliases: string[];
+  category_id: string | null;
+  category: Pick<Category, 'id' | 'name'> | null;
+  efficacy: string;
+  indications: string;
+  usage_method: string;
+  source: string;
+  description: string;
+  ingredients: PrescriptionIngredient[];
+  tags: Pick<Tag, 'id' | 'name' | 'color'>[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** 方剂分页响应（GET /prescriptions）。 */
+export interface PrescriptionListResponse {
+  items: Prescription[];
+  total: number;
+  limit: number;
+  offset: number;
+}

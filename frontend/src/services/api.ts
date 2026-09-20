@@ -16,6 +16,8 @@ import type {
   KBMemberRole,
   KnowledgeBase,
   MessageOut,
+  Prescription,
+  PrescriptionListResponse,
   Role,
   SourceEra,
   SourceType,
@@ -729,4 +731,77 @@ export async function updateHerb(
 /** 删除中药（DELETE /herbs/{id}，herb_tags 由 DB CASCADE 清理，仅 admin）。 */
 export async function deleteHerb(herbId: string): Promise<void> {
   await api.delete(`/herbs/${herbId}`);
+}
+
+// ─────────────────────────── 方剂（TASK-004）───────────────────────────
+
+/** 方剂组成提交项（对应后端 IngredientIn；不含 herb_name）。 */
+export interface IngredientPayload {
+  herb_id: string;
+  amount?: number | null;
+  unit?: string;
+  processing?: string;
+  role?: string;
+  sort_order: number;
+}
+
+/** 查询方剂列表，支持关键词 / 分类 / 标签筛选 + 分页。 */
+export async function fetchPrescriptions(params?: {
+  keyword?: string;
+  category_id?: string;
+  tag_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<PrescriptionListResponse> {
+  const { data } = await api.get<PrescriptionListResponse>('/prescriptions', { params });
+  return data;
+}
+
+/** 查询方剂详情（含组成 / 标签 / 分类）。 */
+export async function getPrescription(prescriptionId: string): Promise<Prescription> {
+  const { data } = await api.get<Prescription>(`/prescriptions/${prescriptionId}`);
+  return data;
+}
+
+/** 新建方剂（POST /prescriptions，仅 admin）。 */
+export async function createPrescription(payload: {
+  name: string;
+  aliases?: string[];
+  category_id?: string | null;
+  efficacy?: string;
+  indications?: string;
+  usage_method?: string;
+  source?: string;
+  description?: string;
+  ingredients?: IngredientPayload[];
+  tag_ids?: string[];
+}): Promise<Prescription> {
+  const { data } = await api.post<Prescription>('/prescriptions', payload);
+  return data;
+}
+
+/** 更新方剂（PUT /prescriptions/{id}，仅 admin）。
+ * ingredients / tag_ids 提供时整体替换。 */
+export async function updatePrescription(
+  prescriptionId: string,
+  payload: Partial<{
+    name: string;
+    aliases: string[];
+    category_id: string | null;
+    efficacy: string;
+    indications: string;
+    usage_method: string;
+    source: string;
+    description: string;
+    ingredients: IngredientPayload[];
+    tag_ids: string[];
+  }>,
+): Promise<Prescription> {
+  const { data } = await api.put<Prescription>(`/prescriptions/${prescriptionId}`, payload);
+  return data;
+}
+
+/** 删除方剂（DELETE /prescriptions/{id}，组成行随 DB CASCADE 清理，仅 admin）。 */
+export async function deletePrescription(prescriptionId: string): Promise<void> {
+  await api.delete(`/prescriptions/${prescriptionId}`);
 }
