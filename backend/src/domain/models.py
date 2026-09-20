@@ -2,6 +2,7 @@
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
@@ -11,10 +12,12 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     SmallInteger,
     String,
     Table,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -364,3 +367,107 @@ class Herb(Base, TimestampMixin):
     )
     # 分类对象（多对一），仅用于响应序列化；category_id 的 FK RESTRICT 不变
     category: Mapped[Category | None] = relationship(lazy="selectin")
+
+
+# 方剂 ↔ 标签 多对多关联表（TASK-004），与 herb_tags 同构。
+# - prescription_id CASCADE：删除方剂时关联行自动清理
+# - tag_id RESTRICT：标签仍被方剂引用时数据库层阻止删除
+prescription_tags = Table(
+    "prescription_tags",
+    Base.metadata,
+    Column(
+        "prescription_id",
+        UUID(as_uuid=True),
+        ForeignKey("prescriptions.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "tag_id",
+        UUID(as_uuid=True),
+        ForeignKey("tags.id", ondelete="RESTRICT"),
+        primary_key=True,
+    ),
+)
+
+
+class Prescription(Base, TimestampMixin):
+    """方剂资源（TASK-004）。
+
+    分类通过 category_id 多对一关联 categories（resource_type='prescription'
+    的树节点）；标签通过 prescription_tags 与 Tag 多对多；组成（药材+用量）
+    通过 prescription_ingredients 关联表表达，不使用 JSONB。
+    """
+
+    __tablename__ = "prescriptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    aliases: Mapped[list[str]] = mapped_column(
+        ARRAY(String(128)), default=list
+    )
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    efficacy: Mapped[str] = mapped_column(Text, default="")  # 功效
+    indications: Mapped[str] = mapped_column(Text, default="")  # 主治
+    description: Mapped[str] = mapped_column(Text, default="")  # 方解/综合描述
+    usage_method: Mapped[str] = mapped_column(String(255), default="")  # 用法，如“水煎服，每日一剂”
+    source: Mapped[str] = mapped_column(String(255), default="")  # 出处，如《伤寒论》
+
+    __table_args__ = (
+        Index("ix_prescriptions_aliases_gin", "aliases", postgresql_using="gin"),
+    )
+
+    # 组成：association object（含载荷列，不能用 secondary）。
+    # selectin 预加载规避异步隐式懒加载；passive_deletes 依赖 DB CASCADE；
+    # order_by 保证按 sort_order 稳定输出（君臣佐使顺序）
+    ingredients: Mapped[list["PrescriptionIngredient"]] = relationship(
+        cascade="all, delete-orphan",
+        order_by="PrescriptionIngredient.sort_order",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+    # 与 Herb.tags 同构：不建 back_populates，Tag 模型保持不变
+    tags: Mapped[list[Tag]] = relationship(
+        secondary=prescription_tags, lazy="selectin"
+    )
+    # 分类对象（多对一），仅用于响应序列化；category_id 的 FK RESTRICT 不变
+    category: Mapped[Category | None] = relationship(lazy="selectin")
+
+
+class PrescriptionIngredient(Base):
+    """方剂组成行（TASK-004）：方剂 ↔ 中药 的带载荷关联。
+
+    同一方剂不允许重复同一味中药（UniqueConstraint 兜底，API 层提前 400）；
+    herb_id RESTRICT：中药仍被方剂引用时数据库层阻止删除。
+    """
+
+    __tablename__ = "prescription_ingredients"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    prescription_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("prescriptions.id", ondelete="CASCADE"), index=True
+    )
+    herb_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("herbs.id", ondelete="RESTRICT"), index=True
+    )
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)  # 用量；NULL=“适量”类
+    unit: Mapped[str] = mapped_column(String(16), default="")  # 单位，如“克”“两”
+    processing: Mapped[str] = mapped_column(String(255), default="")  # 炮制/特殊处理，如“炙”“炒”
+    role: Mapped[str] = mapped_column(String(32), default="")  # 君臣佐使等角色
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)  # 组成顺序
+
+    __table_args__ = (
+        UniqueConstraint(
+            "prescription_id",
+            "herb_id",
+            name="uq_prescription_ingredients_prescription_herb",
+        ),
+    )
+
+    # 中药对象（多对一），序列化组成时需要药名；selectin 预加载规避 MissingGreenlet
+    herb: Mapped[Herb] = relationship(lazy="selectin")
+    # 反向引用不预加载：响应序列化不访问 .prescription，
+    # 且避免与 Prescription.ingredients 的 selectin 形成循环预加载；
+    # viewonly=True：写入只经 ingredients 关系，消除双写冲突（SAWarning qzyx）
+    prescription: Mapped["Prescription"] = relationship(viewonly=True)
