@@ -1,0 +1,437 @@
+"""中医理论资源管理路由（TASK-005 Stage 4）。
+
+- GET /theories：登录用户均可浏览，支持 keyword / category_id / tag_id + 分页
+- GET /theories/{id}：详情
+- POST/PUT/DELETE /theories：仅 admin，写操作接入 AuditService
+
+与 TASK-003 herbs / TASK-004 prescriptions 同构：
+- 关键词搜索仅使用 PostgreSQL（ILIKE），数组别名通过 unnest 逐元素匹配，
+  不涉及 Milvus / Embedding / RAG
+- 输出统一用 _theory_to_out 显式构造；关联数据由模型级 lazy="selectin"
+  预加载，不依赖异步隐式懒加载
+"""
+
+import uuid
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import exists, func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.application.audit_service import AuditService
+from src.core.exceptions import AppException
+from src.domain.models import Category, Tag, Theory
+from src.infrastructure.database import get_db
+
+router = APIRouter(prefix="/theories", tags=["theories"])
+
+_MAX_LIST_ITEMS = 20  # 别名数量上限
+_MAX_TAGS = 20  # 标签数量上限
+
+
+# ── Schemas ──────────────────────────────────────────────────────────────────
+
+
+def _normalize_str_list(values: list[str], limit: int) -> list[str]:
+    """去空白、去空串、去重（保序），并限制数量。"""
+    result: list[str] = []
+    for raw in values:
+        item = raw.strip()
+        if item and item not in result:
+            result.append(item)
+    if len(result) > limit:
+        raise ValueError(f"最多允许 {limit} 项")
+    return result
+
+
+class TheoryCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    aliases: list[str] = Field(default_factory=list)
+    category_id: uuid.UUID | None = None
+    content: str = Field(default="", max_length=50000)
+    source: str = Field(default="", max_length=255)
+    tag_ids: list[uuid.UUID] = Field(default_factory=list)
+
+    @field_validator("aliases")
+    @classmethod
+    def _check_aliases(cls, v: list[str]) -> list[str]:
+        return _normalize_str_list(v, _MAX_LIST_ITEMS)
+
+    @field_validator("tag_ids")
+    @classmethod
+    def _check_tag_ids(cls, v: list[uuid.UUID]) -> list[uuid.UUID]:
+        result = list(dict.fromkeys(v))
+        if len(result) > _MAX_TAGS:
+            raise ValueError(f"标签最多 {_MAX_TAGS} 个")
+        return result
+
+    @field_validator("name", "content", "source")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return v.strip()
+
+
+class TheoryUpdate(BaseModel):
+    # 全部可选；未提供 vs 显式空值由 model_dump(exclude_unset=True) 区分
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    aliases: list[str] | None = None
+    category_id: uuid.UUID | None = None
+    content: str | None = Field(default=None, max_length=50000)
+    source: str | None = Field(default=None, max_length=255)
+    tag_ids: list[uuid.UUID] | None = None
+
+    @field_validator("aliases")
+    @classmethod
+    def _check_aliases(cls, v: list[str] | None) -> list[str] | None:
+        return None if v is None else _normalize_str_list(v, _MAX_LIST_ITEMS)
+
+    @field_validator("tag_ids")
+    @classmethod
+    def _check_tag_ids(cls, v: list[uuid.UUID] | None) -> list[uuid.UUID] | None:
+        if v is None:
+            return None
+        result = list(dict.fromkeys(v))
+        if len(result) > _MAX_TAGS:
+            raise ValueError(f"标签最多 {_MAX_TAGS} 个")
+        return result
+
+
+class CategoryBrief(BaseModel):
+    id: uuid.UUID
+    name: str
+
+
+class TagBrief(BaseModel):
+    id: uuid.UUID
+    name: str
+    color: str
+
+
+class TheoryOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    aliases: list[str]
+    category_id: uuid.UUID | None
+    category: CategoryBrief | None
+    content: str
+    source: str
+    tags: list[TagBrief]
+    created_at: datetime
+    updated_at: datetime
+
+
+class TheoryListResponse(BaseModel):
+    items: list[TheoryOut]
+    total: int
+    limit: int
+    offset: int
+
+
+# ── Helpers ──────────────────────────────────────────────────────────────────
+
+
+def _get_client_ip(request: Request) -> str:
+    return request.client.host if request.client else ""
+
+
+def _theory_to_out(theory: Theory) -> TheoryOut:
+    """显式构造输出；tags/category 必须已预加载（模型 lazy=selectin）。"""
+    category = theory.category
+    return TheoryOut(
+        id=theory.id,
+        name=theory.name,
+        aliases=list(theory.aliases or []),
+        category_id=theory.category_id,
+        category=(
+            CategoryBrief(id=category.id, name=category.name)
+            if category is not None
+            else None
+        ),
+        content=theory.content,
+        source=theory.source,
+        tags=[
+            TagBrief(id=t.id, name=t.name, color=t.color)
+            for t in theory.tags
+        ],
+        created_at=theory.created_at,
+        updated_at=theory.updated_at,
+    )
+
+
+async def _validate_theory_category(
+    db: AsyncSession, category_id: uuid.UUID
+) -> None:
+    """分类必须存在且属于 theory 资源域，否则 400。"""
+    category = await db.get(Category, category_id)
+    if category is None:
+        raise HTTPException(status_code=400, detail="指定的分类不存在")
+    if category.resource_type != "theory":
+        raise HTTPException(
+            status_code=400, detail="只能选择资源类型为理论的分类"
+        )
+
+
+async def _load_tags_by_ids(
+    db: AsyncSession, tag_ids: list[uuid.UUID]
+) -> list[Tag]:
+    """一次性加载标签；任一不存在即 400（无 N+1）。"""
+    tags = list(
+        (await db.scalars(select(Tag).where(Tag.id.in_(tag_ids)))).all()
+    )
+    if len(tags) != len(tag_ids):
+        found = {t.id for t in tags}
+        missing = [str(i) for i in tag_ids if i not in found]
+        raise HTTPException(
+            status_code=400, detail=f"部分标签不存在：{', '.join(missing)}"
+        )
+    by_id = {t.id: t for t in tags}
+    return [by_id[i] for i in tag_ids]
+
+
+async def _name_exists(
+    db: AsyncSession, name: str, exclude_id: uuid.UUID | None = None
+) -> bool:
+    stmt = select(Theory.id).where(Theory.name == name)
+    if exclude_id is not None:
+        stmt = stmt.where(Theory.id != exclude_id)
+    return await db.scalar(stmt.limit(1)) is not None
+
+
+def _array_ilike(column, pattern: str):
+    """EXISTS(SELECT 1 FROM unnest(column) AS item WHERE item ILIKE pattern)。
+
+    column_valued 的 FROM（unnest）以本数组列为参数，自动与外层 Theory 行关联，
+    渲染为相关子查询；不触发异步隐式懒加载。
+    """
+    item = func.unnest(column).column_valued("item")
+    return exists().where(item.ilike(pattern))
+
+
+def _build_conditions(
+    keyword: str | None,
+    category_id: uuid.UUID | None,
+    tag_id: uuid.UUID | None,
+) -> list:
+    conditions: list = []
+    if keyword:
+        pattern = f"%{keyword.strip()}%"
+        conditions.append(
+            (Theory.name.ilike(pattern))
+            | _array_ilike(Theory.aliases, pattern)
+            | (Theory.content.ilike(pattern))
+            | (Theory.source.ilike(pattern))
+        )
+    if category_id is not None:
+        conditions.append(Theory.category_id == category_id)
+    if tag_id is not None:
+        # EXISTS，避免 JOIN 产生重复行
+        conditions.append(Theory.tags.any(Tag.id == tag_id))
+    return conditions
+
+
+# ── Endpoints ────────────────────────────────────────────────────────────────
+
+
+@router.get("", response_model=TheoryListResponse)
+async def list_theories(
+    keyword: str | None = None,
+    category_id: uuid.UUID | None = None,
+    tag_id: uuid.UUID | None = None,
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    db: AsyncSession = Depends(get_db),
+):
+    """理论列表：关键词搜索 + 分类/标签筛选 + 分页（created_at DESC, id DESC）。"""
+    conditions = _build_conditions(keyword, category_id, tag_id)
+
+    total = await db.scalar(
+        select(func.count()).select_from(Theory).where(*conditions)
+    )
+    stmt = (
+        select(Theory)
+        .where(*conditions)
+        .order_by(Theory.created_at.desc(), Theory.id.desc())
+        .limit(limit)
+        .offset(offset)
+    )
+    theories = list((await db.scalars(stmt)).all())
+    return TheoryListResponse(
+        items=[_theory_to_out(t) for t in theories],
+        total=total or 0,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/{theory_id}", response_model=TheoryOut)
+async def get_theory(
+    theory_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+):
+    """理论详情；不存在 404。"""
+    theory = await db.get(Theory, theory_id)
+    if theory is None:
+        raise HTTPException(status_code=404, detail="理论不存在")
+    return _theory_to_out(theory)
+
+
+@router.post("", response_model=TheoryOut, status_code=201)
+async def create_theory(
+    payload: TheoryCreate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """新建理论（仅 admin）。"""
+    user = request.state.user
+    if user.role != "admin":
+        raise AppException(403, "仅管理员可管理理论")
+
+    if await _name_exists(db, payload.name):
+        raise AppException(409, "同名理论已存在")
+
+    if payload.category_id is not None:
+        await _validate_theory_category(db, payload.category_id)
+
+    tags = (
+        await _load_tags_by_ids(db, payload.tag_ids)
+        if payload.tag_ids
+        else []
+    )
+
+    theory = Theory(
+        name=payload.name,
+        aliases=payload.aliases,
+        category_id=payload.category_id,
+        content=payload.content,
+        source=payload.source,
+        tags=tags,
+    )
+    db.add(theory)
+    try:
+        await db.flush()
+    except IntegrityError:
+        # 并发下同名等约束冲突 → 409，不直接抛 500
+        await db.rollback()
+        raise AppException(409, "同名理论已存在")
+
+    audit = AuditService(db)
+    await audit.log(
+        operator_id=user.id,
+        operator_name=user.username,
+        operation="create",
+        target_type="theory",
+        target_id=str(theory.id),
+        detail={"name": theory.name},
+        ip=_get_client_ip(request),
+    )
+
+    # audit.log() 内部 commit 会使对象过期，重新查询获取最终状态
+    stored = await db.scalar(select(Theory).where(Theory.id == theory.id))
+    return _theory_to_out(stored)
+
+
+@router.put("/{theory_id}", response_model=TheoryOut)
+async def update_theory(
+    theory_id: uuid.UUID,
+    payload: TheoryUpdate,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """更新理论（仅 admin）：partial update，tag_ids 提供时整体替换。"""
+    user = request.state.user
+    if user.role != "admin":
+        raise AppException(403, "仅管理员可管理理论")
+
+    theory = await db.get(Theory, theory_id)
+    if theory is None:
+        raise HTTPException(status_code=404, detail="理论不存在")
+
+    data = payload.model_dump(exclude_unset=True)
+    changed: dict = {}
+
+    if "name" in data and data["name"] != theory.name:
+        if await _name_exists(db, data["name"], exclude_id=theory.id):
+            raise AppException(409, "同名理论已存在")
+        theory.name = data["name"]
+        changed["name"] = data["name"]
+
+    if "category_id" in data and data["category_id"] != theory.category_id:
+        if data["category_id"] is not None:
+            await _validate_theory_category(db, data["category_id"])
+        theory.category_id = data["category_id"]
+        changed["category_id"] = (
+            str(data["category_id"]) if data["category_id"] else None
+        )
+
+    if "tag_ids" in data:
+        tags = (
+            await _load_tags_by_ids(db, data["tag_ids"])
+            if data["tag_ids"]
+            else []
+        )
+        # 集合整体替换；未提供时不会进入此分支（保持原关系）
+        theory.tags = tags
+        changed["tag_ids"] = [str(i) for i in data["tag_ids"]]
+
+    for field_name in (
+        "aliases",
+        "content",
+        "source",
+    ):
+        if field_name in data:
+            value = data[field_name]
+            if getattr(theory, field_name) != value:
+                setattr(theory, field_name, value)
+                changed[field_name] = value
+
+    try:
+        await db.flush()
+    except IntegrityError:
+        await db.rollback()
+        raise AppException(409, "同名理论已存在")
+
+    audit = AuditService(db)
+    await audit.log(
+        operator_id=user.id,
+        operator_name=user.username,
+        operation="update",
+        target_type="theory",
+        target_id=str(theory.id),
+        detail=changed,
+        ip=_get_client_ip(request),
+    )
+
+    stored = await db.scalar(select(Theory).where(Theory.id == theory.id))
+    return _theory_to_out(stored)
+
+
+@router.delete("/{theory_id}", status_code=204)
+async def delete_theory(
+    theory_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """删除理论（仅 admin）；theory_tags 关联随 DB CASCADE 自动清理。"""
+    user = request.state.user
+    if user.role != "admin":
+        raise AppException(403, "仅管理员可管理理论")
+
+    theory = await db.get(Theory, theory_id)
+    if theory is None:
+        raise HTTPException(status_code=404, detail="理论不存在")
+
+    await db.delete(theory)
+    await db.flush()
+
+    audit = AuditService(db)
+    await audit.log(
+        operator_id=user.id,
+        operator_name=user.username,
+        operation="delete",
+        target_type="theory",
+        target_id=str(theory.id),
+        detail={"name": theory.name},
+        ip=_get_client_ip(request),
+    )

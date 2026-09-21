@@ -285,3 +285,27 @@ export interface PrescriptionListResponse {
   limit: number;
   offset: number;
 }
+
+// ─────────────────────────── 中医理论（TASK-005）───────────────────────────
+
+/** 中医理论资源（与后端 TheoryOut 对应）。 */
+export interface Theory {
+  id: string;
+  name: string;
+  aliases: string[];
+  category_id: string | null;
+  category: Pick<Category, 'id' | 'name'> | null;
+  content: string;
+  source: string;
+  tags: Pick<Tag, 'id' | 'name' | 'color'>[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** 理论分页响应（GET /theories）。 */
+export interface TheoryListResponse {
+  items: Theory[];
+  total: number;
+  limit: number;
+  offset: number;
+}

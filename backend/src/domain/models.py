@@ -471,3 +471,56 @@ class PrescriptionIngredient(Base):
     # 且避免与 Prescription.ingredients 的 selectin 形成循环预加载；
     # viewonly=True：写入只经 ingredients 关系，消除双写冲突（SAWarning qzyx）
     prescription: Mapped["Prescription"] = relationship(viewonly=True)
+
+
+# 中医理论 ↔ 标签 多对多关联表（TASK-005），与 herb_tags / prescription_tags 同构。
+# - theory_id CASCADE：删除理论时关联行自动清理
+# - tag_id RESTRICT：标签仍被理论引用时数据库层阻止删除
+theory_tags = Table(
+    "theory_tags",
+    Base.metadata,
+    Column(
+        "theory_id",
+        UUID(as_uuid=True),
+        ForeignKey("theories.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "tag_id",
+        UUID(as_uuid=True),
+        ForeignKey("tags.id", ondelete="RESTRICT"),
+        primary_key=True,
+    ),
+)
+
+
+class Theory(Base, TimestampMixin):
+    """中医理论资源（TASK-005）。
+
+    分类通过 category_id 多对一关联 categories（resource_type='theory' 的树节点）；
+    标签通过 theory_tags 与 Tag 多对多。不使用 JSONB、不做软删除/多态关联。
+    """
+
+    __tablename__ = "theories"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    aliases: Mapped[list[str]] = mapped_column(
+        ARRAY(String(128)), default=list
+    )
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    content: Mapped[str] = mapped_column(Text, default="")  # 核心正文
+    source: Mapped[str] = mapped_column(String(255), default="")  # 来源出处
+
+    __table_args__ = (
+        Index("ix_theories_aliases_gin", "aliases", postgresql_using="gin"),
+    )
+
+    # 与 Herb.tags / Prescription.tags 同构：不建 back_populates，Tag 模型保持不变
+    tags: Mapped[list[Tag]] = relationship(
+        secondary=theory_tags, lazy="selectin"
+    )
+    # 分类对象（多对一），仅用于响应序列化；category_id 的 FK RESTRICT 不变
+    category: Mapped[Category | None] = relationship(lazy="selectin")

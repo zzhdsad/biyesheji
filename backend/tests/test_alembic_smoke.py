@@ -41,6 +41,9 @@ EXPECTED_TABLES = {
     "prescriptions",
     "prescription_ingredients",
     "prescription_tags",
+    # TASK-005
+    "theories",
+    "theory_tags",
 }
 
 SMOKE_DB_NAME = "knowledge_platform_alembic_smoke"

@@ -24,6 +24,8 @@ import type {
   SystemConfig,
   Tag,
   TaxonomyResourceType,
+  Theory,
+  TheoryListResponse,
   UserOut,
 } from '@/types';
 import { clearToken, getToken } from './token';
@@ -804,4 +806,59 @@ export async function updatePrescription(
 /** 删除方剂（DELETE /prescriptions/{id}，组成行随 DB CASCADE 清理，仅 admin）。 */
 export async function deletePrescription(prescriptionId: string): Promise<void> {
   await api.delete(`/prescriptions/${prescriptionId}`);
+}
+
+// ─────────────────────────── 中医理论（TASK-005）───────────────────────────
+
+/** 查询理论列表，支持关键词 / 分类 / 标签筛选 + 分页。 */
+export async function fetchTheories(params?: {
+  keyword?: string;
+  category_id?: string;
+  tag_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<TheoryListResponse> {
+  const { data } = await api.get<TheoryListResponse>('/theories', { params });
+  return data;
+}
+
+/** 查询理论详情。 */
+export async function getTheory(theoryId: string): Promise<Theory> {
+  const { data } = await api.get<Theory>(`/theories/${theoryId}`);
+  return data;
+}
+
+/** 新建理论（POST /theories，仅 admin）。 */
+export async function createTheory(payload: {
+  name: string;
+  aliases?: string[];
+  category_id?: string | null;
+  content?: string;
+  source?: string;
+  tag_ids?: string[];
+}): Promise<Theory> {
+  const { data } = await api.post<Theory>('/theories', payload);
+  return data;
+}
+
+/** 更新理论（PUT /theories/{id}，partial update，仅 admin）。
+ * tag_ids 提供时整体替换。 */
+export async function updateTheory(
+  theoryId: string,
+  payload: Partial<{
+    name: string;
+    aliases: string[];
+    category_id: string | null;
+    content: string;
+    source: string;
+    tag_ids: string[];
+  }>,
+): Promise<Theory> {
+  const { data } = await api.put<Theory>(`/theories/${theoryId}`, payload);
+  return data;
+}
+
+/** 删除理论（DELETE /theories/{id}，theory_tags 由 DB CASCADE 清理，仅 admin）。 */
+export async function deleteTheory(theoryId: string): Promise<void> {
+  await api.delete(`/theories/${theoryId}`);
 }
