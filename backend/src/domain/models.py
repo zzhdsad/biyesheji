@@ -524,3 +524,61 @@ class Theory(Base, TimestampMixin):
     )
     # 分类对象（多对一），仅用于响应序列化；category_id 的 FK RESTRICT 不变
     category: Mapped[Category | None] = relationship(lazy="selectin")
+
+
+# 中医文献 ↔ 标签 多对多关联表（TASK-006），与 herb_tags / theory_tags 同构。
+# - literature_id CASCADE：删除文献时关联行自动清理
+# - tag_id RESTRICT：标签仍被文献引用时数据库层阻止删除
+literature_tags = Table(
+    "literature_tags",
+    Base.metadata,
+    Column(
+        "literature_id",
+        UUID(as_uuid=True),
+        ForeignKey("literatures.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "tag_id",
+        UUID(as_uuid=True),
+        ForeignKey("tags.id", ondelete="RESTRICT"),
+        primary_key=True,
+    ),
+)
+
+
+class Literature(Base, TimestampMixin):
+    """中医文献资源（TASK-006）：著作级文献条目的著录元数据 + 人工整理正文。
+
+    分类通过 category_id 多对一关联 categories（resource_type='literature' 的树节点）；
+    标签通过 literature_tags 与 Tag 多对多。不使用 JSONB、不做软删除/多态关联。
+    与 Document（KB 内文件 + 解析/向量化流水线）相互独立，不设外键关联；
+    资源进入 RAG 的衔接由后续 TASK-008 处理，本模型不承载任何向量/文件字段。
+    """
+
+    __tablename__ = "literatures"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    aliases: Mapped[list[str]] = mapped_column(
+        ARRAY(String(128)), default=list
+    )
+    category_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("categories.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    author: Mapped[str] = mapped_column(String(255), default="")  # 作者（自由文本）
+    dynasty: Mapped[str] = mapped_column(String(32), default="")  # 成书年代（自由文本，如“东汉”）
+    summary: Mapped[str] = mapped_column(String(500), default="")  # 内容摘要
+    content: Mapped[str] = mapped_column(Text, default="")  # 正文/精选段落
+    source: Mapped[str] = mapped_column(String(255), default="")  # 版本/底本/出版依据
+
+    __table_args__ = (
+        Index("ix_literatures_aliases_gin", "aliases", postgresql_using="gin"),
+    )
+
+    # 与 Herb.tags / Prescription.tags / Theory.tags 同构：不建 back_populates，Tag 模型保持不变
+    tags: Mapped[list[Tag]] = relationship(
+        secondary=literature_tags, lazy="selectin"
+    )
+    # 分类对象（多对一），仅用于响应序列化；category_id 的 FK RESTRICT 不变
+    category: Mapped[Category | None] = relationship(lazy="selectin")

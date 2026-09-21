@@ -21,6 +21,7 @@ import {
 import type { MenuProps } from 'antd';
 import {
   AppstoreOutlined,
+  BookOutlined,
   BulbFilled,
   BulbOutlined,
   ControlOutlined,
@@ -78,6 +79,7 @@ const NAV_ITEMS: Required<MenuProps>['items'] = [
       { key: '/herbs', icon: <MedicineBoxOutlined />, label: '中药管理' },
       { key: '/prescriptions', icon: <ProfileOutlined />, label: '方剂管理' },
       { key: '/theories', icon: <ReadOutlined />, label: '中医理论' },
+      { key: '/literatures', icon: <BookOutlined />, label: '文献管理' },
       { key: '/documents', icon: <FileTextOutlined />, label: '文档管理' },
       { key: '/users', icon: <TeamOutlined />, label: '用户管理' },
       { key: '/evaluation', icon: <ExperimentOutlined />, label: '评估面板' },
@@ -207,6 +209,7 @@ export function AppSider() {
     if (pathname.startsWith('/herbs')) return ['/herbs'];
     if (pathname.startsWith('/prescriptions')) return ['/prescriptions'];
     if (pathname.startsWith('/theories')) return ['/theories'];
+    if (pathname.startsWith('/literatures')) return ['/literatures'];
     if (pathname.startsWith('/documents')) return ['/documents'];
     if (pathname.startsWith('/users')) return ['/users'];
     if (pathname.startsWith('/evaluation')) return ['/evaluation'];

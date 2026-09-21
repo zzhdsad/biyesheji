@@ -15,6 +15,8 @@ import type {
   KBMember,
   KBMemberRole,
   KnowledgeBase,
+  Literature,
+  LiteratureListResponse,
   MessageOut,
   Prescription,
   PrescriptionListResponse,
@@ -861,4 +863,65 @@ export async function updateTheory(
 /** 删除理论（DELETE /theories/{id}，theory_tags 由 DB CASCADE 清理，仅 admin）。 */
 export async function deleteTheory(theoryId: string): Promise<void> {
   await api.delete(`/theories/${theoryId}`);
+}
+
+// ─────────────────────────── 中医文献（TASK-006）───────────────────────────
+
+/** 查询文献列表，支持关键词 / 分类 / 标签筛选 + 分页。 */
+export async function fetchLiteratures(params?: {
+  keyword?: string;
+  category_id?: string;
+  tag_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<LiteratureListResponse> {
+  const { data } = await api.get<LiteratureListResponse>('/literatures', { params });
+  return data;
+}
+
+/** 查询文献详情。 */
+export async function getLiterature(literatureId: string): Promise<Literature> {
+  const { data } = await api.get<Literature>(`/literatures/${literatureId}`);
+  return data;
+}
+
+/** 新建文献（POST /literatures，仅 admin）。 */
+export async function createLiterature(payload: {
+  name: string;
+  aliases?: string[];
+  category_id?: string | null;
+  author?: string;
+  dynasty?: string;
+  summary?: string;
+  content?: string;
+  source?: string;
+  tag_ids?: string[];
+}): Promise<Literature> {
+  const { data } = await api.post<Literature>('/literatures', payload);
+  return data;
+}
+
+/** 更新文献（PUT /literatures/{id}，partial update，仅 admin）。
+ * tag_ids 提供时整体替换（空数组清空，不可被忽略）。 */
+export async function updateLiterature(
+  literatureId: string,
+  payload: Partial<{
+    name: string;
+    aliases: string[];
+    category_id: string | null;
+    author: string;
+    dynasty: string;
+    summary: string;
+    content: string;
+    source: string;
+    tag_ids: string[];
+  }>,
+): Promise<Literature> {
+  const { data } = await api.put<Literature>(`/literatures/${literatureId}`, payload);
+  return data;
+}
+
+/** 删除文献（DELETE /literatures/{id}，literature_tags 由 DB CASCADE 清理，仅 admin）。 */
+export async function deleteLiterature(literatureId: string): Promise<void> {
+  await api.delete(`/literatures/${literatureId}`);
 }

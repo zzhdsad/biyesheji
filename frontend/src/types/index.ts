@@ -309,3 +309,30 @@ export interface TheoryListResponse {
   limit: number;
   offset: number;
 }
+
+// ─────────────────────────── 中医文献（TASK-006）───────────────────────────
+
+/** 中医文献资源（与后端 LiteratureOut 对应）。 */
+export interface Literature {
+  id: string;
+  name: string;
+  aliases: string[];
+  category_id: string | null;
+  category: Pick<Category, 'id' | 'name'> | null;
+  author: string;
+  dynasty: string;
+  summary: string;
+  content: string;
+  source: string;
+  tags: Pick<Tag, 'id' | 'name' | 'color'>[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** 文献分页响应（GET /literatures）。 */
+export interface LiteratureListResponse {
+  items: Literature[];
+  total: number;
+  limit: number;
+  offset: number;
+}
