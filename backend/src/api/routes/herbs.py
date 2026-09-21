@@ -243,6 +243,7 @@ def _build_conditions(
             | (Herb.properties.ilike(pattern))
             | (Herb.effects.ilike(pattern))
             | (Herb.description.ilike(pattern))
+            | (Herb.source.ilike(pattern))
         )
     if category_id is not None:
         conditions.append(Herb.category_id == category_id)

@@ -369,6 +369,124 @@ def test_search_by_indications(client, keeper):
     assert _find(resp.json()["items"], p["id"]) is not None
 
 
+def test_search_by_description(client, keeper):
+    p = keeper.prescription(
+        name=f"描述搜索方-{_SUFFIX}",
+        description=f"测试方剂描述关键词-{_SUFFIX}",
+    )
+    resp = client.get(
+        "/api/v1/prescriptions",
+        params={"keyword": "方剂描述"},
+    )
+    assert _find(resp.json()["items"], p["id"]) is not None
+
+
+def test_search_by_usage_method(client, keeper):
+    p = keeper.prescription(
+        name=f"用法搜索方-{_SUFFIX}",
+        usage_method=f"水煎服-{_SUFFIX}",
+    )
+    resp = client.get(
+        "/api/v1/prescriptions",
+        params={"keyword": f"水煎服-{_SUFFIX}"},
+    )
+    assert _find(resp.json()["items"], p["id"]) is not None
+
+
+def test_search_by_source(client, keeper):
+    p = keeper.prescription(
+        name=f"出处搜索方-{_SUFFIX}",
+        source=f"伤寒论-{_SUFFIX}",
+    )
+    resp = client.get(
+        "/api/v1/prescriptions",
+        params={"keyword": f"伤寒论-{_SUFFIX}"},
+    )
+    assert _find(resp.json()["items"], p["id"]) is not None
+
+
+def test_search_by_ingredient_herb_name(client, keeper):
+    """通过组成药材名称搜索方剂：方剂文本字段不含关键词，仅靠 ingredient herb.name 命中。"""
+    herb = keeper.herb(name=f"桂枝药材-{_SUFFIX}")
+    p = keeper.prescription(
+        name=f"组成搜索方-{_SUFFIX}",
+        ingredients=[
+            {"herb_id": herb["id"], "amount": 9, "unit": "克"}
+        ],
+    )
+    resp = client.get(
+        "/api/v1/prescriptions",
+        params={"keyword": f"桂枝药材-{_SUFFIX}"},
+    )
+    assert _find(resp.json()["items"], p["id"]) is not None
+
+
+def test_search_by_ingredient_no_duplicate(client, keeper):
+    """一个方剂有多味组成药材命中同一 keyword 时，只返回 1 条。"""
+    herb_a = keeper.herb(name=f"匹配药甲-{_SUFFIX}")
+    herb_b = keeper.herb(name=f"匹配药乙-{_SUFFIX}")
+    p = keeper.prescription(
+        name=f"多组成方-{_SUFFIX}",
+        ingredients=[
+            {"herb_id": herb_a["id"], "amount": 3, "unit": "克"},
+            {"herb_id": herb_b["id"], "amount": 6, "unit": "克"},
+        ],
+    )
+    resp = client.get(
+        "/api/v1/prescriptions", params={"keyword": "匹配药"}
+    )
+    body = resp.json()
+    matches = [i for i in body["items"] if i["id"] == p["id"]]
+    assert len(matches) == 1
+
+
+def test_search_keyword_with_category(client, keeper):
+    """keyword + category_id 组合过滤：AND 逻辑。"""
+    cat_a = keeper.cat(name=f"组合分类A-{_SUFFIX}")
+    cat_b = keeper.cat(name=f"组合分类B-{_SUFFIX}")
+    herb = keeper.herb(name=f"组合药材-{_SUFFIX}")
+    p_a = keeper.prescription(
+        name=f"组合方A-{_SUFFIX}",
+        category_id=cat_a["id"],
+        ingredients=[{"herb_id": herb["id"], "amount": 3, "unit": "克"}],
+    )
+    keeper.prescription(
+        name=f"组合方B-{_SUFFIX}",
+        category_id=cat_b["id"],
+        ingredients=[{"herb_id": herb["id"], "amount": 6, "unit": "克"}],
+    )
+    resp = client.get(
+        "/api/v1/prescriptions",
+        params={"keyword": f"组合药材-{_SUFFIX}", "category_id": cat_a["id"]},
+    )
+    body = resp.json()
+    assert _find(body["items"], p_a["id"]) is not None
+    assert all(i["category_id"] == cat_a["id"] for i in body["items"])
+
+
+def test_search_keyword_with_tag(client, keeper):
+    """keyword + tag_id 组合过滤：AND 逻辑。"""
+    tag_a = keeper.tag(name=f"组合标签A-{_SUFFIX}")
+    tag_b = keeper.tag(name=f"组合标签B-{_SUFFIX}")
+    herb = keeper.herb(name=f"标签组合药材-{_SUFFIX}")
+    p_a = keeper.prescription(
+        name=f"标签组合方A-{_SUFFIX}",
+        tag_ids=[tag_a["id"]],
+        ingredients=[{"herb_id": herb["id"], "amount": 3, "unit": "克"}],
+    )
+    keeper.prescription(
+        name=f"标签组合方B-{_SUFFIX}",
+        tag_ids=[tag_b["id"]],
+        ingredients=[{"herb_id": herb["id"], "amount": 6, "unit": "克"}],
+    )
+    resp = client.get(
+        "/api/v1/prescriptions",
+        params={"keyword": f"标签组合药材-{_SUFFIX}", "tag_id": tag_a["id"]},
+    )
+    body = resp.json()
+    assert _find(body["items"], p_a["id"]) is not None
+
+
 # ── 分页 / 过滤 ──────────────────────────────────────────────────────────────
 
 

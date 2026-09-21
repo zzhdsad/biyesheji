@@ -322,6 +322,28 @@ def _array_ilike(column, pattern: str):
     return exists().where(item.ilike(pattern))
 
 
+def _ingredient_name_ilike(pattern: str):
+    """EXISTS 关联子查询：方剂含有一味组成药材，其 Herb.name ILIKE pattern。
+
+    生成 SQL 语义：
+        EXISTS (
+            SELECT 1
+            FROM prescription_ingredients, herbs
+            WHERE pi.prescription_id = prescriptions.id  -- 关联外层
+              AND herbs.id = pi.herb_id                   -- 隐式 JOIN
+              AND herbs.name ILIKE '%keyword%'
+        )
+
+    使用 EXISTS 而非 JOIN：一个方剂可能有多味药材命中同一 keyword，
+    但 EXISTS 只判定"是否存在"，不会使方剂行重复。
+    """
+    return exists().where(
+        PrescriptionIngredient.prescription_id == Prescription.id,
+        Herb.id == PrescriptionIngredient.herb_id,
+        Herb.name.ilike(pattern),
+    )
+
+
 def _build_conditions(
     keyword: str | None,
     category_id: uuid.UUID | None,
@@ -337,6 +359,8 @@ def _build_conditions(
             | (Prescription.indications.ilike(pattern))
             | (Prescription.description.ilike(pattern))
             | (Prescription.usage_method.ilike(pattern))
+            | (Prescription.source.ilike(pattern))
+            | _ingredient_name_ilike(pattern)
         )
     if category_id is not None:
         conditions.append(Prescription.category_id == category_id)

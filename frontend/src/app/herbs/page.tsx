@@ -94,6 +94,15 @@ interface HerbFormValues {
 
 type ModalMode = 'create' | 'edit';
 
+/** 列表查询所需的全部状态。 */
+interface QueryState {
+  keyword: string;
+  categoryId: string | undefined;
+  tagId: string | undefined;
+  current: number;
+  pageSize: number;
+}
+
 // ── 页面 ──────────────────────────────────────────────────────────────────────
 
 export default function HerbsPage() {
@@ -129,16 +138,20 @@ export default function HerbsPage() {
 
   // ── 数据加载 ──────────────────────────────────────────────────────────────
 
-  const loadHerbs = async () => {
+  const loadHerbs = async (opts?: QueryState) => {
+    const kw = opts ? opts.keyword : keyword;
+    const cat = opts ? opts.categoryId : categoryId;
+    const tg = opts ? opts.tagId : tagId;
+    const pg = opts ? opts.current : current;
+    const ps = opts ? opts.pageSize : pageSize;
     setLoading(true);
     try {
-      const offset = (current - 1) * pageSize;
       const resp = await fetchHerbs({
-        keyword: keyword || undefined,
-        category_id: categoryId,
-        tag_id: tagId,
-        limit: pageSize,
-        offset,
+        keyword: kw || undefined,
+        category_id: cat,
+        tag_id: tg,
+        limit: ps,
+        offset: (pg - 1) * ps,
       });
       setHerbs(resp.items);
       setTotal(resp.total);
@@ -180,17 +193,35 @@ export default function HerbsPage() {
   // ── 查询操作 ──────────────────────────────────────────────────────────────
 
   const onSearch = () => {
-    setCurrent(1);
-    void loadHerbs();
+    if (current === 1) {
+      void loadHerbs({
+        keyword,
+        categoryId,
+        tagId,
+        current: 1,
+        pageSize,
+      });
+    } else {
+      // 翻页触发 effect，effect 闭包读取到的已是最新筛选 state
+      setCurrent(1);
+    }
   };
 
   const onReset = () => {
     setKeyword('');
     setCategoryId(undefined);
     setTagId(undefined);
-    setCurrent(1);
-    // 重置后立即用新条件查询
-    setTimeout(() => void loadHerbs(), 0);
+    if (current === 1) {
+      void loadHerbs({
+        keyword: '',
+        categoryId: undefined,
+        tagId: undefined,
+        current: 1,
+        pageSize,
+      });
+    } else {
+      setCurrent(1);
+    }
   };
 
   // ── 新建 / 编辑 ────────────────────────────────────────────────────────────

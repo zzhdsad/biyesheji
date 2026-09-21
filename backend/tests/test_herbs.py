@@ -201,6 +201,50 @@ def test_search_by_effects(client, keeper):
     assert _find_herb(resp.json()["items"], herb["id"]) is not None
 
 
+def test_search_by_properties(client, keeper):
+    herb = keeper.herb(
+        name=f"性味搜索-{_SUFFIX}",
+        properties=f"辛温-{_SUFFIX}",
+    )
+    resp = client.get(
+        "/api/v1/herbs", params={"keyword": f"辛温-{_SUFFIX}"}
+    )
+    assert _find_herb(resp.json()["items"], herb["id"]) is not None
+
+
+def test_search_by_channels(client, keeper):
+    herb = keeper.herb(
+        name=f"归经搜索-{_SUFFIX}",
+        channels=[f"肺经-{_SUFFIX}", f"膀胱经-{_SUFFIX}"],
+    )
+    resp = client.get(
+        "/api/v1/herbs", params={"keyword": f"肺经-{_SUFFIX}"}
+    )
+    assert _find_herb(resp.json()["items"], herb["id"]) is not None
+
+
+def test_search_by_description(client, keeper):
+    herb = keeper.herb(
+        name=f"描述搜索-{_SUFFIX}",
+        description=f"用于测试关键词描述-{_SUFFIX}",
+    )
+    resp = client.get(
+        "/api/v1/herbs", params={"keyword": f"关键词描述-{_SUFFIX}"}
+    )
+    assert _find_herb(resp.json()["items"], herb["id"]) is not None
+
+
+def test_search_by_source(client, keeper):
+    herb = keeper.herb(
+        name=f"来源搜索-{_SUFFIX}",
+        source=f"神农本草经-{_SUFFIX}",
+    )
+    resp = client.get(
+        "/api/v1/herbs", params={"keyword": f"神农本草经-{_SUFFIX}"}
+    )
+    assert _find_herb(resp.json()["items"], herb["id"]) is not None
+
+
 # ── 分页 ─────────────────────────────────────────────────────────────────────
 
 
