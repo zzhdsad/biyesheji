@@ -19,14 +19,23 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.audit_service import AuditService
 from src.core.config import settings
 from src.core.deps import get_accessible_kb_ids
 from src.core.exceptions import NotFoundError, PermissionDeniedError
-from src.domain.models import KBMember, KnowledgeBase, User
+from src.domain.models import (
+    Herb,
+    KBMember,
+    KnowledgeBase,
+    KnowledgeBaseResource,
+    Literature,
+    Prescription,
+    Theory,
+    User,
+)
 from src.infrastructure.database import get_db
 from src.utils.timeutil import utcnow
 
@@ -34,6 +43,9 @@ router = APIRouter(prefix="/kb", tags=["knowledge-bases"])
 
 KB_ROLES = {"owner", "admin", "editor", "viewer"}
 TRASH_RETENTION_DAYS = settings.TRASH_RETENTION_DAYS
+
+# TASK-008：KB 可挂载的传统资源类型（多态关联的 resource_type 受控词表）
+RESOURCE_TYPES = ("herb", "prescription", "theory", "literature")
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -595,3 +607,284 @@ async def transfer_ownership(
         ip=_get_client_ip(request),
     )
     return {"kb_id": str(kb_id), "new_owner_id": str(payload.new_owner_user_id)}
+
+
+# ── 资源挂载（TASK-008）─────────────────────────────────────────────────────
+# 多态关联：resource_type + resource_id，不在此层建立到具体资源表的 ORM relationship。
+# 资源存在性与类型-UUID 匹配由应用层显式查询对应表校验。
+
+
+class ResourceMountRequest(BaseModel):
+    """挂载请求体：resource_type 受控词表 + UUID。"""
+
+    resource_type: str = Field(min_length=1, max_length=16)
+    resource_id: uuid.UUID
+
+
+class ResourceMountedOut(BaseModel):
+    """挂载记录输出：含真实资源名（由对应资源表查询填充，非 resource_id 推测）。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    knowledge_base_id: uuid.UUID
+    resource_type: str
+    resource_id: uuid.UUID
+    resource_name: str
+    created_at: datetime
+
+
+class ResourceListResponse(BaseModel):
+    items: list[ResourceMountedOut]
+    total: int
+    limit: int
+    offset: int
+
+
+# resource_type → ModelCls 映射；保持显式 if/elif，避免动态 getattr 带来的类型混淆
+_RESOURCE_MODELS = {
+    "herb": Herb,
+    "prescription": Prescription,
+    "theory": Theory,
+    "literature": Literature,
+}
+
+
+def _validate_resource_type(resource_type: str) -> None:
+    """resource_type 必须在受控词表内，否则 400。
+
+    与 herbs.py 的 _validate_prescription_category / MemberAddRequest._role_valid
+    同构：显式 400 而非依赖 Pydantic validator。
+    """
+    if resource_type not in RESOURCE_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"resource_type 必须是 {list(RESOURCE_TYPES)} 之一",
+        )
+
+
+async def _resolve_resource_name(
+    db: AsyncSession, resource_type: str, resource_id: uuid.UUID
+) -> str | None:
+    """按 resource_type 路由到对应表，查询主键并返回 name；不存在返回 None。
+
+    严格匹配：resource_type='herb' 只查 herbs 表；不会"任一表存在即通过"。
+    """
+    model_cls = _RESOURCE_MODELS.get(resource_type)
+    if model_cls is None:
+        return None
+    obj = await db.get(model_cls, resource_id)
+    if obj is None:
+        return None
+    return obj.name
+
+
+async def _enrich_resources_with_names(
+    db: AsyncSession, items: list[KnowledgeBaseResource]
+) -> list[ResourceMountedOut]:
+    """批量解析 resource_name（按 resource_type 分组查询，避免 N+1）。
+
+    与 _enrich_hits_with_doc_name 同样采用按类型分组批量 SELECT 模式。
+    """
+    by_type: dict[str, list[uuid.UUID]] = {}
+    for it in items:
+        by_type.setdefault(it.resource_type, []).append(it.resource_id)
+
+    # 按 resource_type 分组批量查 name
+    name_by_type: dict[str, dict[uuid.UUID, str]] = {}
+    for rtype, rids in by_type.items():
+        model_cls = _RESOURCE_MODELS.get(rtype)
+        if model_cls is None:
+            name_by_type[rtype] = {}
+            continue
+        rows = (
+            await db.scalars(select(model_cls).where(model_cls.id.in_(rids)))
+        ).all()
+        name_by_type[rtype] = {r.id: r.name for r in rows}
+
+    return [
+        ResourceMountedOut(
+            id=it.id,
+            knowledge_base_id=it.knowledge_base_id,
+            resource_type=it.resource_type,
+            resource_id=it.resource_id,
+            resource_name=name_by_type.get(it.resource_type, {}).get(it.resource_id, ""),
+            created_at=it.created_at,
+        )
+        for it in items
+    ]
+
+
+@router.get("/{kb_id}/resources", response_model=ResourceListResponse)
+async def list_kb_resources(
+    kb_id: uuid.UUID,
+    request: Request,
+    resource_type: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    db: AsyncSession = Depends(get_db),
+) -> ResourceListResponse:
+    """查看 KB 已挂载资源列表（Owner/Admin/Editor/Viewer 均可读）。
+
+    支持 resource_type 过滤 + 分页。resource_name 由对应资源表批量查询填充。
+    """
+    await _require_kb_member_or_admin(db, request, kb_id)
+
+    # 过滤条件：resource_type 非法时显式 400（而非 422），与 MemberAddRequest 一致
+    if resource_type is not None:
+        _validate_resource_type(resource_type)
+
+    base = select(KnowledgeBaseResource).where(
+        KnowledgeBaseResource.knowledge_base_id == kb_id
+    )
+    count_stmt = select(KnowledgeBaseResource).where(
+        KnowledgeBaseResource.knowledge_base_id == kb_id
+    )
+    if resource_type is not None:
+        base = base.where(KnowledgeBaseResource.resource_type == resource_type)
+        count_stmt = count_stmt.where(
+            KnowledgeBaseResource.resource_type == resource_type
+        )
+
+    total = (
+        await db.scalar(
+            select(func.count()).select_from(count_stmt.subquery())
+        )
+        or 0
+    )
+
+    rows = (
+        await db.scalars(
+            base.order_by(KnowledgeBaseResource.created_at.desc()).limit(limit).offset(offset)
+        )
+    ).all()
+    items = list(rows)
+    out = await _enrich_resources_with_names(db, items)
+    return ResourceListResponse(
+        items=out, total=total, limit=limit, offset=offset
+    )
+
+
+@router.post("/{kb_id}/resources", response_model=ResourceMountedOut, status_code=201)
+async def mount_resource(
+    kb_id: uuid.UUID,
+    payload: ResourceMountRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> ResourceMountedOut:
+    """挂载传统资源到 KB（仅 Owner 或 KB Admin）。
+
+    校验链：KB 存在 → 当前用户有挂载权限 → resource_type 合法
+    → 对应资源表中 resource_id 真实存在（严格类型匹配）→ 无重复挂载 → INSERT。
+    数据库 UNIQUE 作为最终保护；应用层提前判断以返回 409 而非 500。
+    """
+    user: User = request.state.user
+    await _require_kb_owner_or_admin(db, request, kb_id)
+
+    _validate_resource_type(payload.resource_type)
+
+    # 严格匹配：只在对应表查询 resource_id；不"任一表存在即通过"
+    resource_name = await _resolve_resource_name(
+        db, payload.resource_type, payload.resource_id
+    )
+    if resource_name is None:
+        raise NotFoundError(
+            f"{payload.resource_type} (id={payload.resource_id}) 不存在"
+        )
+
+    # 重复挂载检查：应用层提前判断，返回 409
+    existing = await db.scalar(
+        select(KnowledgeBaseResource).where(
+            KnowledgeBaseResource.knowledge_base_id == kb_id,
+            KnowledgeBaseResource.resource_type == payload.resource_type,
+            KnowledgeBaseResource.resource_id == payload.resource_id,
+        )
+    )
+    if existing is not None:
+        raise HTTPException(status_code=409, detail="该资源已挂载到此知识库")
+
+    record = KnowledgeBaseResource(
+        knowledge_base_id=kb_id,
+        resource_type=payload.resource_type,
+        resource_id=payload.resource_id,
+    )
+    db.add(record)
+    await db.commit()
+    await db.refresh(record)
+
+    audit = AuditService(db)
+    await audit.log(
+        operator_id=user.id,
+        operator_name=user.username,
+        operation="mount_resource",
+        target_type="kb",
+        target_id=str(kb_id),
+        detail={
+            "resource_type": payload.resource_type,
+            "resource_id": str(payload.resource_id),
+            "resource_name": resource_name,
+        },
+        ip=_get_client_ip(request),
+    )
+    return ResourceMountedOut(
+        id=record.id,
+        knowledge_base_id=record.knowledge_base_id,
+        resource_type=record.resource_type,
+        resource_id=record.resource_id,
+        resource_name=resource_name,
+        created_at=record.created_at,
+    )
+
+
+@router.delete("/{kb_id}/resources/{resource_type}/{resource_id}")
+async def unmount_resource(
+    kb_id: uuid.UUID,
+    resource_type: str,
+    resource_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """取消挂载（仅 Owner 或 KB Admin）。
+
+    使用 (resource_type, resource_id) 作为自然复合键，与
+    DELETE /kb/{kb_id}/members/{user_id} 风格一致：用户视角的标识是资源本身，
+    而非关联行 id。同时匹配 kb_id + resource_type + resource_id 三元组，
+    不允许通过其他 KB 的挂载关系删除本 KB 的记录。
+    """
+    user: User = request.state.user
+    await _require_kb_owner_or_admin(db, request, kb_id)
+
+    _validate_resource_type(resource_type)
+
+    record = await db.scalar(
+        select(KnowledgeBaseResource).where(
+            KnowledgeBaseResource.knowledge_base_id == kb_id,
+            KnowledgeBaseResource.resource_type == resource_type,
+            KnowledgeBaseResource.resource_id == resource_id,
+        )
+    )
+    if record is None:
+        raise NotFoundError("该资源未挂载到此知识库")
+
+    await db.delete(record)
+    await db.commit()
+
+    audit = AuditService(db)
+    await audit.log(
+        operator_id=user.id,
+        operator_name=user.username,
+        operation="unmount_resource",
+        target_type="kb",
+        target_id=str(kb_id),
+        detail={
+            "resource_type": resource_type,
+            "resource_id": str(resource_id),
+        },
+        ip=_get_client_ip(request),
+    )
+    return {
+        "kb_id": str(kb_id),
+        "resource_type": resource_type,
+        "resource_id": str(resource_id),
+        "unmounted": True,
+    }

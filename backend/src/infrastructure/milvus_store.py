@@ -23,7 +23,13 @@ class VectorStoreError(Exception):
 
 @dataclass
 class VectorRow:
-    """Milvus 插入行（与 chunks 表字段对齐 + 双路向量）。"""
+    """Milvus 插入行（与 chunks 表字段对齐 + 双路向量）。
+
+    Task-008 Stage 4-2 扩展：resource_type/resource_id/resource_name/era 用于
+    传统资源（Herb/Prescription/Theory/Literature）向量行携带资源元数据；
+    均为可选字段，默认 None，Document 向量化路径不填这些字段，向后兼容。
+    Stage 4-3 将扩展 Milvus insert() 把这些字段作为动态字段写入；本阶段不写入。
+    """
 
     id: str
     doc_id: str
@@ -37,6 +43,11 @@ class VectorRow:
     # 来源可信度（动态字段；None/0 表示该文档未标注，写入时降级为缺省值）
     source_type: str | None = None
     credibility_level: int | None = None
+    # 资源元数据（Stage 4-2 扩展；Document 向量行不填，保持 None）
+    resource_type: str | None = None
+    resource_id: str | None = None
+    resource_name: str | None = None
+    era: str | None = None
 
 
 class BaseVectorStore(ABC):

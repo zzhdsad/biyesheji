@@ -72,6 +72,12 @@ class KnowledgeBase(Base, TimestampMixin):
     members: Mapped[list["KBMember"]] = relationship(
         back_populates="knowledge_base", cascade="all, delete-orphan"
     )
+    # TASK-008：挂载到该 KB 的传统资源（herb/prescription/theory/literature）。
+    # 多态关联（resource_type + resource_id），不在此层建立到具体资源表的 FK；
+    # 资源存在性由应用层在挂载/检索时校验。仅与 KnowledgeBaseResource 本层建关系。
+    resources: Mapped[list["KnowledgeBaseResource"]] = relationship(
+        back_populates="knowledge_base", cascade="all, delete-orphan"
+    )
 
 
 class KBMember(Base, TimestampMixin):
@@ -86,6 +92,58 @@ class KBMember(Base, TimestampMixin):
     role: Mapped[str] = mapped_column(String(16), default="viewer")  # owner / admin / editor / viewer
 
     knowledge_base: Mapped["KnowledgeBase"] = relationship(back_populates="members")
+
+
+class KnowledgeBaseResource(Base):
+    """KB ↔ 传统资源（Herb/Prescription/Theory/Literature）的多态挂载关联（TASK-008）。
+
+    设计：
+    - 多态关联：``resource_type`` 标识资源类型，``resource_id`` 指向对应资源表的主键；
+      PostgreSQL 不支持单一 FK 指向多表，故 ``resource_id`` 不建 FK，
+      资源存在性由应用层在挂载时校验（Stage 3 实现）。
+    - 删除：``knowledge_base_id`` CASCADE（KB 删除时关联自动清理）；
+      删除 Resource 时需应用层先清关联再删本体（DB 无法跨多态 CASCADE）。
+    - 唯一约束：同一 KB 不允许重复挂载同一 Resource；不同 KB 可挂载同一 Resource。
+    - ``created_at`` 单字段（无 ``updated_at``）：本表无业务字段更新需求，
+      与纯关联表（herb_tags 等）一致；不引入 TimestampMixin 以免冗余 updated_at。
+    """
+
+    __tablename__ = "knowledge_base_resources"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    knowledge_base_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE")
+    )
+    # resource_type 受控词表（herb/prescription/theory/literature）；
+    # 与 User.role / Category.resource_type / Document.parse_status 风格一致，
+    # 不引入 PostgreSQL ENUM，由应用层在 Stage 3 校验合法值。
+    resource_type: Mapped[str] = mapped_column(String(16))
+    # 多态关联：不建 FK；存在性/类型-UUID 匹配由应用层校验。
+    resource_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+    knowledge_base: Mapped["KnowledgeBase"] = relationship(back_populates="resources")
+
+    __table_args__ = (
+        # 同一 KB 内 (resource_type, resource_id) 唯一；不同 KB 可挂载同一资源。
+        # 复合唯一约束自带以 knowledge_base_id 为最左前缀的索引，
+        # 覆盖"KB 内全部挂载"查询，无需单独为 knowledge_base_id 建索引。
+        UniqueConstraint(
+            "knowledge_base_id",
+            "resource_type",
+            "resource_id",
+            name="uq_kbr_kb_type_resource",
+        ),
+        # 反查索引：删除 Resource 时需按 (resource_type, resource_id) 清理所有挂载，
+        # 唯一复合约束的最左前缀是 knowledge_base_id，不覆盖此查询路径，故单独建索引。
+        Index(
+            "ix_knowledge_base_resources_resource_lookup",
+            "resource_type",
+            "resource_id",
+        ),
+    )
 
 
 class Document(Base, TimestampMixin):
