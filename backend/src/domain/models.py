@@ -216,6 +216,14 @@ class Message(Base, TimestampMixin):
 
 
 class TestCase(Base, TimestampMixin):
+    """评估测试集用例（TASK-009 扩展：问题分类 + 数据集版本 + 人工确认标记）。
+
+    TASK-009 约束（AGENTS.md / PRD）：
+    - 不凭空编造中医事实作为标准答案：golden_answer 为空或未经人工确认时，
+      评估只计算 context_relevancy，answer_correctness 记为 NULL（不参与均值），
+      避免把「未标注」误算成 0 分而污染实验结论。
+    """
+
     __tablename__ = "test_cases"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
@@ -225,9 +233,61 @@ class TestCase(Base, TimestampMixin):
     question: Mapped[str] = mapped_column(Text)
     golden_answer: Mapped[str] = mapped_column(Text)
     golden_contexts: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # 问题分类（受控词表见 application.evaluation_service.QUESTION_TYPES）：
+    # herb/prescription/theory/literature/multi_source/unanswerable/general
+    # 供 TASK-011 Query Analyzer / Dynamic Router 按问题类型对比检索策略效果。
+    question_type: Mapped[str] = mapped_column(String(32), default="general", index=True)
+    # 测试集版本（如 tcm-v1），实验对比时用于确认两次运行使用同一测试集
+    dataset_version: Mapped[str] = mapped_column(String(64), default="v1", index=True)
+    # 标准答案是否仍需人工确认：True → 不计算 answer_correctness
+    needs_review: Mapped[bool] = mapped_column(default=True)
+    # 人工标注依据提示（应依据哪条资源/文献核对），仅作标注指引，不参与打分
+    source_reference: Mapped[str] = mapped_column(Text, default="")
+
+
+class EvaluationRun(Base, TimestampMixin):
+    """一次评估运行（实验）的归档记录。
+
+    TASK-009：Baseline 实验能力。一次 run 固定「实验名 + 检索策略 + 测试集版本」，
+    保存聚合指标与配置快照，使后续 Dynamic Router / 不同 Retrieval Strategy
+    可以与 Baseline 在同一测试集下按指标和 question_type 进行对比。
+    """
+
+    __tablename__ = "evaluation_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
+    )
+    experiment_name: Mapped[str] = mapped_column(String(128), default="baseline", index=True)
+    # 检索策略标识（Baseline：hybrid_rrf_rerank_hyde）
+    retrieval_strategy: Mapped[str] = mapped_column(String(64), default="baseline_hybrid")
+    dataset_version: Mapped[str] = mapped_column(String(64), default="v1")
+    case_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 有已确认标准答案、实际计算 answer_correctness 的用例数
+    evaluated_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 标准答案缺失/待人工确认、跳过 answer_correctness 的用例数
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0)
+    context_relevancy: Mapped[float] = mapped_column(Float, default=0.0)
+    # 无已评估用例时为 NULL（区别于「全部答错=0」）
+    answer_correctness: Mapped[float | None] = mapped_column(Float, nullable=True)
+    passed: Mapped[bool] = mapped_column(default=False)
+    threshold: Mapped[float] = mapped_column(Float, default=0.75)
+    # 配置快照（模型/检索参数），保证实验可复现
+    config_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # 按 question_type 分组的指标明细（[{question_type, case_count, evaluated_count,
+    # context_relevancy, answer_correctness}]），支持按问题类型分析
+    by_question_type: Mapped[list | None] = mapped_column(JSONB, nullable=True)
 
 
 class EvaluationResult(Base, TimestampMixin):
+    """单条用例的评估结果。
+
+    TASK-009：补充 run_id / 实验维度冗余字段（experiment_name、retrieval_strategy、
+    dataset_version、question_type）与生成答案、错误信息，便于按实验/按问题类型
+    直接查询，无需回表 join。
+    """
+
     __tablename__ = "evaluation_results"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
@@ -236,7 +296,16 @@ class EvaluationResult(Base, TimestampMixin):
     )
     retrieved_contexts: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     context_relevancy: Mapped[float] = mapped_column(Float, default=0.0)
-    answer_correctness: Mapped[float] = mapped_column(Float, default=0.0)
+    # NULL 表示未评估（标准答案缺失或待人工确认），与 0 分（已评估但不正确）区分
+    answer_correctness: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # 归属运行（evaluation_runs.id 的字符串形式，冗余存储便于分组查询）
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    experiment_name: Mapped[str] = mapped_column(String(128), default="baseline")
+    retrieval_strategy: Mapped[str] = mapped_column(String(64), default="baseline_hybrid")
+    dataset_version: Mapped[str] = mapped_column(String(64), default="v1")
+    question_type: Mapped[str] = mapped_column(String(32), default="general")
+    answer: Mapped[str] = mapped_column(Text, default="")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class Feedback(Base, TimestampMixin):

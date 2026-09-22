@@ -49,6 +49,8 @@ EXPECTED_TABLES = {
     "literature_tags",
     # TASK-008
     "knowledge_base_resources",
+    # TASK-009
+    "evaluation_runs",
 }
 
 SMOKE_DB_NAME = "knowledge_platform_alembic_smoke"

@@ -173,11 +173,61 @@ export interface HealthResponse {
 
 // ─────────────────────────── 评估 ───────────────────────────
 
+/** 问题类型受控词表（TASK-009：中医知识问题分类）。 */
+export type QuestionType =
+  | 'herb'
+  | 'prescription'
+  | 'theory'
+  | 'literature'
+  | 'multi_source'
+  | 'unanswerable'
+  | 'general';
+
+/** 问题类型选项（GET /evaluation/question-types）。 */
+export interface QuestionTypeOption {
+  value: string;
+  label: string;
+}
+
 /** 测试集条目（上传/评估输入）。 */
 export interface EvalTestCaseItem {
   question: string;
   golden_answer: string;
   golden_contexts?: string[];
+  /** 问题分类，默认 general；TASK-011 按类型分析检索策略效果。 */
+  question_type?: QuestionType | string;
+  /** 数据集版本，不传则使用上传请求级 dataset_version。 */
+  dataset_version?: string;
+  /** 标准答案是否仍需人工确认；未评估的用例不计入答案正确度。 */
+  needs_review?: boolean;
+  /** 人工标注依据提示。 */
+  source_reference?: string;
+}
+
+/** 测试集条目（GET /evaluation/test-cases，含服务端状态）。 */
+export interface EvalTestCaseOut extends EvalTestCaseItem {
+  id: string;
+  kb_id: string;
+  golden_answer: string;
+  golden_contexts: string[];
+  question_type: string;
+  question_type_label: string;
+  dataset_version: string;
+  needs_review: boolean;
+  source_reference: string;
+  created_at: string | null;
+}
+
+/** 按问题类型分组的指标。 */
+export interface QuestionTypeMetric {
+  question_type: string;
+  question_type_label: string;
+  case_count: number;
+  evaluated_count: number;
+  skipped_count: number;
+  context_relevancy: number;
+  /** null：该类型下暂无已确认标准答案的用例。 */
+  answer_correctness: number | null;
 }
 
 /** 单条用例评估结果（run 报告明细）。 */
@@ -189,19 +239,51 @@ export interface EvalCaseResult {
   answer: string;
   retrieved_contexts: string[];
   context_relevancy: number;
-  answer_correctness: number;
+  /** null：标准答案缺失或待人工确认，未参与答案正确度计算。 */
+  answer_correctness: number | null;
   error?: string | null;
+  question_type: string;
+  dataset_version: string;
+  needs_review: boolean;
 }
 
 /** 评估报告（POST /evaluation/run）。 */
 export interface EvaluationReport {
   run_id: string;
+  kb_id: string;
   case_count: number;
   context_relevancy: number;
-  answer_correctness: number;
+  /** null：本次运行无已确认标准答案的用例。 */
+  answer_correctness: number | null;
   passed: boolean;
   threshold: number;
+  /** TASK-009 实验维度（Baseline 与消融实验对比）。 */
+  experiment_name: string;
+  retrieval_strategy: string;
+  dataset_version: string;
+  evaluated_count: number;
+  skipped_count: number;
+  by_question_type: QuestionTypeMetric[];
   results: EvalCaseResult[];
+}
+
+/** 实验运行归档（GET /evaluation/runs）。 */
+export interface EvaluationRunItem {
+  run_id: string;
+  kb_id: string;
+  experiment_name: string;
+  retrieval_strategy: string;
+  dataset_version: string;
+  case_count: number;
+  evaluated_count: number;
+  skipped_count: number;
+  context_relevancy: number;
+  answer_correctness: number | null;
+  passed: boolean;
+  threshold: number;
+  config_snapshot: Record<string, unknown>;
+  by_question_type: QuestionTypeMetric[];
+  created_at: string | null;
 }
 
 /** 历史评估结果条目（GET /evaluation/results）。 */
@@ -209,9 +291,15 @@ export interface EvaluationHistoryItem {
   id: string;
   question: string;
   golden_answer: string;
-  answer_correctness: number;
+  answer_correctness: number | null;
   context_relevancy: number;
   created_at: string | null;
+  run_id?: string | null;
+  experiment_name?: string | null;
+  retrieval_strategy?: string | null;
+  dataset_version?: string | null;
+  question_type?: string | null;
+  question_type_label?: string | null;
 }
 
 // ─────────────────────────── 分类与标签（TASK-002）───────────────────────────

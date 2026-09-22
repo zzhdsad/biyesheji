@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
   App,
@@ -91,7 +91,8 @@ async function loadResourceOptions(
   return resp.items.map((l: Literature) => ({ id: l.id, name: l.name }));
 }
 
-export default function KbResourcesPage() {
+/** 内容组件：使用 useSearchParams，必须由 Suspense 包裹（Next.js prerender 要求）。 */
+function KbResourcesContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const kbId = searchParams.get('kb_id') ?? '';
@@ -383,5 +384,13 @@ export default function KbResourcesPage() {
         </Space>
       </Modal>
     </AppLayout>
+  );
+}
+
+export default function KbResourcesPage() {
+  return (
+    <Suspense fallback={null}>
+      <KbResourcesContent />
+    </Suspense>
   );
 }

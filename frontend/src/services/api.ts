@@ -8,7 +8,9 @@ import type {
   DocumentItem,
   EvaluationHistoryItem,
   EvaluationReport,
+  EvaluationRunItem,
   EvalTestCaseItem,
+  EvalTestCaseOut,
   HealthResponse,
   Herb,
   HerbListResponse,
@@ -23,6 +25,7 @@ import type {
   MessageOut,
   Prescription,
   PrescriptionListResponse,
+  QuestionTypeOption,
   Role,
   SourceEra,
   SourceType,
@@ -214,29 +217,88 @@ export async function reindexDocument(docId: string): Promise<DocumentItem> {
 export async function uploadTestSet(
   kbId: string,
   cases: EvalTestCaseItem[],
-): Promise<{ kb_id: string; uploaded: number; case_ids: string[] }> {
-  const { data } = await api.post('/evaluation/upload', { kb_id: kbId, cases });
+  datasetVersion?: string,
+): Promise<{ kb_id: string; uploaded: number; case_ids: string[]; dataset_version: string }> {
+  const { data } = await api.post('/evaluation/upload', {
+    kb_id: kbId,
+    cases,
+    ...(datasetVersion ? { dataset_version: datasetVersion } : {}),
+  });
   return data;
+}
+
+/** 运行评估时指定的实验维度（TASK-009 Baseline 归档）。 */
+export interface EvalRunOptions {
+  experiment_name?: string;
+  retrieval_strategy?: string;
+  dataset_version?: string;
 }
 
 /** 运行 RAGAS 评估（批量 RAG + 指标，返回富报告）。评估较慢，放宽超时。 */
 export async function runEvaluation(
   kbId: string,
   caseIds?: string[],
+  options?: EvalRunOptions,
 ): Promise<EvaluationReport> {
   const { data } = await api.post<EvaluationReport>(
     '/evaluation/run',
-    { kb_id: kbId, case_ids: caseIds },
+    { kb_id: kbId, case_ids: caseIds, ...(options ?? {}) },
     { timeout: 300_000 },
   );
   return data;
 }
 
-/** 历史评估结果（关联测试用例，按时间倒序）。 */
-export async function fetchEvalHistory(kbId?: string): Promise<EvaluationHistoryItem[]> {
-  const { data } = await api.get<EvaluationHistoryItem[]>('/evaluation/results', {
+/** 历史评估结果（关联测试用例，按时间倒序），可按 run_id 过滤。 */
+export async function fetchEvalHistory(
+  kbId?: string,
+  runId?: string,
+): Promise<EvaluationHistoryItem[]> {
+  const params: Record<string, string> = {};
+  if (kbId) params.kb_id = kbId;
+  if (runId) params.run_id = runId;
+  const { data } = await api.get<EvaluationHistoryItem[]>('/evaluation/results', { params });
+  return data;
+}
+
+/** 实验运行归档列表（Baseline / 消融实验对比，按时间倒序）。 */
+export async function fetchEvalRuns(kbId?: string): Promise<EvaluationRunItem[]> {
+  const { data } = await api.get<EvaluationRunItem[]>('/evaluation/runs', {
     params: kbId ? { kb_id: kbId } : {},
   });
+  return data;
+}
+
+/** 问题类型受控词表。 */
+export async function fetchEvalQuestionTypes(): Promise<QuestionTypeOption[]> {
+  const { data } = await api.get<{ question_types: QuestionTypeOption[] }>(
+    '/evaluation/question-types',
+  );
+  return data.question_types;
+}
+
+/** 查看指定知识库的测试集（含问题分类与人工确认状态）。 */
+export async function fetchEvalTestCases(
+  kbId: string,
+  datasetVersion?: string,
+): Promise<EvalTestCaseOut[]> {
+  const { data } = await api.get<EvalTestCaseOut[]>('/evaluation/test-cases', {
+    params: datasetVersion ? { kb_id: kbId, dataset_version: datasetVersion } : { kb_id: kbId },
+  });
+  return data;
+}
+
+/** 人工确认/修订单条用例的标准答案。 */
+export async function confirmEvalTestCase(
+  caseId: string,
+  payload: {
+    golden_answer?: string;
+    golden_contexts?: string[];
+    source_reference?: string;
+    question_type?: string;
+    needs_review?: boolean;
+  },
+): Promise<EvalTestCaseOut> {
+  const { data } = await api.patch<EvalTestCaseOut>(`/evaluation/test-cases/${caseId}`, payload);
   return data;
 }
 
