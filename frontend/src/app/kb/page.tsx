@@ -20,6 +20,7 @@ import {
   Typography,
 } from 'antd';
 import {
+  AppstoreOutlined,
   DeleteOutlined,
   EditOutlined,
   FileTextOutlined,
@@ -180,6 +181,14 @@ export default function KBPage() {
                     >
                       <Button type="text" size="small" icon={<FileTextOutlined />}>
                         管理文档
+                      </Button>
+                    </Link>,
+                    <Link
+                      key="resources"
+                      href={{ pathname: '/kb/resources', query: { kb_id: kb.id } }}
+                    >
+                      <Button type="text" size="small" icon={<AppstoreOutlined />}>
+                        资源挂载
                       </Button>
                     </Link>,
                     <Popconfirm

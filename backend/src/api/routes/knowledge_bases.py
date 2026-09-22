@@ -310,7 +310,10 @@ async def purge_kb(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """彻底删除知识库（仅 admin，不可恢复）。"""
+    """彻底删除知识库（仅 admin，不可恢复）。
+
+    Stage 4-6：purge 前清理该 KB 下所有 Resource 向量（KBR 由 CASCADE 清理）。
+    """
     user: User = request.state.user
     if user.role != "admin":
         raise PermissionDeniedError("仅管理员可彻底删除")
@@ -319,6 +322,19 @@ async def purge_kb(
     if kb is None:
         raise NotFoundError("知识库不存在")
     kb_name = kb.name
+
+    # Stage 4-6：清理该 KB 下所有 Resource 向量（KBR 记录随 KB 删除 CASCADE 清理）
+    try:
+        from src.application.resource_vector_service import ResourceVectorService
+        svc = ResourceVectorService()
+        await svc.cleanup_kb_resource_vectors(db, kb_id)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"KB purge 前清理 Resource 向量失败 kb_id={kb_id}",
+            exc_info=True,
+        )
+
     await db.delete(kb)
     await db.commit()
 
@@ -670,13 +686,22 @@ async def _resolve_resource_name(
 
     严格匹配：resource_type='herb' 只查 herbs 表；不会"任一表存在即通过"。
     """
+    obj = await _load_resource(db, resource_type, resource_id)
+    return obj.name if obj is not None else None
+
+
+async def _load_resource(
+    db: AsyncSession, resource_type: str, resource_id: uuid.UUID
+):
+    """按 resource_type 路由到对应表，加载资源实例；不存在返回 None。
+
+    Stage 4-3：挂载后向量化需要资源实例（字段映射生成 Canonical Text），
+    不再只取 name。
+    """
     model_cls = _RESOURCE_MODELS.get(resource_type)
     if model_cls is None:
         return None
-    obj = await db.get(model_cls, resource_id)
-    if obj is None:
-        return None
-    return obj.name
+    return await db.get(model_cls, resource_id)
 
 
 async def _enrich_resources_with_names(
@@ -775,22 +800,32 @@ async def mount_resource(
     """挂载传统资源到 KB（仅 Owner 或 KB Admin）。
 
     校验链：KB 存在 → 当前用户有挂载权限 → resource_type 合法
-    → 对应资源表中 resource_id 真实存在（严格类型匹配）→ 无重复挂载 → INSERT。
+    → 对应资源表中 resource_id 真实存在（严格类型匹配）→ 无重复挂载 → INSERT
+    → 向量化并写入 Milvus（Stage 4-3）→ COMMIT。
+
     数据库 UNIQUE 作为最终保护；应用层提前判断以返回 409 而非 500。
+    向量化在 COMMIT 前执行：失败时 KBR INSERT 一并回滚，KBR 与向量保持一致。
     """
+    import asyncio
+
+    from loguru import logger
+
+    from src.application.resource_vector_service import ResourceVectorService
+
     user: User = request.state.user
     await _require_kb_owner_or_admin(db, request, kb_id)
 
     _validate_resource_type(payload.resource_type)
 
     # 严格匹配：只在对应表查询 resource_id；不"任一表存在即通过"
-    resource_name = await _resolve_resource_name(
+    resource = await _load_resource(
         db, payload.resource_type, payload.resource_id
     )
-    if resource_name is None:
+    if resource is None:
         raise NotFoundError(
             f"{payload.resource_type} (id={payload.resource_id}) 不存在"
         )
+    resource_name = resource.name
 
     # 重复挂载检查：应用层提前判断，返回 409
     existing = await db.scalar(
@@ -809,6 +844,26 @@ async def mount_resource(
         resource_id=payload.resource_id,
     )
     db.add(record)
+    await db.flush()  # 分配 id，不 commit；向量化失败时整体回滚
+
+    # Stage 4-3：向量化并写入向量库（CPU/IO 密集放线程池）
+    try:
+        svc = ResourceVectorService()
+        await asyncio.to_thread(
+            svc.vectorize_and_store,
+            resource,
+            kb_id=kb_id,
+            resource_type=payload.resource_type,
+        )
+    except Exception as exc:
+        logger.error(
+            f"资源向量化失败 {payload.resource_type}={payload.resource_id}: {exc}"
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=f"资源向量化失败：{exc}",
+        ) from exc
+
     await db.commit()
     await db.refresh(record)
 
@@ -850,7 +905,17 @@ async def unmount_resource(
     DELETE /kb/{kb_id}/members/{user_id} 风格一致：用户视角的标识是资源本身，
     而非关联行 id。同时匹配 kb_id + resource_type + resource_id 三元组，
     不允许通过其他 KB 的挂载关系删除本 KB 的记录。
+
+    Stage 4-3：删除 KBR 前先按 doc_id 删除 Milvus 向量（幂等）。
+    doc_id 按 (Resource+KB) 维度生成，不影响其他 KB 同一资源的向量。
+    向量删除失败时抛出异常，KBR 不会被删除，用户可重试卸载。
     """
+    import asyncio
+
+    from loguru import logger
+
+    from src.application.resource_vector_service import ResourceVectorService
+
     user: User = request.state.user
     await _require_kb_owner_or_admin(db, request, kb_id)
 
@@ -865,6 +930,24 @@ async def unmount_resource(
     )
     if record is None:
         raise NotFoundError("该资源未挂载到此知识库")
+
+    # Stage 4-3：先删除向量（幂等），再删 KBR；失败则 KBR 保留，用户可重试
+    try:
+        svc = ResourceVectorService()
+        await asyncio.to_thread(
+            svc.delete_vectors,
+            kb_id=kb_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+        )
+    except Exception as exc:
+        logger.error(
+            f"资源向量删除失败 {resource_type}={resource_id} kb={kb_id}: {exc}"
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=f"资源向量删除失败：{exc}",
+        ) from exc
 
     await db.delete(record)
     await db.commit()

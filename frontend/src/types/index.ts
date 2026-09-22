@@ -81,6 +81,29 @@ export interface KBMember {
   role: KBMemberRole;
 }
 
+// ─────────────────────────── 知识库资源挂载（TASK-008 Stage 4-7）───────────────────────────
+
+/** 知识库挂载的结构化资源类型（与后端 RESOURCE_TYPES 一致）。 */
+export type KBResourceType = 'herb' | 'prescription' | 'theory' | 'literature';
+
+/** 已挂载资源记录（与后端 ResourceMountedOut 对应）。 */
+export interface KBResource {
+  id: string;
+  knowledge_base_id: string;
+  resource_type: KBResourceType;
+  resource_id: string;
+  resource_name: string;
+  created_at: string;
+}
+
+/** 已挂载资源分页响应（GET /kb/{id}/resources）。 */
+export interface KBResourceListResponse {
+  items: KBResource[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
 /** 审计日志（BUSINESS_RULES §7）。 */
 export interface AuditLog {
   id: string;

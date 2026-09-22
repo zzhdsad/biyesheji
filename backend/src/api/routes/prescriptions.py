@@ -559,6 +559,18 @@ async def update_prescription(
         await db.rollback()
         raise AppException(409, "同名方剂已存在")
 
+    # Stage 4-6：更新后重新向量化所有已挂载的 KB（best-effort，失败不阻塞更新）
+    try:
+        from src.application.resource_vector_service import ResourceVectorService
+        svc = ResourceVectorService()
+        await svc.revectorize_all_mounts(db, prescription, "prescription")
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"prescription 更新后重新向量化失败 id={prescription.id}",
+            exc_info=True,
+        )
+
     audit = AuditService(db)
     await audit.log(
         operator_id=user.id,
@@ -592,6 +604,8 @@ async def delete_prescription(
 
     组成行与 prescription_tags 关联随 DB CASCADE / ORM 级联自动清理；
     herb_id 为 RESTRICT，不会触碰中药数据。
+
+    Stage 4-6：删除前清理所有 KBR 关联及 Milvus vectors。
     """
     user = request.state.user
     if user.role != "admin":
@@ -600,6 +614,16 @@ async def delete_prescription(
     prescription = await db.get(Prescription, prescription_id)
     if prescription is None:
         raise HTTPException(status_code=404, detail="方剂不存在")
+
+    # Stage 4-6：删除资源前清理 KBR + 向量（失败则阻止删除）
+    try:
+        from src.application.resource_vector_service import ResourceVectorService
+        svc = ResourceVectorService()
+        await svc.cleanup_resource_mounts(db, "prescription", prescription.id)
+    except Exception as exc:
+        raise AppException(
+            422, f"资源向量清理失败，无法删除：{exc}"
+        ) from exc
 
     await db.delete(prescription)
     await db.flush()

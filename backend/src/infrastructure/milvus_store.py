@@ -199,6 +199,12 @@ class MilvusStore(BaseVectorStore):
                 # 动态字段缺省值与 page_num 约定一致："" / 0 表示未标注
                 item["source_type"] = r.source_type or ""
                 item["credibility_level"] = r.credibility_level or 0
+                # TASK-008 Stage 4-3：Resource 元数据作为动态字段写入
+                # Document 向量行 resource_* 均为 None → 写入空串，与 source_type 约定一致
+                item["resource_type"] = r.resource_type or ""
+                item["resource_id"] = r.resource_id or ""
+                item["resource_name"] = r.resource_name or ""
+                item["era"] = r.era or ""
             data.append(item)
         try:
             # 分批插入，避免超大 payload
@@ -230,7 +236,14 @@ class MilvusStore(BaseVectorStore):
             "sparse_vector",
         ]
         if self._supports_dynamic_fields():
-            output_fields += ["source_type", "credibility_level"]
+            output_fields += [
+                "source_type",
+                "credibility_level",
+                "resource_type",
+                "resource_id",
+                "resource_name",
+                "era",
+            ]
         rows = client.query(
             collection_name=self.COLLECTION,
             filter=f'doc_id == "{doc_id}"',
@@ -248,6 +261,10 @@ class MilvusStore(BaseVectorStore):
                 "title_path": r["title_path"],
                 "source_type": r.get("source_type") or None,
                 "credibility_level": r.get("credibility_level") or None,
+                "resource_type": r.get("resource_type") or None,
+                "resource_id": r.get("resource_id") or None,
+                "resource_name": r.get("resource_name") or None,
+                "era": r.get("era") or None,
                 "dense_vector": [float(x) for x in r["dense_vector"]],
                 "sparse_vector": {int(k): float(v) for k, v in r["sparse_vector"].items()},
             }
@@ -295,7 +312,14 @@ class MilvusStore(BaseVectorStore):
             "title_path",
         ]
         if self._supports_dynamic_fields():
-            output_fields += ["source_type", "credibility_level"]
+            output_fields += [
+                "source_type",
+                "credibility_level",
+                "resource_type",
+                "resource_id",
+                "resource_name",
+                "era",
+            ]
         try:
             results = client.search(
                 collection_name=self.COLLECTION,
@@ -327,7 +351,14 @@ class MilvusStore(BaseVectorStore):
             "title_path",
         ]
         if self._supports_dynamic_fields():
-            output_fields += ["source_type", "credibility_level"]
+            output_fields += [
+                "source_type",
+                "credibility_level",
+                "resource_type",
+                "resource_id",
+                "resource_name",
+                "era",
+            ]
         try:
             results = client.search(
                 collection_name=self.COLLECTION,
@@ -360,6 +391,11 @@ class MilvusStore(BaseVectorStore):
             # 动态字段缺省值 "" / 0 同样还原为 None（未标注）
             "source_type": source_type or None,
             "credibility_level": credibility_level or None,
+            # TASK-008 Stage 4-3：Resource 元数据带回（空串还原为 None）
+            "resource_type": entity.get("resource_type") or None,
+            "resource_id": entity.get("resource_id") or None,
+            "resource_name": entity.get("resource_name") or None,
+            "era": entity.get("era") or None,
             "score": float(hit.get("distance", 0.0)),
         }
 
@@ -412,6 +448,10 @@ class InMemoryVectorStore(BaseVectorStore):
                 "title_path": v.title_path,
                 "source_type": v.source_type,
                 "credibility_level": v.credibility_level,
+                "resource_type": v.resource_type,
+                "resource_id": v.resource_id,
+                "resource_name": v.resource_name,
+                "era": v.era,
                 "score": round(score, 6),
             }
             for score, v in scored[:top_k]
@@ -446,6 +486,10 @@ class InMemoryVectorStore(BaseVectorStore):
                 "title_path": v.title_path,
                 "source_type": v.source_type,
                 "credibility_level": v.credibility_level,
+                "resource_type": v.resource_type,
+                "resource_id": v.resource_id,
+                "resource_name": v.resource_name,
+                "era": v.era,
                 "score": round(score, 6),
             }
             for score, v in scored[:top_k]
@@ -463,6 +507,10 @@ class InMemoryVectorStore(BaseVectorStore):
                 "title_path": r.title_path,
                 "source_type": r.source_type,
                 "credibility_level": r.credibility_level,
+                "resource_type": r.resource_type,
+                "resource_id": r.resource_id,
+                "resource_name": r.resource_name,
+                "era": r.era,
                 "dense_vector": list(r.dense_vector),
                 "sparse_vector": dict(r.sparse_vector),
             }

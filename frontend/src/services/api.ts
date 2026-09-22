@@ -14,6 +14,9 @@ import type {
   HerbListResponse,
   KBMember,
   KBMemberRole,
+  KBResource,
+  KBResourceListResponse,
+  KBResourceType,
   KnowledgeBase,
   Literature,
   LiteratureListResponse,
@@ -545,6 +548,41 @@ export async function transferKbOwnership(
 export async function fetchTrashKbs(): Promise<KnowledgeBase[]> {
   const { data } = await api.get<KnowledgeBase[]>('/kb/trash');
   return data;
+}
+
+// ─────────────────────────── 知识库资源挂载（TASK-008 Stage 4-7）───────────────────────────
+
+/** 已挂载结构化资源列表（GET /kb/{id}/resources）。 */
+export async function fetchKbResources(
+  kbId: string,
+  params?: { resource_type?: KBResourceType; limit?: number; offset?: number },
+): Promise<KBResourceListResponse> {
+  const { data } = await api.get<KBResourceListResponse>(`/kb/${kbId}/resources`, {
+    params,
+  });
+  return data;
+}
+
+/** 挂载结构化资源（POST /kb/{id}/resources，仅 Owner/Admin）。 */
+export async function mountKbResource(
+  kbId: string,
+  resourceType: KBResourceType,
+  resourceId: string,
+): Promise<KBResource> {
+  const { data } = await api.post<KBResource>(`/kb/${kbId}/resources`, {
+    resource_type: resourceType,
+    resource_id: resourceId,
+  });
+  return data;
+}
+
+/** 卸载结构化资源（DELETE /kb/{id}/resources/{type}/{rid}，仅 Owner/Admin）。 */
+export async function unmountKbResource(
+  kbId: string,
+  resourceType: KBResourceType,
+  resourceId: string,
+): Promise<void> {
+  await api.delete(`/kb/${kbId}/resources/${resourceType}/${resourceId}`);
 }
 
 /** 恢回收站知识库。 */

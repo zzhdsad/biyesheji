@@ -60,6 +60,33 @@ _CONTEXT_MARKER = "参考资料"
 # [citation: 1, 3] 或 [citation: 1]；页码可选，兼容有无空格
 _CITATION_PATTERN = re.compile(r"\[citation:\s*(\d+)\s*(?:,\s*(\d+)\s*)?\]", re.IGNORECASE)
 
+# Stage 4-4：Resource 类型 → 中文标签（Prompt 展示用）
+_RESOURCE_TYPE_LABELS = {
+    "herb": "中药",
+    "prescription": "方剂",
+    "theory": "理论",
+    "literature": "文献",
+}
+
+# Stage 4-5：证据等级阈值（按 rerank/dense score 分级）
+# high：强相关，可信赖；medium：弱相关，仅供参考；insufficient：接近阈值
+_EVIDENCE_HIGH_THRESHOLD = 0.7
+_EVIDENCE_MEDIUM_THRESHOLD = 0.3  # 与 RELEVANCE_THRESHOLD 对齐
+
+
+def _evidence_level(score: float) -> str:
+    """按分数推导证据等级：high / medium / insufficient。
+
+    - score >= 0.7 → high（强相关）
+    - 0.3 <= score < 0.7 → medium（弱相关）
+    - score < 0.3 → insufficient（不足，但引用过滤会先剔除）
+    """
+    if score >= _EVIDENCE_HIGH_THRESHOLD:
+        return "high"
+    if score >= _EVIDENCE_MEDIUM_THRESHOLD:
+        return "medium"
+    return "insufficient"
+
 
 class RagService:
     """RAG 问答编排（检索 Top-K → Prompt → LLM → 引用后处理 → 入库）。"""
@@ -248,6 +275,10 @@ class RagService:
 
         流式路径用：citations 在生成前推送，实现引用卡片实时展示。
         DB 持久化用同一份，保证历史回看与流式一致。
+
+        Stage 4-5：区分 document / resource 来源。Resource Citation 携带
+        resource_type/resource_id/resource_name；Document Citation 保持原结构
+        兼容。source_kind 字段标识来源类别，evidence_level 按分数分级。
         """
         threshold = settings.RELEVANCE_THRESHOLD
         citations = []
@@ -256,21 +287,30 @@ class RagService:
             # BUSINESS_RULES §6 引用过滤：只展示相关度 ≥ 阈值的引用
             if score < threshold:
                 continue
-            citations.append(
-                {
-                    "chunk_id": h["id"],
-                    "source_index": i,
-                    "doc_id": h["doc_id"],
-                    "doc_name": h.get("doc_name", "未知文档"),
-                    "page_num": h["page_num"],
-                    "title_path": h["title_path"],
-                    "content": h["content"],
-                    "score": score,
-                    "source_type": h.get("source_type"),
-                    "era": h.get("era"),
-                    "credibility_level": h.get("credibility_level"),
-                }
-            )
+            citation = {
+                "chunk_id": h["id"],
+                "source_index": i,
+                "doc_id": h["doc_id"],
+                "doc_name": h.get("doc_name", "未知文档"),
+                "page_num": h["page_num"],
+                "title_path": h["title_path"],
+                "content": h["content"],
+                "score": score,
+                "source_type": h.get("source_type"),
+                "era": h.get("era"),
+                "credibility_level": h.get("credibility_level"),
+                # Stage 4-5：证据等级（high/medium/insufficient）
+                "evidence_level": _evidence_level(score),
+            }
+            # Stage 4-5：Resource Citation 扩展字段
+            if h.get("source_kind") == "resource" or h.get("resource_type"):
+                citation["source_kind"] = "resource"
+                citation["resource_type"] = h.get("resource_type")
+                citation["resource_id"] = h.get("resource_id")
+                citation["resource_name"] = h.get("resource_name")
+            else:
+                citation["source_kind"] = "document"
+            citations.append(citation)
         return citations
 
     async def ask(
@@ -496,21 +536,31 @@ class RagService:
     async def _enrich_hits_with_doc_name(self, hits: list[dict]) -> None:
         """为检索命中注入文档名与来源可信度信息（就地修改）。
 
-        供 Prompt 与引用卡片展示；来源元数据以 documents 表为事实源，
-        Milvus 动态字段仅作检索侧冗余（老集合无动态字段时由此处兜底）。
+        Stage 4-4：区分 Document 命中与 Resource 命中：
+        - Document 命中（resource_type 为空）：以 documents 表为事实源，
+          PG 缺失时由 Milvus 动态字段兜底（老集合无动态字段时由此处兜底）。
+        - Resource 命中（resource_type 非空）：doc_id 为 SHA256（非 UUID），
+          不查 documents 表；resource_name / resource_type / era 由 Milvus
+          动态字段带回，直接填充，doc_name = resource_name。
         """
         if not hits:
             return
-        doc_ids = {h["doc_id"] for h in hits if h.get("doc_id")}
+        # 分离 Document 命中与 Resource 命中（避免 SHA256 doc_id 查 UUID 列报错）
+        doc_hits = [h for h in hits if not h.get("resource_type")]
+        res_hits = [h for h in hits if h.get("resource_type")]
+
+        # Document 命中：按 doc_id（UUID）批量查 documents 表
+        doc_ids = {h["doc_id"] for h in doc_hits if h.get("doc_id")}
         docs = {
             str(d.id): d
             for d in (
                 await self.db.scalars(select(Document).where(Document.id.in_(doc_ids)))
             ).all()
         } if doc_ids else {}
-        for h in hits:
+        for h in doc_hits:
             doc = docs.get(h["doc_id"])
             h["doc_name"] = doc.file_name if doc is not None else "未知文档"
+            h["source_kind"] = "document"
             # 优先取 PG 事实源；PG 缺失（如老数据）时保留 Milvus 带回的值
             h["source_type"] = (
                 doc.source_type if doc is not None and doc.source_type else h.get("source_type")
@@ -522,10 +572,22 @@ class RagService:
                 else h.get("credibility_level")
             )
 
+        # Resource 命中：元数据由 Milvus 动态字段带回，直接填充
+        for h in res_hits:
+            h["doc_name"] = h.get("resource_name") or h.get("resource_type") or "资源"
+            h["source_kind"] = "resource"
+            # source_type / credibility_level 在 Stage 4-3 写入时为 None（资源表无此字段）
+            # 保留 Milvus 带回的值（可能为 None）
+            h.setdefault("source_type", None)
+            h.setdefault("era", None)
+            h.setdefault("credibility_level", None)
+
     def _build_user_prompt(self, question: str, hits: list[dict]) -> str:
-        """构造用户 Prompt：问题 + 编号参考资料（含文档名、页码、标题、原文）。
+        """构造用户 Prompt：问题 + 编号参考资料（含文档名/资源名、页码、标题、原文）。
 
         编号即引用标识，模型按 System Prompt 输出 [citation: 编号, 页码]。
+        Stage 4-4：Resource 命中标注为"资源：{类型} {名称}"，
+        Document 命中保持"文档：{file_name}"，二者可在同一上下文共存。
         """
         if not hits:
             return question  # 无资料：模型应按 System Prompt 回答不知道
@@ -535,10 +597,20 @@ class RagService:
             page = h.get("page_num")
             page_label = f"页码：{page}" if page else "页码：0"
             provenance = self._format_provenance(h)
-            blocks.append(
-                f"[{i}] 文档：{h.get('doc_name', '未知')}{provenance} | "
-                f"{page_label} | 标题：{source}\n{h['content']}"
-            )
+            if h.get("source_kind") == "resource":
+                # Resource 命中：标注资源类型 + 名称
+                rtype_label = _RESOURCE_TYPE_LABELS.get(
+                    h.get("resource_type"), h.get("resource_type") or "资源"
+                )
+                blocks.append(
+                    f"[{i}] 资源：{rtype_label} {h.get('doc_name', '未知')}{provenance} | "
+                    f"{page_label} | 标题：{source}\n{h['content']}"
+                )
+            else:
+                blocks.append(
+                    f"[{i}] 文档：{h.get('doc_name', '未知')}{provenance} | "
+                    f"{page_label} | 标题：{source}\n{h['content']}"
+                )
         header = f"{_CONTEXT_MARKER}（编号即引用标识，引用时标注 [citation: 编号, 页码]）："
         return f"{question}\n\n{header}\n" + "\n\n".join(blocks)
 
@@ -561,6 +633,9 @@ class RagService:
         - 页码以检索命中的权威 page_num 为准（模型标注仅作提示，不信任）。
         - 无标记但有资料时兜底返回全部来源（前端仍可展示引用卡片）。
         - BUSINESS_RULES §6：只展示相关度 ≥ 阈值的引用。
+
+        Stage 4-5：区分 document / resource 来源。Resource Citation 携带
+        resource_type/resource_id/resource_name；evidence_level 按分数分级。
         """
         if not hits:
             return []
@@ -581,19 +656,27 @@ class RagService:
             # BUSINESS_RULES §6：只展示相关度 ≥ 阈值的引用
             if score < threshold:
                 continue
-            citations.append(
-                {
-                    "chunk_id": h["id"],
-                    "source_index": i + 1,  # 来源编号（1-based，对应答案标记）
-                    "doc_id": h["doc_id"],
-                    "doc_name": h.get("doc_name", "未知文档"),
-                    "page_num": h["page_num"],
-                    "title_path": h["title_path"],
-                    "content": h["content"],
-                    "score": score,
-                    "source_type": h.get("source_type"),
-                    "era": h.get("era"),
-                    "credibility_level": h.get("credibility_level"),
-                }
-            )
+            citation = {
+                "chunk_id": h["id"],
+                "source_index": i + 1,  # 来源编号（1-based，对应答案标记）
+                "doc_id": h["doc_id"],
+                "doc_name": h.get("doc_name", "未知文档"),
+                "page_num": h["page_num"],
+                "title_path": h["title_path"],
+                "content": h["content"],
+                "score": score,
+                "source_type": h.get("source_type"),
+                "era": h.get("era"),
+                "credibility_level": h.get("credibility_level"),
+                "evidence_level": _evidence_level(score),
+            }
+            # Stage 4-5：Resource Citation 扩展字段
+            if h.get("source_kind") == "resource" or h.get("resource_type"):
+                citation["source_kind"] = "resource"
+                citation["resource_type"] = h.get("resource_type")
+                citation["resource_id"] = h.get("resource_id")
+                citation["resource_name"] = h.get("resource_name")
+            else:
+                citation["source_kind"] = "document"
+            citations.append(citation)
         return citations

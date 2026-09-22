@@ -29,7 +29,12 @@ from decimal import Decimal
 from src.core.source_meta import credibility_for, is_valid_era, is_valid_source_type
 from src.domain.models import Herb, Literature, Prescription, Theory
 from src.infrastructure.embedding import BaseEmbedding, EmbeddingError, get_embedding
-from src.infrastructure.milvus_store import VectorRow
+from src.infrastructure.milvus_store import (
+    BaseVectorStore,
+    VectorRow,
+    VectorStoreError,
+    get_vector_store,
+)
 from src.utils.chunking import chunk_document
 
 # 长文本切片阈值（字符数，非 token）：
@@ -337,20 +342,21 @@ def make_doc_id(
 class ResourceVectorService:
     """将传统资源（Herb/Prescription/Theory/Literature）转换为 Milvus VectorRow。
 
-    本阶段（Stage 4-2）只负责：
-    1. 生成 Canonical Text（按资源类型字段映射）
-    2. 切片（Herb/Prescription 单向量；Theory/Literature 按长度复用 chunking）
-    3. 调用 BGE-M3 双路向量化（复用 BaseEmbedding 接口）
-    4. 组装 VectorRow（携带 resource_type/resource_id/resource_name 等元数据）
-
-    本阶段不写入 Milvus；写入逻辑由 Stage 4-3 实现。
+    Stage 4-2：生成 Canonical Text → Chunk → BGE-M3 → VectorRow。
+    Stage 4-3：扩展 vectorize_and_store / delete_vectors，将 VectorRow 写入
+    Milvus（或当前注入的 BaseVectorStore），并在卸载时按 doc_id 幂等清理。
 
     Embedding 解析顺序：构造注入 → 方法参数注入 → get_embedding(None) 回退 settings。
-    测试可注入 BaseEmbedding 实例避免加载真实模型。
+    测试可注入 BaseEmbedding / BaseVectorStore 实例避免加载真实模型 / 连接真实 Milvus。
     """
 
-    def __init__(self, embedding: BaseEmbedding | None = None) -> None:
+    def __init__(
+        self,
+        embedding: BaseEmbedding | None = None,
+        store: BaseVectorStore | None = None,
+    ) -> None:
         self.embedding = embedding
+        self.store = store or get_vector_store()
 
     def _resolve_embedding(
         self, embedding: BaseEmbedding | None = None
@@ -477,3 +483,189 @@ class ResourceVectorService:
             raise ResourceVectorError(
                 f"era 非受控枚举：{era}（合法值见 source_meta.ERAS）"
             )
+
+    # ------------------------------------------------------------------
+    # Stage 4-3：Milvus 写入 + 卸载清理
+    # ------------------------------------------------------------------
+
+    def vectorize_and_store(
+        self,
+        resource: Herb | Prescription | Theory | Literature,
+        *,
+        kb_id: uuid.UUID,
+        resource_type: str | None = None,
+        source_type: str | None = None,
+        era: str | None = None,
+        embedding: BaseEmbedding | None = None,
+    ) -> list[VectorRow]:
+        """向量化资源并写入向量库（幂等：先按 doc_id 清旧再插入）。
+
+        挂载端点在 KBR INSERT 后、COMMIT 前调用：
+        - 失败时由调用方 rollback DB 事务，KBR 与向量保持一致（均不存在）。
+        - 成功时由调用方 commit，KBR 与向量同时生效。
+
+        Returns:
+            写入的 VectorRow 列表（空资源返回空列表，不写向量也不报错）。
+
+        Raises:
+            ResourceVectorError: 向量化失败
+            VectorStoreError: 向量库写入失败
+        """
+        rows = self.vectorize(
+            resource,
+            kb_id=kb_id,
+            resource_type=resource_type,
+            source_type=source_type,
+            era=era,
+            embedding=embedding,
+        )
+        if not rows:
+            return []
+        # 幂等：同一 (Resource + KB) 重新挂载/重新向量化时先清旧向量
+        self.store.ensure_collection()
+        self.store.delete_by_doc(rows[0].doc_id)
+        inserted = self.store.insert(rows)
+        if inserted != len(rows):
+            raise VectorStoreError(
+                f"资源向量入库不完整：期望 {len(rows)} 条，实际 {inserted} 条"
+            )
+        return rows
+
+    def delete_vectors(
+        self,
+        *,
+        kb_id: uuid.UUID,
+        resource_type: str,
+        resource_id: uuid.UUID,
+    ) -> None:
+        """删除指定 (Resource + KB) 对应的全部向量（幂等）。
+
+        卸载端点在 KBR DELETE 前/后调用均可：doc_id 稳定且按 (Resource+KB)
+        维度生成，不会误删其他 KB 中同一 Resource 的向量。
+        """
+        doc_id = make_doc_id(resource_type, resource_id, kb_id)
+        self.store.ensure_collection()
+        self.store.delete_by_doc(doc_id)
+
+    # ------------------------------------------------------------------
+    # Stage 4-6：Resource 生命周期
+    # ------------------------------------------------------------------
+
+    async def revectorize_all_mounts(
+        self,
+        db,
+        resource,
+        resource_type: str,
+    ) -> int:
+        """Resource 更新后，对所有已挂载它的 KB 重新向量化并写入。
+
+        遍历 knowledge_base_resources 表中该资源的全部挂载记录，
+        对每个 KB 调用 vectorize_and_store（先 delete_by_doc 清旧再 insert）。
+
+        Returns:
+            重新向量化的 KB 数量
+        """
+        import asyncio
+
+        from sqlalchemy import select
+
+        from src.domain.models import KnowledgeBaseResource
+
+        kbrs = (
+            await db.scalars(
+                select(KnowledgeBaseResource).where(
+                    KnowledgeBaseResource.resource_type == resource_type,
+                    KnowledgeBaseResource.resource_id == resource.id,
+                )
+            )
+        ).all()
+        count = 0
+        for kbr in kbrs:
+            try:
+                await asyncio.to_thread(
+                    self.vectorize_and_store,
+                    resource,
+                    kb_id=kbr.knowledge_base_id,
+                    resource_type=resource_type,
+                )
+                count += 1
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"重新向量化失败 {resource_type}={resource.id} "
+                    f"kb={kbr.knowledge_base_id}",
+                    exc_info=True,
+                )
+        return count
+
+    async def cleanup_resource_mounts(
+        self,
+        db,
+        resource_type: str,
+        resource_id: uuid.UUID,
+    ) -> int:
+        """Resource 删除时，清理所有 KBR 关联及对应 Milvus vectors。
+
+        遍历所有挂载该资源的 KB，逐个删除 Milvus 向量 + KBR 记录。
+        向量删除失败时抛出异常，阻止资源删除（避免孤儿向量）。
+
+        Returns:
+            清理的挂载数量
+        """
+        import asyncio
+
+        from sqlalchemy import select
+
+        from src.domain.models import KnowledgeBaseResource
+
+        kbrs = (
+            await db.scalars(
+                select(KnowledgeBaseResource).where(
+                    KnowledgeBaseResource.resource_type == resource_type,
+                    KnowledgeBaseResource.resource_id == resource_id,
+                )
+            )
+        ).all()
+        self.store.ensure_collection()
+        for kbr in kbrs:
+            doc_id = make_doc_id(
+                resource_type, resource_id, kbr.knowledge_base_id
+            )
+            # 向量删除失败抛异常，阻止后续 KBR 删除 + 资源删除
+            await asyncio.to_thread(self.store.delete_by_doc, doc_id)
+            await db.delete(kbr)
+        return len(kbrs)
+
+    async def cleanup_kb_resource_vectors(self, db, kb_id) -> int:
+        """KB purge 时，删除该 KB 下所有 Resource 向量。
+
+        不删除 KBR 记录（KB CASCADE 会清理）。仅清理 Milvus 向量。
+        """
+        import asyncio
+
+        from sqlalchemy import select
+
+        from src.domain.models import KnowledgeBaseResource
+
+        kbrs = (
+            await db.scalars(
+                select(KnowledgeBaseResource).where(
+                    KnowledgeBaseResource.knowledge_base_id == kb_id,
+                )
+            )
+        ).all()
+        self.store.ensure_collection()
+        for kbr in kbrs:
+            doc_id = make_doc_id(
+                kbr.resource_type, kbr.resource_id, kb_id
+            )
+            try:
+                await asyncio.to_thread(self.store.delete_by_doc, doc_id)
+            except Exception:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"KB purge 向量清理失败 kb={kb_id} "
+                    f"{kbr.resource_type}={kbr.resource_id}",
+                    exc_info=True,
+                )
+        return len(kbrs)

@@ -417,6 +417,18 @@ async def update_literature(
         await db.rollback()
         raise AppException(409, "同名文献已存在")
 
+    # Stage 4-6：更新后重新向量化所有已挂载的 KB（best-effort，失败不阻塞更新）
+    try:
+        from src.application.resource_vector_service import ResourceVectorService
+        svc = ResourceVectorService()
+        await svc.revectorize_all_mounts(db, literature, "literature")
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            f"literature 更新后重新向量化失败 id={literature.id}",
+            exc_info=True,
+        )
+
     audit = AuditService(db)
     await audit.log(
         operator_id=user.id,
@@ -440,7 +452,10 @@ async def delete_literature(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """删除文献（仅 admin）；literature_tags 关联随 DB CASCADE 自动清理。"""
+    """删除文献（仅 admin）；literature_tags 关联随 DB CASCADE 自动清理。
+
+    Stage 4-6：删除前清理所有 KBR 关联及 Milvus vectors。
+    """
     user = request.state.user
     if user.role != "admin":
         raise AppException(403, "仅管理员可管理文献")
@@ -448,6 +463,16 @@ async def delete_literature(
     literature = await db.get(Literature, literature_id)
     if literature is None:
         raise HTTPException(status_code=404, detail="文献不存在")
+
+    # Stage 4-6：删除资源前清理 KBR + 向量（失败则阻止删除）
+    try:
+        from src.application.resource_vector_service import ResourceVectorService
+        svc = ResourceVectorService()
+        await svc.cleanup_resource_mounts(db, "literature", literature.id)
+    except Exception as exc:
+        raise AppException(
+            422, f"资源向量清理失败，无法删除：{exc}"
+        ) from exc
 
     await db.delete(literature)
     await db.flush()
