@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.application.evidence import SOURCE_KIND_KG, package_evidence
 from src.application.rag_service import RagService
 from src.core.deps import get_accessible_kb_ids
 from src.core.exceptions import PermissionDeniedError
@@ -35,6 +36,17 @@ class ChatAskRequest(BaseModel):
 
 
 class Citation(BaseModel):
+    """引用来源（同时是统一 Evidence 的载体）。
+
+    兼容约定（阶段十）：
+    - 旧字段 chunk_id / source_index / doc_id / doc_name / page_num /
+      title_path / content / score / source_type / era / credibility_level 不变；
+    - Stage 4-5 增加 source_kind / evidence_level / resource_type / resource_id /
+      resource_name；
+    - 阶段十增加 evidence_id / source_id / source_name / source_label /
+      evidence_text，用于 Document / Resource 统一表达（均为可选，缺省兼容旧数据）。
+    """
+
     chunk_id: str
     source_index: int  # 来源编号（1-based，对应答案中 [citation: 编号, 页码] 的编号）
     doc_id: str
@@ -43,6 +55,108 @@ class Citation(BaseModel):
     title_path: str | None = None
     content: str
     score: float
+    source_type: str | None = None
+    era: str | None = None
+    credibility_level: int | None = None
+    source_kind: str = "document"
+    evidence_level: str = "insufficient"
+    resource_type: str | None = None
+    resource_id: str | None = None
+    resource_name: str | None = None
+    # 阶段十：统一 Evidence 字段（向后兼容，缺省由调用方补齐）
+    evidence_id: str = ""
+    source_id: str | None = None
+    source_name: str = ""
+    source_label: str = ""
+    evidence_text: str = ""
+
+
+class Evidence(Citation):
+    """统一 Evidence 模型（阶段十）。
+
+    字段与 Citation 完全一致：Document 命中与 Resource（herb / prescription /
+    theory / literature）命中统一映射到这里，避免为不同资源类型各建一套结构。
+    """
+
+
+class EvidenceSource(BaseModel):
+    """同一来源（某味中药 / 某篇文献 / 某个文档）下的证据聚合。"""
+
+    source_id: str | None = None
+    source_name: str
+    source_kind: str
+    source_type: str | None = None
+    source_label: str
+    evidence_count: int
+    max_score: float
+    evidence_level: str
+    evidences: list[Evidence]
+
+
+class EvidenceGroup(BaseModel):
+    """多来源证据分组：document / resource:{herb,prescription,theory,literature}。"""
+
+    group_key: str
+    source_kind: str
+    source_type: str | None = None
+    source_label: str
+    source_count: int
+    evidence_count: int
+    max_score: float
+    evidence_level: str
+    sources: list[EvidenceSource]
+
+
+class EvidenceSummary(BaseModel):
+    evidence_count: int
+    source_count: int
+    group_count: int
+    max_score: float
+    by_level: dict  # {high: n, medium: n, insufficient: n}
+
+
+class QueryAnalysisOut(BaseModel):
+    """阶段十一：Query 分析结果（结构化，供前端与阶段十二 Dynamic Router 消费）。
+
+    字段与 application.query_analyzer.QueryAnalysis.to_dict() 对齐。
+    question_type 复用阶段九 QUESTION_TYPES 受控词表。
+
+    注意：is_unanswerable_candidate 只是"可能无法可靠回答"的候选标记，
+    不代表最终拒答（是否拒答仍由既有 Relevance Gate 决定）。
+    """
+
+    query: str
+    question_type: str
+    question_type_label: str
+    resource_types: list[str] = []
+    is_multi_source: bool = False
+    is_unanswerable_candidate: bool = False
+    keywords: list[str] = []
+    entities: list[dict] = []
+    features: dict = {}
+    analyzer_version: str
+    is_valid: bool = True
+    fallback_reason: str | None = None
+
+
+class RouterDecisionOut(BaseModel):
+    """阶段十二：Dynamic Router 决策（解释"为什么用这个检索策略"）。
+
+    字段与 application.dynamic_router.RouterDecision.to_dict() 对齐。
+    strategy_name 对应 retrieval_strategies.STRATEGIES 中的策略，
+    并可写入 EvaluationRun.retrieval_strategy 做实验对比。
+    """
+
+    strategy_name: str
+    reason: str
+    question_type: str
+    resource_types: list[str] = []
+    router_version: str
+    strategy_description: str = ""
+    resource_filter: dict = {}
+    retrieval_config: dict = {}
+    is_valid: bool = True
+    fallback_reason: str | None = None
 
 
 class ChatAnswerResponse(BaseModel):
@@ -50,6 +164,16 @@ class ChatAnswerResponse(BaseModel):
     message_id: str
     answer: str
     citations: list[Citation]
+    # 阶段十：多来源证据（citations 保持原样，前端旧展示逻辑不受影响）
+    evidence: list[Evidence] = []
+    evidence_groups: list[EvidenceGroup] = []
+    evidence_summary: EvidenceSummary | None = None
+    # 阶段十一：Query 分析（新增字段，旧字段与旧解析逻辑不受影响）
+    query_analysis: QueryAnalysisOut | None = None
+    # 阶段十二：Dynamic Router 决策（新增字段，旧字段不变）
+    router_decision: RouterDecisionOut | None = None
+    # 阶段十三：KG 关系证据切片（citations/evidence 已包含，此处仅为便于观察/实验）
+    kg_evidence: list[Evidence] = []
 
 
 class ConversationOut(BaseModel):
@@ -153,17 +277,30 @@ async def ask(
         await _validate_conversation_owner(db, user, payload.conversation_id)
 
     service = RagService(db)
-    conv, assistant, citations = await service.ask(
+    conv, assistant, citations, query_analysis, router_decision = await service.ask(
         user=user,
         kb_ids=payload.kb_ids,
         question=payload.question.strip(),
         conversation_id=payload.conversation_id,
     )
+    # 阶段十：多来源证据分组（与 SSE 路径共用同一套分组逻辑）
+    groups, summary = package_evidence(citations)
     return ChatAnswerResponse(
         conversation_id=str(conv.id),
         message_id=str(assistant.id),
         answer=assistant.content,
         citations=[Citation(**c) for c in citations],
+        evidence=[Evidence(**c) for c in citations],
+        evidence_groups=groups,
+        evidence_summary=summary,
+        # 阶段十一：Query 分析（检索前分析）
+        query_analysis=QueryAnalysisOut(**query_analysis.to_dict()),
+        # 阶段十二：路由决策（检索前选择策略，检索仍走 Baseline 组件）
+        router_decision=RouterDecisionOut(**router_decision.to_dict()),
+        # 阶段十三：KG 证据切片（未启用 KG 策略时为空列表）
+        kg_evidence=[
+            Evidence(**c) for c in citations if c.get("source_kind") == SOURCE_KIND_KG
+        ],
     )
 
 
@@ -176,7 +313,9 @@ async def ask_stream(
     """RAG 问答（SSE 流式）。
 
     安全：校验 kb_ids 权限 + 校验 conversation_id 归属 + RagService 使用当前用户。
-    事件协议见原注释，不变。
+    事件协议见原注释，不变（start → citations → delta×N → done）。
+    阶段十一：start 事件 data 增加 query_analysis（事件名与顺序不变）。
+    阶段十二：start 事件 data 增加 router_decision（事件名与顺序不变）。
     """
     from src.core.exceptions import AppException
 

@@ -40,6 +40,13 @@ export type SourceType =
 /** 成书/出版年代（受控枚举）。 */
 export type SourceEra = '先秦' | '汉' | '唐' | '宋' | '明' | '清' | '现代';
 
+/**
+ * 引用来源（同时是统一 Evidence 的载体）。
+ *
+ * 阶段十：Document 命中与 Resource（herb/prescription/theory/literature）命中
+ * 统一到同一结构，旧字段保持不变（历史消息与旧解析逻辑完全兼容），
+ * 新增字段均为可选，缺省时由前端 utils/evidence 归一化补齐。
+ */
 export interface Citation {
   chunk_id: string;
   source_index: number; // 来源编号（对应答案内联 [citation: 编号, 页码]）
@@ -52,6 +59,104 @@ export interface Citation {
   source_type?: SourceType | null;
   era?: SourceEra | null;
   credibility_level?: number | null;
+  /** 来源类别：document（上传文献） / resource（中药·方剂·理论·文献条目） */
+  source_kind?: 'document' | 'resource';
+  /** 证据等级：high / medium / insufficient */
+  evidence_level?: EvidenceLevel;
+  /** Resource 专属：资源细分类型 */
+  resource_type?: ResourceType | null;
+  resource_id?: string | null;
+  resource_name?: string | null;
+  // ── 阶段十统一 Evidence 访问入口 ──
+  evidence_id?: string;
+  source_id?: string | null;
+  source_name?: string;
+  /** 来源分类展示标签：文档 / 中药 / 方剂 / 理论 / 文献 */
+  source_label?: string;
+  evidence_text?: string;
+}
+
+/** 证据等级（沿用后端既有分级规则）。 */
+export type EvidenceLevel = 'high' | 'medium' | 'insufficient';
+
+/** Resource 细分类型（与后端 resource_type 一致）。 */
+export type ResourceType = 'herb' | 'prescription' | 'theory' | 'literature';
+
+/** 统一 Evidence：字段与 Citation 完全一致，语义上作为证据条目。 */
+export type Evidence = Citation;
+
+/** 同一来源（某味中药 / 某篇文献 / 某个文档）下的证据聚合。 */
+export interface EvidenceSource {
+  source_id?: string | null;
+  source_name: string;
+  source_kind: string;
+  source_type?: string | null;
+  source_label?: string;
+  evidence_count: number;
+  max_score: number;
+  evidence_level: EvidenceLevel;
+  evidences: Evidence[];
+}
+
+/** 多来源证据分组：document / resource:{herb,prescription,theory,literature}。 */
+export interface EvidenceGroup {
+  group_key: string;
+  source_kind: string;
+  source_type?: string | null;
+  source_label?: string;
+  source_count: number;
+  evidence_count: number;
+  max_score: number;
+  evidence_level: EvidenceLevel;
+  sources: EvidenceSource[];
+}
+
+export interface EvidenceSummary {
+  evidence_count: number;
+  source_count: number;
+  group_count: number;
+  max_score: number;
+  by_level: Record<EvidenceLevel, number>;
+}
+
+/**
+ * 阶段十一：Query 分析结果（结构化，与后端 QueryAnalysisOut 对齐）。
+ *
+ * 仅用于展示/调试；前端不得依据该结果改变请求行为（检索策略由后端决定）。
+ * is_unanswerable_candidate 只是"可能无法可靠回答"的候选标记，不代表系统拒答。
+ */
+export interface QueryAnalysis {
+  query: string;
+  question_type: string;
+  question_type_label: string;
+  resource_types?: string[];
+  is_multi_source?: boolean;
+  is_unanswerable_candidate?: boolean;
+  keywords?: string[];
+  entities?: { text: string; type: string }[];
+  features?: Record<string, unknown>;
+  analyzer_version: string;
+  is_valid?: boolean;
+  fallback_reason?: string | null;
+}
+
+/**
+ * 阶段十二：Dynamic Router 决策（结构化，与后端 RouterDecisionOut 对齐）。
+ *
+ * 仅用于解释/调试（"为什么用这个检索策略"）；前端不得据其改变请求行为。
+ * fallback 时 strategy_name 仍为 baseline_hybrid，is_valid 为 false。
+ */
+export interface RouterDecision {
+  strategy_name: string;
+  reason: string;
+  question_type: string;
+  resource_types?: string[];
+  router_version: string;
+  strategy_description?: string;
+  resource_filter?: Record<string, unknown>;
+  retrieval_config?: Record<string, unknown>;
+  is_valid?: boolean;
+  fallback_reason?: string | null;
 }
 
 export interface ChatMessage {
@@ -59,6 +164,14 @@ export interface ChatMessage {
   role: Role;
   content: string;
   citations?: Citation[];
+  /** 阶段十：多来源证据（流式由 citations 事件下发；历史消息由 citations 推导） */
+  evidence?: Evidence[];
+  evidenceGroups?: EvidenceGroup[];
+  evidenceSummary?: EvidenceSummary;
+  /** 阶段十一：Query 分析（流式由 start 事件下发） */
+  queryAnalysis?: QueryAnalysis;
+  /** 阶段十二：检索策略路由决策（流式由 start 事件下发） */
+  routerDecision?: RouterDecision;
 }
 
 export interface KnowledgeBase {

@@ -51,6 +51,9 @@ EXPECTED_TABLES = {
     "knowledge_base_resources",
     # TASK-009
     "evaluation_runs",
+    # TASK-013
+    "kg_nodes",
+    "kg_edges",
 }
 
 SMOKE_DB_NAME = "knowledge_platform_alembic_smoke"

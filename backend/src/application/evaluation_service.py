@@ -7,6 +7,14 @@ TECH_DESIGN / AGENTS.md：
 复用 RagService.retrieve_and_answer（不持久化，避免评估污染聊天记录与缓存），
 与 RAGASMetrics（中文适配指标）。
 
+TASK-012 扩展（Dynamic Router 实验能力）：
+- 运行支持 Strategy Registry 中的策略名（如 herb_focused）真正驱动检索参数；
+  历史策略标签不在注册表中时仍按 Baseline 行为执行，标签原样归档（向后兼容）。
+- use_dynamic_router=True 时逐条 Analyzer → Router 选策略，
+  逐条策略写入 evaluation_results.retrieval_strategy，run 级记为 dynamic_router，
+  配合既有的 by_question_type 即可形成「问题类型 × 策略 × 指标」对比。
+  本阶段只建立实验能力，不产出策略优劣结论。
+
 TASK-009 扩展（中医问答评测体系 / Evaluation Baseline）：
 - 测试集支持 question_type 分类（herb/prescription/theory/literature/multi_source/
   unanswerable/general）与 dataset_version，为 TASK-011 Query Analyzer / Dynamic
@@ -27,39 +35,27 @@ from loguru import logger
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.application.dynamic_router import DYNAMIC_ROUTER_STRATEGY, ROUTER_VERSION
 from src.application.eval_metrics import RAGASMetrics, get_metrics
 from src.application.rag_service import RagService
+from src.application.retrieval_strategies import (
+    RetrievalStrategy,
+    get_strategy,
+    resolve_retrieval_config,
+    strategy_names,
+    strategy_out,
+)
 from src.core.config import settings
 from src.core.exceptions import AppException, NotFoundError
 from src.domain.models import EvaluationResult, EvaluationRun, TestCase
 
-# ── 问题类型受控词表（TASK-009 要求：中医知识问题分类）──────────────────────
-# herb         中药知识（性味归经、功效主治、用法用量、配伍禁忌等）
-# prescription 方剂知识（组成、功用、主治、用法、加减等）
-# theory       中医理论（阴阳五行、藏象、气血津液、病因病机、治则等）
-# literature   文献/出处（经典著作、成书年代、作者、原文出处等）
-# multi_source 多来源知识（答案需综合中药/方剂/理论/文献中多类证据）
-# unanswerable 无依据 / 知识库中不存在（期望系统拒答）
-# general      其他基础事实（非上述专属类型）
-QUESTION_TYPES: tuple[str, ...] = (
-    "herb",
-    "prescription",
-    "theory",
-    "literature",
-    "multi_source",
-    "unanswerable",
-    "general",
+# ── 问题类型受控词表（TASK-009 建立，阶段十一 Query Analyzer 复用同一份）────
+# 词表下沉到 application/question_types.py（避免循环导入），此处重导出，
+# 保证既有 import 路径 `from src.application.evaluation_service import QUESTION_TYPES` 不变。
+from src.application.question_types import (  # noqa: E402
+    QUESTION_TYPES,
+    QUESTION_TYPE_LABELS,
 )
-
-QUESTION_TYPE_LABELS: dict[str, str] = {
-    "herb": "中药知识",
-    "prescription": "方剂知识",
-    "theory": "中医理论",
-    "literature": "文献/出处",
-    "multi_source": "多来源知识",
-    "unanswerable": "无依据/不存在",
-    "general": "其他基础事实",
-}
 
 # Baseline 检索策略标识（TECH_DESIGN §6：HyDE → Dense+Sparse → RRF → Rerank → Gate）
 BASELINE_RETRIEVAL_STRATEGY = "hybrid_rrf_rerank_hyde"
@@ -98,6 +94,9 @@ class CaseResult:
     question_type: str = "general"
     dataset_version: str = DEFAULT_DATASET_VERSION
     needs_review: bool = False
+    # 阶段十二：该用例实际使用的检索策略（固定策略运行 = 全 run 同一策略；
+    # 动态路由运行 = 由 Dynamic Router 按 question_type 逐条选择）
+    retrieval_strategy: str | None = None
 
 
 class EvaluationService:
@@ -247,6 +246,7 @@ class EvaluationService:
         experiment_name: str = DEFAULT_EXPERIMENT_NAME,
         retrieval_strategy: str = BASELINE_RETRIEVAL_STRATEGY,
         dataset_version: str | None = None,
+        use_dynamic_router: bool = False,
     ) -> tuple[EvaluationRun, list[CaseResult]]:
         """运行评估。返回 (EvaluationRun 归档记录, per-case results)。
 
@@ -254,18 +254,36 @@ class EvaluationService:
         - 逐条调用 RAG 检索+生成，计算 RAGAS 指标
           （标准答案未确认的用例只算 context_relevancy）
         - 写入 evaluation_results（带 run_id 与实验维度）+ evaluation_runs 归档
+
+        阶段十二（实验能力，不产出任何策略优劣结论）：
+        - retrieval_strategy 传入 Strategy Registry 中已注册的策略名
+          （baseline_hybrid / herb_focused / ...）时，本次运行按该策略参数检索；
+          传入阶段九历史标签（如 hybrid_rrf_rerank_hyde）则不在注册表中，
+          按既有 Baseline 行为执行，标签照原样归档，保证历史实验不受影响。
+        - use_dynamic_router=True：逐条走 Query Analyzer + Dynamic Router，
+          每条用例记录其实际使用的策略到 evaluation_results.retrieval_strategy，
+          run 级 retrieval_strategy 记为 dynamic_router，便于与 Baseline 对比。
         """
         cases = await self._load_cases(kb_id, case_ids)
         if not cases:
             raise AppException(404, "未找到测试用例：请先上传测试集")
 
         version = dataset_version or self._infer_dataset_version(cases)
-        config_snapshot = await self._config_snapshot(retrieval_strategy)
+        strategy_label = retrieval_strategy or BASELINE_RETRIEVAL_STRATEGY
+        if use_dynamic_router:
+            strategy_label = DYNAMIC_ROUTER_STRATEGY
+        # 固定策略（非动态路由）：注册表中的策略才真正驱动检索参数
+        fixed_strategy: RetrievalStrategy | None = (
+            None if use_dynamic_router else get_strategy(retrieval_strategy)
+        )
+        config_snapshot = await self._config_snapshot(
+            strategy_label, strategy=fixed_strategy, dynamic_router=use_dynamic_router
+        )
 
         run = EvaluationRun(
             kb_id=kb_id,
             experiment_name=experiment_name or DEFAULT_EXPERIMENT_NAME,
-            retrieval_strategy=retrieval_strategy or BASELINE_RETRIEVAL_STRATEGY,
+            retrieval_strategy=strategy_label,
             dataset_version=version,
             config_snapshot=config_snapshot,
         )
@@ -274,8 +292,12 @@ class EvaluationService:
 
         results: list[CaseResult] = []
         for tc in cases:
-            res = await self._evaluate_case(kb_id, tc)
+            res = await self._evaluate_case(
+                kb_id, tc, strategy=fixed_strategy, dynamic_router=use_dynamic_router
+            )
             res.dataset_version = tc.dataset_version
+            if not use_dynamic_router:
+                res.retrieval_strategy = strategy_label
             results.append(res)
             # 持久化评估结果（失败用例也留存，便于审计）
             self.db.add(
@@ -286,7 +308,8 @@ class EvaluationService:
                     answer_correctness=res.answer_correctness,
                     run_id=str(run.id),
                     experiment_name=run.experiment_name,
-                    retrieval_strategy=run.retrieval_strategy,
+                    # 阶段十二：动态路由运行记录逐条实际策略；否则记录 run 级策略
+                    retrieval_strategy=res.retrieval_strategy or run.retrieval_strategy,
                     dataset_version=tc.dataset_version,
                     question_type=tc.question_type,
                     answer=res.answer,
@@ -311,6 +334,15 @@ class EvaluationService:
             f"cr={cr:.3f} ac={'None' if ac is None else f'{ac:.3f}'}"
         )
         return run, results
+
+    @staticmethod
+    def list_strategies() -> list[dict]:
+        """阶段十二：可用检索策略清单（含生效参数）。
+
+        供 Experiment A（Baseline）与 Experiment B（固定策略 / 动态路由）对比时选择，
+        也便于确认不同策略的参数确实存在差异。
+        """
+        return [strategy_out(name) for name in strategy_names()]
 
     async def list_runs(self, kb_id: uuid.UUID | None = None) -> list[dict]:
         """实验运行归档列表（按时间倒序），用于 Baseline 与消融实验对比。"""
@@ -406,8 +438,17 @@ class EvaluationService:
             return DEFAULT_DATASET_VERSION
         return max(counts.items(), key=lambda kv: kv[1])[0]
 
-    async def _config_snapshot(self, retrieval_strategy: str) -> dict[str, Any]:
-        """采集本次运行的配置快照（不含密钥），保证实验可复现。"""
+    async def _config_snapshot(
+        self,
+        retrieval_strategy: str,
+        strategy: RetrievalStrategy | None = None,
+        dynamic_router: bool = False,
+    ) -> dict[str, Any]:
+        """采集本次运行的配置快照（不含密钥），保证实验可复现。
+
+        阶段十二：额外记录 Router 版本、可用策略清单与本次生效的检索参数
+        （strategy 存在时以其解析结果为准）。
+        """
         runtime: dict[str, Any] = {}
         try:
             from src.application.model_config_service import get_effective_config_cached
@@ -416,9 +457,12 @@ class EvaluationService:
             runtime = {k: cfg.get(k) for k in _RUNTIME_CONFIG_KEYS}
         except Exception as exc:  # noqa: BLE001 — 配置读取失败不应中断评估
             logger.warning(f"运行配置快照采集失败: {exc}")
+
+        retrieval = resolve_retrieval_config(strategy)
         return {
             "retrieval_strategy": retrieval_strategy,
             "runtime": runtime,
+            # 旧结构保留（全局配置），便于与阶段九/十历史快照对比
             "retrieval": {
                 "recall_top_k": settings.RECALL_TOP_K,
                 "rerank_top_n": settings.RERANK_TOP_N,
@@ -426,14 +470,31 @@ class EvaluationService:
                 "relevance_threshold": settings.RELEVANCE_THRESHOLD,
                 "hyde_enabled": settings.HYDE_ENABLED,
             },
+            # 阶段十二：本次实际生效的策略参数（strategy=None 时即 Baseline 全局值）
+            "strategy": retrieval,
+            "router": {
+                "dynamic_router": dynamic_router,
+                "router_version": ROUTER_VERSION,
+                "strategies": strategy_names(),
+            },
             "evaluation": {"accuracy_threshold": settings.EVAL_ACCURACY_THRESHOLD},
         }
 
-    async def _evaluate_case(self, kb_id: uuid.UUID, tc: TestCase) -> CaseResult:
+    async def _evaluate_case(
+        self,
+        kb_id: uuid.UUID,
+        tc: TestCase,
+        strategy: RetrievalStrategy | None = None,
+        dynamic_router: bool = False,
+    ) -> CaseResult:
         """单条用例评估：RAG 问答 + 指标计算。失败不抛出，记录 error 并产出 0 分。
 
         TASK-009：标准答案缺失或待人工确认时，answer_correctness 记为 None，
         不参与均值（AGENTS.md：不得把未标注当成错误答案）。
+
+        阶段十二：
+        - strategy 非 None → 按该策略参数检索（固定策略对照实验）
+        - dynamic_router=True → 逐条 Analyzer + Router 决定策略并记入结果
         """
         base = CaseResult(
             test_case_id=str(tc.id),
@@ -445,7 +506,30 @@ class EvaluationService:
             needs_review=tc.needs_review,
         )
         try:
-            answer, hits = await self.rag.retrieve_and_answer([kb_id], tc.question)
+            use_strategy = strategy
+            resource_types: list[str] | None = None
+            analysis = None
+            if dynamic_router:
+                # 逐条 Analyzer → Router（两者均带兜底，失败不影响整批评估）
+                analysis, decision = self.rag.plan_retrieval(tc.question)
+                use_strategy = get_strategy(decision.strategy_name)
+                resource_types = decision.resource_filter.get("resource_types") or []
+                base.retrieval_strategy = decision.strategy_name
+                logger.info(
+                    f"动态路由 type={analysis.question_type} -> "
+                    f"strategy={decision.strategy_name} q={tc.question[:30]}"
+                )
+            elif strategy is not None and strategy.kg_enabled:
+                # 阶段十三：KG 策略以 QueryAnalysis 为图遍历输入（此处显式分析，
+                # 保证"固定策略运行"与"动态路由运行"的 KG 输入口径一致）
+                analysis = self.rag.analyze_query(tc.question)
+            answer, hits = await self.rag.retrieve_and_answer(
+                [kb_id],
+                tc.question,
+                strategy=use_strategy,
+                resource_types=resource_types,
+                analysis=analysis,
+            )
             contexts = [h.get("content", "") for h in hits]
             cr = await self.metrics.context_relevancy(tc.question, contexts)
             base.answer = answer

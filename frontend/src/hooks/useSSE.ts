@@ -1,13 +1,33 @@
 'use client';
 
 import { useCallback } from 'react';
-import type { Citation } from '@/types';
+import type {
+  Citation,
+  EvidenceGroup,
+  EvidenceSummary,
+  QueryAnalysis,
+  RouterDecision,
+} from '@/types';
 import { getToken } from '@/services/token';
 
 /** SSE 事件回调集合（与后端 chat.py /ask-stream 事件协议对应）。 */
 export interface SSEHandlers {
-  onStart?: (data: { conversation_id: string }) => void;
-  onCitations?: (data: { citations: Citation[] }) => void;
+  /**
+   * 阶段十一/十二：start 事件在原 conversation_id 之外附带 query_analysis 与
+   * router_decision（事件名/顺序不变）。
+   */
+  onStart?: (data: {
+    conversation_id: string;
+    query_analysis?: QueryAnalysis;
+    router_decision?: RouterDecision;
+  }) => void;
+  /** 阶段十：citations 事件在原 citations 之外附带多来源证据结构。 */
+  onCitations?: (data: {
+    citations: Citation[];
+    evidence?: Citation[];
+    evidence_groups?: EvidenceGroup[];
+    evidence_summary?: EvidenceSummary;
+  }) => void;
   onDelta?: (data: { content: string }) => void;
   onDone?: (data: { conversation_id: string; message_id: string }) => void;
   onError?: (data: { message: string }) => void;

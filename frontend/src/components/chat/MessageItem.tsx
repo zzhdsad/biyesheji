@@ -1,179 +1,122 @@
 'use client';
 
 import { useState, type ReactNode } from 'react';
-import { Avatar, Collapse, Tag, Typography } from 'antd';
-import { RobotOutlined, UserOutlined, FileTextOutlined } from '@ant-design/icons';
-import type { Citation, ChatMessage } from '@/types';
-import { credibilityColor } from '@/constants/source';
-import { FeedbackButtons } from './FeedbackButtons';
+import { Avatar, Typography } from 'antd';
+import { RobotOutlined, UserOutlined } from '@ant-design/icons';
+import type { ChatMessage } from '@/types';
+import { EvidencePanel } from './EvidencePanel';
 
-const { Text, Paragraph } = Typography;
+const { Paragraph, Text } = Typography;
 
-const CITATION_RE = /\[citation:\s*(\d+)(?:\s*,\s*(\d+))?\s*\]/gi;
-
-/** 将答案中的 [citation: n, p] 标记渲染为可点击的内联引用 chip。 */
-function renderAnswer(
-  content: string,
-  citations: Citation[],
-  onChip: (n: number) => void,
-  active: number | null,
-): ReactNode[] {
-  const nodes: ReactNode[] = [];
-  const byIndex = new Map(citations.map((c) => [c.source_index, c]));
-  let last = 0;
-  let key = 0;
-  let m: RegExpExecArray | null;
-  CITATION_RE.lastIndex = 0;
-  while ((m = CITATION_RE.exec(content)) !== null) {
-    if (m.index > last) {
-      nodes.push(<span key={key++}>{content.slice(last, m.index)}</span>);
-    }
-    const num = parseInt(m[1], 10);
-    const exists = byIndex.has(num);
-    nodes.push(
-      <Tag
-        key={key++}
-        onClick={() => exists && onChip(num)}
+/** 将内联引用标记 [citation: 编号, 页码] 渲染为可点击 chip，点击后展开对应原文。 */
+function renderAnswer(content: string, onChip: (index: number) => void): ReactNode[] {
+  const parts: ReactNode[] = [];
+  let rest = content;
+  let i = 0;
+  while (rest.length > 0) {
+    const m = rest.match(/\[citation:\s*(\d+)(?:,\s*(-?\d+))?\]/);
+    if (!m || m.index == null) break;
+    if (m.index > 0) parts.push(<span key={`t${i}`}>{rest.slice(0, m.index)}</span>);
+    const index = Number(m[1]);
+    const page = m[2] != null ? m[2].trim() : '';
+    parts.push(
+      <sup
+        key={`c${i}`}
+        role="button"
+        tabIndex={0}
+        onClick={() => onChip(index)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') onChip(index);
+        }}
         style={{
           margin: '0 2px',
-          cursor: exists ? 'pointer' : 'default',
-          userSelect: 'none',
-          background: active === num ? '#1677ff' : exists ? '#e6f4ff' : '#f5f5f5',
-          color: active === num ? '#fff' : exists ? '#1677ff' : '#bfbfbf',
-          border: 'none',
-          borderRadius: 4,
-          fontSize: 12,
           padding: '0 6px',
+          borderRadius: 10,
+          background: '#e6f4ff',
+          color: '#1677ff',
+          border: '1px solid #91caff',
+          fontSize: 12,
+          cursor: 'pointer',
         }}
+        title="查看引用来源"
       >
-        [{num}]
-      </Tag>,
+        {page ? `${page}` : `[${index}]`}
+      </sup>,
     );
-    last = CITATION_RE.lastIndex;
+    rest = rest.slice(m.index + m[0].length);
+    i += 1;
   }
-  if (last < content.length) {
-    nodes.push(<span key={key++}>{content.slice(last)}</span>);
-  }
-  return nodes;
+  if (rest.length > 0) parts.push(<span key="tail">{rest}</span>);
+  return parts;
 }
 
-/** 引用卡片头部：文档名 · 页码 · 标题路径 + 相似度。 */
-function cardLabel(c: Citation): ReactNode {
-  return (
-    <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
-      <Tag color="blue" style={{ margin: 0, fontWeight: 500 }}>
-        [{c.source_index}]
-      </Tag>
-      <FileTextOutlined style={{ color: '#1677ff' }} />
-      <Text strong style={{ marginRight: 4 }}>
-        {c.doc_name}
-      </Text>
-      {c.page_num != null && c.page_num > 0 && (
-        <Text type="secondary">第 {c.page_num} 页</Text>
-      )}
-      {c.source_type && (
-        <Tag
-          color={credibilityColor(c.credibility_level)}
-          style={{ margin: 0, fontSize: 12 }}
-        >
-          {c.source_type}
-          {c.era ? `·${c.era}` : ''}
-          {c.credibility_level != null ? `·Lv${c.credibility_level}` : ''}
-        </Tag>
-      )}
-      {c.title_path && <Text type="secondary" style={{ fontSize: 12 }}>· {c.title_path}</Text>}
-      {c.score != null && (
-        <Tag style={{ margin: 0, fontSize: 12, color: '#8c8c8c', background: '#fafafa', border: 'none' }}>
-          相关度 {(c.score * 100).toFixed(0)}%
-        </Tag>
-      )}
-    </div>
-  );
-}
-
-/** 单条消息气泡 + 引用来源卡片 + 反馈按钮（仅助手消息）。 */
 export function MessageItem({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
   const [activeKey, setActiveKey] = useState<string[]>([]);
 
-  const citations = message.citations ?? [];
-  // 仅助手消息 + 已有内容（非流式占位阶段）时显示反馈按钮
-  const showFeedback = !isUser && Boolean(message.content);
-
   return (
-    <div
-      style={{
-        display: 'flex',
-        justifyContent: isUser ? 'flex-end' : 'flex-start',
-        marginBottom: 16,
-        gap: 12,
-      }}
-    >
-      {!isUser && <Avatar icon={<RobotOutlined />} style={{ background: '#1677ff' }} />}
-      <div style={{ maxWidth: '70%' }}>
+    <div style={{ display: 'flex', gap: 12, justifyContent: isUser ? 'flex-end' : 'flex-start' }}>
+      {!isUser && (
+        <Avatar
+          size={32}
+          style={{ backgroundColor: '#1677ff', flexShrink: 0 }}
+          icon={<RobotOutlined />}
+        />
+      )}
+      <div style={{ maxWidth: '78%' }}>
         <div
           style={{
-            background: isUser ? '#1677ff' : '#f5f5f5',
-            color: isUser ? '#fff' : 'rgba(0,0,0,0.88)',
-            padding: '10px 16px',
+            padding: '10px 14px',
             borderRadius: 12,
-            lineHeight: 1.8,
+            background: isUser ? '#1677ff' : '#fff',
+            color: isUser ? '#fff' : 'rgba(0,0,0,0.88)',
+            boxShadow: '0 1px 2px rgba(0,0,0,0.06)',
+            border: isUser ? 'none' : '1px solid #f0f0f0',
           }}
         >
           {isUser ? (
-            <span style={{ whiteSpace: 'pre-wrap' }}>{message.content}</span>
-          ) : message.content ? (
-            <div style={{ whiteSpace: 'pre-wrap' }}>
-              {renderAnswer(
-                message.content,
-                citations,
-                (n) => setActiveKey([String(n)]),
-                activeKey[0] ? parseInt(activeKey[0], 10) : null,
-              )}
-            </div>
+            <Paragraph style={{ margin: 0, whiteSpace: 'pre-wrap', color: '#fff' }}>
+              {message.content}
+            </Paragraph>
           ) : (
-            // 流式生成前的检索阶段：占位提示，首个 delta 到达后由打字机内容替代
-            <span style={{ color: '#8c8c8c' }}>正在检索知识库…</span>
+            <Paragraph style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
+              {renderAnswer(message.content, (index) => setActiveKey([String(index)]))}
+            </Paragraph>
           )}
         </div>
-        {!isUser && citations.length > 0 && (
-          <div style={{ marginTop: 8 }}>
-            <Text type="secondary" style={{ fontSize: 12, marginLeft: 4 }}>
-              引用来源（点击展开原文）
+        {!isUser &&
+          message.queryAnalysis &&
+          // 阶段十一：仅开发环境展示 Query Analysis 调试信息（不改动 Chat UI 主体）
+          process.env.NODE_ENV !== 'production' && (
+            <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+              Query: {message.queryAnalysis.question_type_label}
+              {message.queryAnalysis.resource_types?.length
+                ? ` · ${message.queryAnalysis.resource_types.join('/')}`
+                : ''}
+              {message.queryAnalysis.is_multi_source ? ' · 多来源' : ''}
+              {message.queryAnalysis.is_unanswerable_candidate ? ' · 可能无依据' : ''}
+              {message.queryAnalysis.is_valid === false ? ' · 分析兜底' : ''}
             </Text>
-            <Collapse
-              activeKey={activeKey}
-              onChange={setActiveKey}
-              size="small"
-              style={{ marginTop: 4, background: '#fafafa', borderRadius: 8 }}
-              items={citations.map((c) => ({
-                key: String(c.source_index),
-                label: cardLabel(c),
-                children: (
-                  <Paragraph
-                    style={{ margin: 0, whiteSpace: 'pre-wrap', color: 'rgba(0,0,0,0.75)', fontSize: 13 }}
-                    ellipsis={{ rows: 6, expandable: true, symbol: '展开全文' }}
-                  >
-                    {c.content}
-                  </Paragraph>
-                ),
-              }))}
-            />
-          </div>
-        )}
-        {showFeedback && (
-          <div
-            style={{
-              marginTop: 4,
-              display: 'flex',
-              justifyContent: 'flex-start',
-            }}
-          >
-            <FeedbackButtons messageId={message.id} />
-          </div>
+          )}
+        {!isUser &&
+          message.routerDecision &&
+          // 阶段十二：仅开发环境展示检索策略调试信息（不改动 Chat UI 主体）
+          process.env.NODE_ENV !== 'production' && (
+            <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+              Strategy: {message.routerDecision.strategy_name}
+              {message.routerDecision.is_valid === false ? ' · 路由兜底' : ''}
+            </Text>
+          )}
+        {!isUser && message.citations && message.citations.length > 0 && (
+          // 阶段十：多来源证据分组展示（文档 / 中药 / 方剂 / 理论 / 文献）
+          <EvidencePanel
+            citations={message.citations}
+            activeKey={activeKey}
+            onChange={(keys) => setActiveKey(keys)}
+          />
         )}
       </div>
-      {isUser && <Avatar icon={<UserOutlined />} style={{ background: '#8c8c8c' }} />}
+      {isUser && <Avatar size={32} style={{ flexShrink: 0 }} icon={<UserOutlined />} />}
     </div>
   );
 }

@@ -5,6 +5,14 @@ TECH_DESIGN / AGENTS.md 约束：
 - 所有检索强制 kb_id 过滤（权限隔离）
 - 答案引用标注 [citation: 来源编号, 页码]，后处理解析匹配生成引用来源（文档名、页码、段落）
 - 多轮对话：Redis 缓存最近 HISTORY_WINDOW 轮历史（24h TTL），未命中回源 PG 并回填
+
+阶段十一：检索前增加 Query Analyzer（Query → QueryAnalysis → 现有 Baseline RAG），
+仅做问题分析，不改变检索策略（HyDE / Dense+Sparse / RRF / Rerank / Gate 全部保持原样）。
+
+阶段十二：Analyzer 之后增加 Dynamic Router（QueryAnalysis → RouterDecision →
+RetrievalStrategy），按策略参数驱动同一套 Baseline 检索（无第二套 RAG）：
+策略只调整 HyDE 开关 / Dense-Sparse 路数 / recall-rerank 条数 / RRF k /
+resource_type 过滤，Baseline 策略 baseline_hybrid 参数全部沿用全局配置，行为不变。
 """
 
 import asyncio
@@ -60,32 +68,42 @@ _CONTEXT_MARKER = "参考资料"
 # [citation: 1, 3] 或 [citation: 1]；页码可选，兼容有无空格
 _CITATION_PATTERN = re.compile(r"\[citation:\s*(\d+)\s*(?:,\s*(\d+)\s*)?\]", re.IGNORECASE)
 
-# Stage 4-4：Resource 类型 → 中文标签（Prompt 展示用）
-_RESOURCE_TYPE_LABELS = {
-    "herb": "中药",
-    "prescription": "方剂",
-    "theory": "理论",
-    "literature": "文献",
-}
-
-# Stage 4-5：证据等级阈值（按 rerank/dense score 分级）
-# high：强相关，可信赖；medium：弱相关，仅供参考；insufficient：接近阈值
-_EVIDENCE_HIGH_THRESHOLD = 0.7
-_EVIDENCE_MEDIUM_THRESHOLD = 0.3  # 与 RELEVANCE_THRESHOLD 对齐
-
-
-def _evidence_level(score: float) -> str:
-    """按分数推导证据等级：high / medium / insufficient。
-
-    - score >= 0.7 → high（强相关）
-    - 0.3 <= score < 0.7 → medium（弱相关）
-    - score < 0.3 → insufficient（不足，但引用过滤会先剔除）
-    """
-    if score >= _EVIDENCE_HIGH_THRESHOLD:
-        return "high"
-    if score >= _EVIDENCE_MEDIUM_THRESHOLD:
-        return "medium"
-    return "insufficient"
+# Stage 4-4 / Stage 4-5：Resource 类型标签与证据等级统一收敛到
+# application.evidence（阶段十：统一 Evidence 模型），此处仅保留别名，
+# 保证既有引用（Prompt 标注、旧测试 import）不受影响。
+from src.application.evidence import (  # noqa: E402
+    RESOURCE_TYPE_LABELS as _RESOURCE_TYPE_LABELS,
+)
+from src.application.evidence import (  # noqa: E402
+    EVIDENCE_HIGH_THRESHOLD as _EVIDENCE_HIGH_THRESHOLD,
+)
+from src.application.evidence import (  # noqa: E402
+    EVIDENCE_MEDIUM_THRESHOLD as _EVIDENCE_MEDIUM_THRESHOLD,
+)
+from src.application.evidence import evidence_level as _evidence_level  # noqa: E402
+from src.application.evidence import (  # noqa: E402
+    SOURCE_KIND_KG,
+    build_evidence,
+    hit_to_evidence,
+    package_evidence,
+)
+from src.application.kg_retrieval import KgRetriever  # noqa: E402
+from src.application.query_analyzer import (  # noqa: E402
+    QueryAnalysis,
+    QueryAnalyzer,
+    fallback_analysis,
+)
+from src.application.dynamic_router import (  # noqa: E402
+    DynamicRouter,
+    RouterDecision,
+    fallback_decision,
+)
+from src.application.retrieval_strategies import (  # noqa: E402
+    RetrievalStrategy,
+    filter_hits,
+    get_strategy,
+    resolve_retrieval_config,
+)
 
 
 class RagService:
@@ -100,6 +118,9 @@ class RagService:
         cache: BaseConversationCache | None = None,
         rerank: BaseRerank | None = None,
         hyde: BaseHyDE | None = None,
+        analyzer: QueryAnalyzer | None = None,
+        router: DynamicRouter | None = None,
+        kg: KgRetriever | None = None,
     ) -> None:
         self.db = db
         # 运行时配置（DB 优先，env 兜底），供工厂选择后端
@@ -110,6 +131,12 @@ class RagService:
         self.cache = cache or get_conversation_cache()
         self.rerank = rerank
         self.hyde = hyde
+        # 阶段十一：Query Analyzer（检索前的问题分析；不参与/不改变检索策略）
+        self.analyzer = analyzer or QueryAnalyzer()
+        # 阶段十二：Dynamic Router（Analyzer 之后、Retrieval 之前选择检索策略）
+        self.router = router or DynamicRouter()
+        # 阶段十三：KG 检索（可选来源，仅在策略开启时执行；失败不影响向量检索）
+        self.kg = kg or KgRetriever(db)
 
     async def _ensure_components(self) -> None:
         """惰性加载运行时配置并初始化 embedding/llm/rerank/hyde。
@@ -133,6 +160,9 @@ class RagService:
         kb_ids: list[uuid.UUID],
         question: str,
         history: list[dict] | None = None,
+        strategy: RetrievalStrategy | None = None,
+        resource_types: list[str] | None = None,
+        analysis: QueryAnalysis | None = None,
     ) -> tuple[str, list[dict]]:
         """RAG 检索+生成核心（不持久化，供评估与编排复用）。
 
@@ -143,6 +173,11 @@ class RagService:
             kb_ids: 检索范围（权限隔离，禁止越权）
             question: 原始问题（Prompt 用之；检索查询可能被 HyDE 改写）
             history: 多轮历史（chat 路径传入；评估为 None，单轮）
+            strategy: 阶段十二 RetrievalStrategy；None = Baseline（沿用全局配置，
+                行为与阶段十一及之前完全一致；评估可显式指定策略做对比实验）
+            resource_types: 动态策略（multi_source）运行时解析出的资源类型过滤
+            analysis: 阶段十三 QueryAnalysis（KG 策略需要实体做图遍历；未提供时
+                由本方法内部调用 Analyzer 补算，保证 KG 永远由结构化分析驱动）
 
         Returns:
             (answer, hits) — hits 含 doc_name/content/page_num/title_path/score，
@@ -155,8 +190,14 @@ class RagService:
         """
         from src.core.exceptions import AppException
 
-        # 检索+重排核心（HyDE → 混合检索 → RRF → Rerank → 注入文档名）
-        hits = await self._retrieve(kb_ids, question)
+        # 阶段十三：KG 策略需要 QueryAnalysis；调用方未传时内部补算（不重复分析）
+        if strategy is not None and strategy.kg_enabled and analysis is None:
+            analysis = self.analyze_query(question)
+
+        # 检索+重排核心（HyDE → 混合检索 → RRF → Rerank → 注入文档名 → 可选 KG 证据）
+        hits = await self._retrieve(
+            kb_ids, question, strategy, resource_types, analysis=analysis
+        )
 
         # 相关性门槛（PRD §8.3 幻觉兜底）：Top 候选稠密相似度均低于阈值 →
         # 仅词语重叠、答非所问（如问"你觉得产品如何"仅命中含"产品"的 PRD），
@@ -177,11 +218,23 @@ class RagService:
         return answer, hits
 
     async def _retrieve(
-        self, kb_ids: list[uuid.UUID], question: str
+        self,
+        kb_ids: list[uuid.UUID],
+        question: str,
+        strategy: RetrievalStrategy | None = None,
+        resource_types: list[str] | None = None,
+        analysis: QueryAnalysis | None = None,
     ) -> list[dict]:
-        """检索+重排核心：HyDE → 混合检索 → RRF → Rerank → 注入文档名。
+        """检索+重排核心：HyDE → 混合检索 → RRF → Rerank → 注入文档名（+ 可选 KG）。
 
         抽取自 retrieve_and_answer，供非流式与流式路径共用，避免逻辑漂移。
+
+        阶段十二：strategy 决定本次检索参数（HyDE 开关、Dense/Sparse 路数、
+        recall/rerank 条数、RRF k、resource_type 过滤）。strategy=None 时全部参数
+        回落全局 settings，行为与 Baseline（阶段十一及之前）完全一致。
+
+        阶段十三：kg_enabled 策略在向量命中之外追加 KG 关系证据（补充证据），
+        KG 异常一律吞掉并记日志，不影响向量检索结果与本次问答。
 
         Raises:
             AppException: 422 检索/重排失败
@@ -191,10 +244,17 @@ class RagService:
         # 加载运行时配置并初始化 embedding/llm/rerank/hyde
         await self._ensure_components()
 
+        # 策略 → 生效参数（None 覆盖项自动回落到全局 settings）
+        cfg = resolve_retrieval_config(strategy, resource_types)
+        recall = cfg["recall_top_k"]
+        # 资源过滤：None 表示与 Baseline 一样不限制来源
+        rtypes = tuple(cfg["resource_types"]) or None
+        include_document = cfg["include_document"]
+
         # HyDE 查询改写（TECH_DESIGN：用假设答案替换原问题做向量检索）
         # 仅改写检索查询；最终 Prompt 仍用原始问题。失败回退原问题。
         query_text = question
-        if self.hyde is not None:
+        if cfg["hyde_enabled"] and self.hyde is not None:
             try:
                 hypo = await asyncio.to_thread(self.hyde.generate, question)
                 if hypo and hypo.strip():
@@ -211,39 +271,70 @@ class RagService:
                 self.embedding.encode, [query_text]
             )
             kb_str = [str(k) for k in kb_ids]
-            recall = settings.RECALL_TOP_K
-            dense_hits = await asyncio.to_thread(
-                self.store.search, query_dense[0], kb_str, recall
-            )
+            dense_hits = []
+            if cfg["dense_enabled"]:
+                dense_hits = await asyncio.to_thread(
+                    self.store.search,
+                    query_dense[0],
+                    kb_str,
+                    recall,
+                    list(rtypes) if rtypes else None,
+                    include_document,
+                )
             # 保留稠密语义相似度：RRF 融合会用排名分覆盖 score 字段，
             # 相关性门槛（_is_relevant）需要原始 COSINE 相似度
             dense_hits = [{**h, "dense_score": h.get("score", 0.0)} for h in dense_hits]
             sparse_hits = []
-            if query_sparse and query_sparse[0]:
+            if cfg["sparse_enabled"] and query_sparse and query_sparse[0]:
                 sparse_hits = await asyncio.to_thread(
-                    self.store.search_sparse, query_sparse[0], kb_str, recall
+                    self.store.search_sparse,
+                    query_sparse[0],
+                    kb_str,
+                    recall,
+                    list(rtypes) if rtypes else None,
+                    include_document,
                 )
         except (EmbeddingError, VectorStoreError) as exc:
             logger.error(f"RAG 检索失败: {exc}")
             raise AppException(422, f"知识检索失败：{exc}") from exc
 
-        # RRF 融合 → Top-RECALL_TOP_K 候选
-        fused = rrf_fusion(
-            [dense_hits, sparse_hits], k=settings.RRF_K, top_n=settings.RECALL_TOP_K
-        )
+        # RRF 融合 → Top-recall 候选
+        fused = rrf_fusion([dense_hits, sparse_hits], k=cfg["rrf_k"], top_n=recall)
 
         # Rerank 精排 → Top-N 送 LLM
         try:
             hits = await asyncio.to_thread(
-                self.rerank.rerank, question, fused, settings.RERANK_TOP_N
+                self.rerank.rerank, question, fused, cfg["rerank_top_k"]
             )
         except RerankError as exc:
             logger.error(f"RAG 重排失败: {exc}")
             raise AppException(422, f"重排序失败：{exc}") from exc
 
+        # 资源过滤（后置权威过滤）：向量库侧过滤生效时此处为 no-op；
+        # 老集合不支持动态字段时由此保证策略语义一致。
+        hits = filter_hits(hits, rtypes, include_document)
+
+        # 阶段十三：KG 关系证据（补充，不替代向量命中；失败不影响本次问答）
+        kg_hits: list[dict] = []
+        if cfg["kg_enabled"]:
+            try:
+                kg_hits = await self.kg.retrieve(
+                    list(kb_ids),
+                    analysis,
+                    max_hops=cfg["kg_max_hops"],
+                    top_k=cfg["kg_top_k"],
+                )
+                # 与向量命中同一套资源过滤口径
+                kg_hits = filter_hits(kg_hits, rtypes, include_document)
+                hits = hits + kg_hits
+            except Exception as exc:  # noqa: BLE001  KG 不得成为问答的单点故障
+                logger.warning(f"KG 检索不可用，本次仅用向量检索: {exc}")
+                kg_hits = []
+
         logger.info(
-            f"混合检索 dense={len(dense_hits)} sparse={len(sparse_hits)} "
-            f"fused={len(fused)} reranked={len(hits)}"
+            f"混合检索 strategy={cfg['strategy_name']} dense={len(dense_hits)} "
+            f"sparse={len(sparse_hits)} fused={len(fused)} "
+            f"reranked={len(hits) - len(kg_hits)} kg={len(kg_hits)}"
         )
 
         # 为精排后的命中注入 doc_name（Prompt 与引用卡片均需展示文档名）
@@ -279,39 +370,78 @@ class RagService:
         Stage 4-5：区分 document / resource 来源。Resource Citation 携带
         resource_type/resource_id/resource_name；Document Citation 保持原结构
         兼容。source_kind 字段标识来源类别，evidence_level 按分数分级。
+
+        阶段十：Citation 由统一 Evidence 模型（application.evidence）生成——
+        Evidence 是 Citation 的超集，旧字段不变，新增 evidence_id/source_id/
+        source_name/source_label/evidence_text，使 Document 与 Resource 命中
+        进入同一结构，可直接交给多来源分组展示。
         """
-        threshold = settings.RELEVANCE_THRESHOLD
-        citations = []
-        for i, h in enumerate(hits, start=1):
-            score = h.get("rerank_score", h.get("score", 0.0))
-            # BUSINESS_RULES §6 引用过滤：只展示相关度 ≥ 阈值的引用
-            if score < threshold:
-                continue
-            citation = {
-                "chunk_id": h["id"],
-                "source_index": i,
-                "doc_id": h["doc_id"],
-                "doc_name": h.get("doc_name", "未知文档"),
-                "page_num": h["page_num"],
-                "title_path": h["title_path"],
-                "content": h["content"],
-                "score": score,
-                "source_type": h.get("source_type"),
-                "era": h.get("era"),
-                "credibility_level": h.get("credibility_level"),
-                # Stage 4-5：证据等级（high/medium/insufficient）
-                "evidence_level": _evidence_level(score),
-            }
-            # Stage 4-5：Resource Citation 扩展字段
-            if h.get("source_kind") == "resource" or h.get("resource_type"):
-                citation["source_kind"] = "resource"
-                citation["resource_type"] = h.get("resource_type")
-                citation["resource_id"] = h.get("resource_id")
-                citation["resource_name"] = h.get("resource_name")
-            else:
-                citation["source_kind"] = "document"
-            citations.append(citation)
-        return citations
+        return build_evidence(hits)
+
+    @staticmethod
+    def _evidence_payload(citations: list[dict]) -> dict:
+        """构造 SSE citations 事件 data：兼容旧 citations，并附加阶段十证据结构。
+
+        返回 {"citations", "evidence", "evidence_groups", "evidence_summary"}：
+        - citations：旧字段不变（前端旧解析逻辑继续可用）
+        - evidence：统一 Evidence 列表（与 citations 同内容，语义更明确）
+        - evidence_groups：多来源分组（document / herb / prescription / ...）
+        - evidence_summary：证据数、来源数、分组数、各等级数量
+        """
+        groups, summary = package_evidence(citations)
+        return {
+            "citations": citations,
+            "evidence": citations,
+            "evidence_groups": groups,
+            "evidence_summary": summary,
+            # 阶段十三：KG 证据切片（citations/evidence 结构不变，仅新增可选视图）
+            "kg_evidence": [
+                c for c in citations if c.get("source_kind") == SOURCE_KIND_KG
+            ],
+        }
+
+    def analyze_query(self, question: str) -> QueryAnalysis:
+        """阶段十一：检索前的问题分析（Query → QueryAnalysis）。
+
+        与检索解耦：纯本地规则，不调用 LLM / 不访问向量库，且不读取或修改任何
+        检索参数（top_k / rerank / HyDE / Dense-Sparse 权重均保持 Baseline）。
+        分析失败由 QueryAnalyzer 内部兜底为 general；此处再兜一层，
+        确保 Analyzer 完全不可用时也不会让 /chat/ask 失败（非单点故障）。
+        """
+        try:
+            return self.analyzer.analyze(question)
+        except Exception as exc:
+            logger.warning(f"Query 分析不可用，回落 general: {exc}")
+            return fallback_analysis(question, f"analyzer_unavailable: {exc}")
+
+    def route_query(self, analysis: QueryAnalysis) -> RouterDecision:
+        """阶段十二：QueryAnalysis → RouterDecision（Analyzer 之后、Retrieval 之前）。
+
+        Router 只消费 QueryAnalysis 的结构化字段，不重新解析原始 query。
+        Router 自身异常同样兜底为 baseline_hybrid（非单点故障）。
+        """
+        try:
+            return self.router.route(analysis)
+        except Exception as exc:
+            logger.warning(f"路由不可用，回落 Baseline: {exc}")
+            return fallback_decision(analysis, f"router_unavailable: {exc}")
+
+    def plan_retrieval(self, question: str) -> tuple[QueryAnalysis, RouterDecision]:
+        """阶段十二：Query → Analyzer → Router（检索前的完整决策链，均带兜底）。
+
+        Returns:
+            (query_analysis, router_decision)
+        """
+        analysis = self.analyze_query(question)
+        decision = self.route_query(analysis)
+        return analysis, decision
+
+    @staticmethod
+    def _strategy_of(decision: RouterDecision) -> tuple[RetrievalStrategy | None, list[str]]:
+        """从 RouterDecision 取策略对象与已解析的资源类型（未知策略返回 None）。"""
+        strategy = get_strategy(decision.strategy_name)
+        resource_types = list(decision.resource_filter.get("resource_types") or [])
+        return strategy, resource_types
 
     async def ask(
         self,
@@ -319,11 +449,14 @@ class RagService:
         kb_ids: list[uuid.UUID],
         question: str,
         conversation_id: uuid.UUID | None = None,
-    ) -> tuple[Conversation, Message, list[dict]]:
+    ) -> tuple[Conversation, Message, list[dict], QueryAnalysis, RouterDecision]:
         """执行 RAG 问答（编排：会话管理 + 持久化 + 缓存）。
 
         检索/生成核心委派 retrieve_and_answer，本方法负责会话创建、消息持久化、
         引用后处理与 Redis 缓存同步。多轮历史透传至核心以保持上下文。
+
+        阶段十二：Query → Analyzer → Router → RetrievalStrategy → 现有 Baseline 检索，
+        分析结果与路由决策随结果一起返回，供 /chat/ask 输出。
 
         Args:
             user: 当前登录用户（用于归属校验 + 新建会话绑定）
@@ -332,7 +465,7 @@ class RagService:
             conversation_id: 续用已有会话；None 则新建
 
         Returns:
-            (conversation, assistant_message, citations)
+            (conversation, assistant_message, citations, query_analysis, router_decision)
 
         Raises:
             NotFoundError: 会话不存在
@@ -340,6 +473,9 @@ class RagService:
             AppException: 422 检索/生成失败
         """
         started_at = asyncio.get_event_loop().time()
+        # 阶段十二：Query → Analyzer → Router → Strategy（两者均带兜底）
+        query_analysis, router_decision = self.plan_retrieval(question)
+        strategy, resource_types = self._strategy_of(router_decision)
         conversation = await self._ensure_conversation(user, kb_ids, question, conversation_id)
         history, cache_hit = await self._load_history(conversation.id)
 
@@ -350,8 +486,13 @@ class RagService:
         ))
         await self.db.commit()
 
-        # 检索+生成核心（不持久化）
-        answer, hits = await self.retrieve_and_answer(kb_ids, question, history)
+        # 检索+生成核心（不持久化；阶段十二按路由选择的策略执行；
+        # 阶段十三透传 QueryAnalysis，供 KG 策略做图遍历）
+        answer, hits = await self.retrieve_and_answer(
+            kb_ids, question, history,
+            strategy=strategy, resource_types=resource_types,
+            analysis=query_analysis,
+        )
 
         # 引用后处理：解析答案中的 [citation: 编号, 页码] → 引用来源；无标记时兜底全部来源
         citations = await self._build_citations(answer, hits)
@@ -359,7 +500,8 @@ class RagService:
         logger.info(
             f"RAG 问答完成 conv={conversation.id} hits={len(hits)} "
             f"citations={len(citations)} cache={'hit' if cache_hit else 'miss'} "
-            f"耗时={elapsed_ms}ms"
+            f"question_type={query_analysis.question_type} "
+            f"strategy={router_decision.strategy_name} 耗时={elapsed_ms}ms"
         )
 
         # 持久化助手消息（独立事务，引用 JSON）→ PostgreSQL（事实源）
@@ -373,7 +515,7 @@ class RagService:
         # 同步追加到 Redis 缓存（24h TTL，自动裁剪至最近 N 轮）
         await self.cache.append_message(conversation.id, "user", question)
         await self.cache.append_message(conversation.id, "assistant", answer)
-        return conversation, assistant, citations
+        return conversation, assistant, citations, query_analysis, router_decision
 
     async def ask_stream(
         self,
@@ -386,6 +528,11 @@ class RagService:
 
         编排同 ask()，但生成阶段流式推送 chunk；持久化在生成完成后一次性完成。
         事件序列：start → citations → delta×N → done（出错时 error 替代 done）。
+        阶段十：citations 事件在原 citations 之外附带 evidence / evidence_groups /
+        evidence_summary（事件名与顺序不变，旧客户端解析不受影响）。
+        阶段十一：start 事件在原 conversation_id 之外附带 query_analysis
+        （事件名与顺序不变，旧客户端解析不受影响）。
+        阶段十二：start 事件同时附带 router_decision（事件名与顺序不变）。
 
         Args:
             user: 当前登录用户（用于归属校验 + 新建会话绑定）
@@ -400,8 +547,18 @@ class RagService:
                 生成失败转 error 事件，已持久化的用户消息保留。
         """
         started_at = asyncio.get_event_loop().time()
+        # 阶段十二：Query → Analyzer → Router → Strategy（两者均带兜底）
+        query_analysis, router_decision = self.plan_retrieval(question)
+        strategy, resource_types = self._strategy_of(router_decision)
         conversation = await self._ensure_conversation(user, kb_ids, question, conversation_id)
-        yield {"event": "start", "data": {"conversation_id": str(conversation.id)}}
+        yield {
+            "event": "start",
+            "data": {
+                "conversation_id": str(conversation.id),
+                "query_analysis": query_analysis.to_dict(),
+                "router_decision": router_decision.to_dict(),
+            },
+        }
 
         history, cache_hit = await self._load_history(conversation.id)
 
@@ -412,8 +569,12 @@ class RagService:
         ))
         await self.db.commit()
 
-        # 检索+重排核心（不持久化）
-        hits = await self._retrieve(kb_ids, question)
+        # 检索+重排核心（不持久化；阶段十二按路由选择的策略执行；
+        # 阶段十三透传 QueryAnalysis，供 KG 策略做图遍历）
+        hits = await self._retrieve(
+            kb_ids, question, strategy=strategy, resource_types=resource_types,
+            analysis=query_analysis,
+        )
 
         if not self._is_relevant(hits):
             # 相关性门槛（PRD §8.3 幻觉兜底）：答非所问时直接拒答，不送 LLM，
@@ -421,11 +582,11 @@ class RagService:
             logger.info(f"检索相关性不足，拒答: question={question[:50]!r}")
             citations: list[dict] = []
             answer = REFUSAL_ANSWER
-            yield {"event": "citations", "data": {"citations": citations}}
+            yield {"event": "citations", "data": self._evidence_payload(citations)}
             yield {"event": "delta", "data": {"content": answer}}
         else:
             citations = self._hits_to_citations(hits)
-            yield {"event": "citations", "data": {"citations": citations}}
+            yield {"event": "citations", "data": self._evidence_payload(citations)}
 
             # 构造 Prompt 并流式生成
             user_prompt = self._build_user_prompt(question, hits)
@@ -446,7 +607,8 @@ class RagService:
         logger.info(
             f"RAG 流式问答完成 conv={conversation.id} hits={len(hits)} "
             f"citations={len(citations)} cache={'hit' if cache_hit else 'miss'} "
-            f"耗时={elapsed_ms}ms"
+            f"question_type={query_analysis.question_type} "
+            f"strategy={router_decision.strategy_name} 耗时={elapsed_ms}ms"
         )
 
         # 持久化助手消息（独立事务，引用 JSON）→ PostgreSQL（事实源）
@@ -573,9 +735,12 @@ class RagService:
             )
 
         # Resource 命中：元数据由 Milvus 动态字段带回，直接填充
+        # 阶段十三：KG 命中同样带 resource_type（指回具体资源），但来源类别必须
+        # 保持为 kg，否则会被误标成 resource 证据、丢掉图谱归属
         for h in res_hits:
             h["doc_name"] = h.get("resource_name") or h.get("resource_type") or "资源"
-            h["source_kind"] = "resource"
+            if h.get("source_kind") != SOURCE_KIND_KG:
+                h["source_kind"] = "resource"
             # source_type / credibility_level 在 Stage 4-3 写入时为 None（资源表无此字段）
             # 保留 Milvus 带回的值（可能为 None）
             h.setdefault("source_type", None)
@@ -597,7 +762,16 @@ class RagService:
             page = h.get("page_num")
             page_label = f"页码：{page}" if page else "页码：0"
             provenance = self._format_provenance(h)
-            if h.get("source_kind") == "resource":
+            if h.get("source_kind") == SOURCE_KIND_KG:
+                # 阶段十三：KG 关系证据（标题即"银翘散 → 组成 → 金银花"）
+                rtype_label = _RESOURCE_TYPE_LABELS.get(
+                    h.get("resource_type"), h.get("resource_type") or "资源"
+                )
+                blocks.append(
+                    f"[{i}] 图谱：{rtype_label} {h.get('doc_name', '未知')}{provenance} | "
+                    f"{page_label} | 标题：{source}\n{h['content']}"
+                )
+            elif h.get("source_kind") == "resource":
                 # Resource 命中：标注资源类型 + 名称
                 rtype_label = _RESOURCE_TYPE_LABELS.get(
                     h.get("resource_type"), h.get("resource_type") or "资源"
@@ -636,6 +810,9 @@ class RagService:
 
         Stage 4-5：区分 document / resource 来源。Resource Citation 携带
         resource_type/resource_id/resource_name；evidence_level 按分数分级。
+
+        阶段十：与 _hits_to_citations 一样走统一 Evidence 模型，保证
+        非流式 / 流式两条路径的 Evidence 结构完全一致。
         """
         if not hits:
             return []
@@ -651,32 +828,9 @@ class RagService:
 
         citations = []
         for i in picked:
-            h = hits[i]
-            score = h.get("rerank_score", h.get("score", 0.0))
-            # BUSINESS_RULES §6：只展示相关度 ≥ 阈值的引用
-            if score < threshold:
+            # 统一 Evidence（Citation 超集）；阈值过滤规则不变
+            evidence = hit_to_evidence(hits[i], i + 1)
+            if evidence["score"] < threshold:
                 continue
-            citation = {
-                "chunk_id": h["id"],
-                "source_index": i + 1,  # 来源编号（1-based，对应答案标记）
-                "doc_id": h["doc_id"],
-                "doc_name": h.get("doc_name", "未知文档"),
-                "page_num": h["page_num"],
-                "title_path": h["title_path"],
-                "content": h["content"],
-                "score": score,
-                "source_type": h.get("source_type"),
-                "era": h.get("era"),
-                "credibility_level": h.get("credibility_level"),
-                "evidence_level": _evidence_level(score),
-            }
-            # Stage 4-5：Resource Citation 扩展字段
-            if h.get("source_kind") == "resource" or h.get("resource_type"):
-                citation["source_kind"] = "resource"
-                citation["resource_type"] = h.get("resource_type")
-                citation["resource_id"] = h.get("resource_id")
-                citation["resource_name"] = h.get("resource_name")
-            else:
-                citation["source_kind"] = "document"
-            citations.append(citation)
+            citations.append(evidence)
         return citations

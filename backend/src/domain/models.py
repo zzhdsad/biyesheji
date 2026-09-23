@@ -709,3 +709,101 @@ class Literature(Base, TimestampMixin):
     )
     # 分类对象（多对一），仅用于响应序列化；category_id 的 FK RESTRICT 不变
     category: Mapped[Category | None] = relationship(lazy="selectin")
+
+
+# ── 阶段十三：知识图谱（KG）───────────────────────────────────────────────────
+# 定位：KG 是「现有资源 → 图谱节点/关系」的派生物，不是第二套中医知识库。
+# 节点只保存定位与匹配所需的最小信息（类型 / 资源 ID / 名称 / 别名），
+# 不复制资源正文；关系只保存能由现有业务数据可靠推导的那几种，
+# 每条边记录 provenance（由哪张业务表/哪条规则生成），禁止凭空生成医学关系。
+
+# 节点类型：目前只有资源节点（Herb/Prescription/Theory/Literature）
+KG_NODE_TYPE_RESOURCE = "resource"
+KG_NODE_TYPES: tuple[str, ...] = (KG_NODE_TYPE_RESOURCE,)
+
+# 关系类型受控词表（第一版只实现有实际用途、且能可靠推导的关系）
+KG_RELATION_CONTAINS = "contains"      # 方剂 → 组成 → 中药（prescription_ingredients）
+KG_RELATION_RECORDS = "records"        # 文献 → 记载 → 资源（资源 source 命中文献名/别名）
+KG_RELATION_RELATED_TO = "related_to"  # 跨类型资源共享标签（*_tags 关联表）
+
+KG_RELATIONS: tuple[str, ...] = (
+    KG_RELATION_CONTAINS,
+    KG_RELATION_RECORDS,
+    KG_RELATION_RELATED_TO,
+)
+
+KG_RELATION_LABELS: dict[str, str] = {
+    KG_RELATION_CONTAINS: "组成",
+    KG_RELATION_RECORDS: "记载",
+    KG_RELATION_RELATED_TO: "相关",
+}
+
+# 关系来源（provenance）：记录边由哪张业务表 / 哪条规则生成，便于审计与实验
+KG_PROVENANCE_INGREDIENT = "prescription_ingredients"
+KG_PROVENANCE_SOURCE = "resource_source"
+KG_PROVENANCE_SHARED_TAG = "shared_tag"
+
+
+class KgNode(Base, TimestampMixin):
+    """知识图谱节点（TASK-013）：一个资源 = 一个节点。
+
+    - node_type：节点类别，第一版只有 'resource'（业务资源节点）
+    - resource_type + resource_id：指回 Herb / Prescription / Theory / Literature
+      本体（多态，不建 FK，与 KnowledgeBaseResource 同风格）
+    - name / aliases：仅用于图检索的实体匹配，不复制资源正文
+    - 唯一约束 (resource_type, resource_id)：重复构建不产生重复节点
+    """
+
+    __tablename__ = "kg_nodes"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    node_type: Mapped[str] = mapped_column(String(16), default=KG_NODE_TYPE_RESOURCE, index=True)
+    resource_type: Mapped[str] = mapped_column(String(16), index=True)
+    resource_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    name: Mapped[str] = mapped_column(String(128), index=True)
+    aliases: Mapped[list[str]] = mapped_column(ARRAY(String(128)), default=list)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "resource_type", "resource_id", name="uq_kg_nodes_resource"
+        ),
+        Index("ix_kg_nodes_aliases_gin", "aliases", postgresql_using="gin"),
+        # 按类型查节点（构建/统计路径）
+        Index("ix_kg_nodes_type_resource_type", "node_type", "resource_type"),
+    )
+
+
+class KgEdge(Base, TimestampMixin):
+    """知识图谱边（TASK-013）：两个节点之间的一条可靠关系。
+
+    - 关系以「规范方向」存储（如 方剂 → contains → 中药），检索时按无向遍历，
+      不重复存储反向边
+    - 唯一约束 (source_node_id, target_node_id, relation_type)：重复构建不产生重复边
+    - provenance：边的生成依据（业务表 / 规则），description：可读说明（如用量、出处）
+    - 节点删除时边级联删除，保证重建与资源清理不留孤儿边
+    """
+
+    __tablename__ = "kg_edges"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    source_node_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("kg_nodes.id", ondelete="CASCADE"), index=True
+    )
+    target_node_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("kg_nodes.id", ondelete="CASCADE"), index=True
+    )
+    relation_type: Mapped[str] = mapped_column(String(32), index=True)
+    provenance: Mapped[str] = mapped_column(String(64), default="")
+    description: Mapped[str] = mapped_column(String(255), default="")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_node_id",
+            "target_node_id",
+            "relation_type",
+            name="uq_kg_edges_source_target_relation",
+        ),
+        Index(
+            "ix_kg_edges_relation_source", "relation_type", "source_node_id"
+        ),
+    )

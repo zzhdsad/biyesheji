@@ -59,9 +59,15 @@ class EvaluationRunRequest(BaseModel):
     kb_id: uuid.UUID
     case_ids: list[uuid.UUID] | None = None
     experiment_name: str = DEFAULT_EXPERIMENT_NAME
+    # 阶段十二：可传 Strategy Registry 中的策略名（baseline_hybrid / herb_focused /
+    # prescription_focused / theory_focused / literature_focused / multi_source）；
+    # 历史标签（如 hybrid_rrf_rerank_hyde）不在注册表中，按 Baseline 行为执行。
     retrieval_strategy: str = BASELINE_RETRIEVAL_STRATEGY
     # 留空时按用例的 dataset_version 自动推断
     dataset_version: str | None = None
+    # 阶段十二：True = 逐条经 Query Analyzer + Dynamic Router 选择策略
+    # （run 级 retrieval_strategy 记为 dynamic_router，逐条策略写入 results）
+    use_dynamic_router: bool = False
 
 
 class TestCaseUpdateRequest(BaseModel):
@@ -89,6 +95,8 @@ class CaseResultOut(BaseModel):
     question_type: str = "general"
     dataset_version: str = DEFAULT_DATASET_VERSION
     needs_review: bool = False
+    # 阶段十二：该用例实际使用的检索策略（动态路由运行逐条不同）
+    retrieval_strategy: str | None = None
 
 
 class QuestionTypeMetric(BaseModel):
@@ -188,7 +196,23 @@ def _to_case_out(r: CaseResult) -> CaseResultOut:
         question_type=r.question_type,
         dataset_version=r.dataset_version,
         needs_review=r.needs_review,
+        retrieval_strategy=r.retrieval_strategy,
     )
+
+
+@router.get("/strategies")
+async def list_strategies() -> dict:
+    """阶段十二：可用检索策略清单（含生效参数，供实验选择与对比）。"""
+    from src.application.retrieval_strategies import (
+        BASELINE_STRATEGY,
+        strategy_names,
+    )
+
+    return {
+        "strategies": EvaluationService.list_strategies(),
+        "default_strategy": BASELINE_STRATEGY,
+        "names": strategy_names(),
+    }
 
 
 @router.get("/question-types")
@@ -271,6 +295,7 @@ async def run_evaluation(
         experiment_name=payload.experiment_name,
         retrieval_strategy=payload.retrieval_strategy,
         dataset_version=payload.dataset_version,
+        use_dynamic_router=payload.use_dynamic_router,
     )
     cr, ac, passed = aggregate(results)
     return EvaluationReport(

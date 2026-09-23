@@ -196,14 +196,37 @@ export const useChatStore = create<ChatState>((set, get) => ({
         '/api/v1/chat/ask-stream',
         { question, kb_ids: kbIds, conversation_id: currentConversationId },
         {
-          onStart: ({ conversation_id }) => {
-            set({ currentConversationId: conversation_id });
+          onStart: ({ conversation_id, query_analysis, router_decision }) => {
+            // 阶段十一/十二：start 事件携带 Query 分析与路由决策（仅展示，不影响请求行为）
+            set((s) => ({
+              currentConversationId: conversation_id,
+              messages:
+                query_analysis || router_decision
+                  ? s.messages.map((m) =>
+                      m.id === assistantId
+                        ? {
+                            ...m,
+                            ...(query_analysis ? { queryAnalysis: query_analysis } : {}),
+                            ...(router_decision ? { routerDecision: router_decision } : {}),
+                          }
+                        : m,
+                    )
+                  : s.messages,
+            }));
           },
-          onCitations: ({ citations }) => {
-            // 引用卡片在生成前实时展示
+          onCitations: ({ citations, evidence, evidence_groups, evidence_summary }) => {
+            // 引用卡片在生成前实时展示；阶段十：同时保存多来源证据分组
             set((s) => ({
               messages: s.messages.map((m) =>
-                m.id === assistantId ? { ...m, citations } : m,
+                m.id === assistantId
+                  ? {
+                      ...m,
+                      citations,
+                      evidence: evidence ?? citations,
+                      evidenceGroups: evidence_groups,
+                      evidenceSummary: evidence_summary,
+                    }
+                  : m,
               ),
             }));
           },

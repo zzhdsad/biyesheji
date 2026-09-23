@@ -72,7 +72,16 @@ def _stub_answer(question: str) -> str:
     return f"模拟答案：{question}"
 
 
-async def _fake_retrieve_and_answer(self, kb_ids, question, history=None):
+async def _fake_retrieve_and_answer(
+    self,
+    kb_ids,
+    question,
+    history=None,
+    strategy=None,
+    resource_types=None,
+    analysis=None,
+):
+    """桩：忽略阶段十二/十三的检索参数（策略与 KG 实验由专项测试覆盖）。"""
     return _stub_answer(question), [
         {
             "content": f"模拟上下文：{question}",

@@ -18,6 +18,7 @@ from src.api.routes import (
     evaluation,
     feedbacks,
     herbs,
+    kg,  # 阶段十三：知识图谱（构建 / 统计 / 检索调试）
     knowledge_bases,
     literatures,
     prescriptions,
@@ -47,6 +48,7 @@ protected_router.include_router(prescriptions.router)  # TASK-004：方剂管理
 protected_router.include_router(theories.router)  # TASK-005：中医理论管理
 protected_router.include_router(literatures.router)  # TASK-006：中医文献管理
 protected_router.include_router(evaluation.router)
+protected_router.include_router(kg.router)  # TASK-013：知识图谱
 protected_router.include_router(feedbacks.router)  # PRD §3.6：用户反馈收集
 protected_router.include_router(admin.router)  # PRD §5.2：系统仪表盘统计（仅 admin）
 protected_router.include_router(settings.router)  # 模型配置（LLM/Embedding/Rerank/HyDE）

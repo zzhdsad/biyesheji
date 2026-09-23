@@ -71,9 +71,24 @@ class BaseVectorStore(ABC):
 
     @abstractmethod
     def search(
-        self, query_vector: list[float], kb_ids: list[str], top_k: int
+        self,
+        query_vector: list[float],
+        kb_ids: list[str],
+        top_k: int,
+        resource_types: list[str] | None = None,
+        include_document: bool = True,
     ) -> list[dict]:
         """稠密向量检索（强制 kb_id 过滤，TECH_DESIGN 权限隔离）。
+
+        Args:
+            query_vector: 稠密查询向量
+            kb_ids: 允许的知识库（强制过滤，禁止越权）
+            top_k: 返回条数
+            resource_types: 阶段十二 Dynamic Router 的资源类型过滤。
+                None = 不限制（默认，与阶段十一及之前行为一致）；
+                非空 = 只返回这些 resource_type 的命中
+            include_document: 资源过滤生效时是否保留 Document 命中
+                （resource_type 为空的行）
 
         Returns:
             [{id, doc_id, kb_id, chunk_index, content, page_num, title_path, score}]，
@@ -82,12 +97,18 @@ class BaseVectorStore(ABC):
 
     @abstractmethod
     def search_sparse(
-        self, query_sparse: dict, kb_ids: list[str], top_k: int
+        self,
+        query_sparse: dict,
+        kb_ids: list[str],
+        top_k: int,
+        resource_types: list[str] | None = None,
+        include_document: bool = True,
     ) -> list[dict]:
         """稀疏向量检索（BM25 关键词召回，强制 kb_id 过滤）。
 
         query_sparse 为 BGE-M3 lexical weights（{token_id: weight}）。
         返回结构同 search（score 为稀疏内点积，越大越相关）。
+        resource_types / include_document 语义同 search。
         """
 
 
@@ -294,14 +315,45 @@ class MilvusStore(BaseVectorStore):
         except Exception as exc:
             raise VectorStoreError(f"Milvus 查询失败 doc_id={doc_id}：{exc}") from exc
 
+    def _build_filter(
+        self,
+        kb_ids: list[str],
+        resource_types: list[str] | None,
+        include_document: bool,
+    ) -> str:
+        """构造检索过滤表达式：kb_id 必过滤 + 可选资源类型过滤。
+
+        阶段十二：Dynamic Router 的聚焦策略通过资源类型谓词限定召回范围。
+        老集合未开启动态字段时无法过滤 resource_type（列不存在），此时降级为
+        仅 kb_id 过滤，由 RagService 的后置过滤兜底，保证行为一致且不报错。
+        """
+        # 强制 kb_id 过滤（TECH_DESIGN：所有检索加 kb_id 过滤，禁止越权访问）
+        expr = "kb_id in [" + ", ".join(f'"{k}"' for k in kb_ids) + "]"
+        if resource_types and self._supports_dynamic_fields():
+            allowed = ", ".join(f'"{t}"' for t in resource_types)
+            parts = [f"resource_type in [{allowed}]"]
+            if include_document:
+                # Document 行写入时 resource_type 写为空串（见 insert 注释）
+                parts.append('resource_type == ""')
+            expr = f"{expr} and ({' or '.join(parts)})"
+        elif resource_types:
+            logger.warning(
+                "集合未开启动态字段，无法按 resource_type 过滤，降级为仅 kb_id 过滤"
+            )
+        return expr
+
     def search(
-        self, query_vector: list[float], kb_ids: list[str], top_k: int
+        self,
+        query_vector: list[float],
+        kb_ids: list[str],
+        top_k: int,
+        resource_types: list[str] | None = None,
+        include_document: bool = True,
     ) -> list[dict]:
         client = self._get_client()
         if not client.has_collection(self.COLLECTION) or not kb_ids:
             return []
-        # 强制 kb_id 过滤（TECH_DESIGN：所有检索加 kb_id 过滤，禁止越权访问）
-        kb_filter = "kb_id in [" + ", ".join(f'"{k}"' for k in kb_ids) + "]"
+        kb_filter = self._build_filter(kb_ids, resource_types, include_document)
         output_fields = [
             "id",
             "doc_id",
@@ -334,13 +386,18 @@ class MilvusStore(BaseVectorStore):
         return [self._parse_hit(hit) for hit in results]
 
     def search_sparse(
-        self, query_sparse: dict, kb_ids: list[str], top_k: int
+        self,
+        query_sparse: dict,
+        kb_ids: list[str],
+        top_k: int,
+        resource_types: list[str] | None = None,
+        include_document: bool = True,
     ) -> list[dict]:
         """稀疏向量检索（BM25 关键词召回，SPARSE_INVERTED_INDEX + IP）。"""
         client = self._get_client()
         if not client.has_collection(self.COLLECTION) or not kb_ids or not query_sparse:
             return []
-        kb_filter = "kb_id in [" + ", ".join(f'"{k}"' for k in kb_ids) + "]"
+        kb_filter = self._build_filter(kb_ids, resource_types, include_document)
         output_fields = [
             "id",
             "doc_id",
@@ -420,8 +477,24 @@ class InMemoryVectorStore(BaseVectorStore):
     def count_by_doc(self, doc_id: str) -> int:  # noqa: D102
         return sum(1 for v in self._rows.values() if v.doc_id == doc_id)
 
+    @staticmethod
+    def _match_resource(
+        row: VectorRow, resource_types: list[str] | None, include_document: bool
+    ) -> bool:
+        """阶段十二：资源类型谓词（Document 行 resource_type 为空）。"""
+        if not resource_types:
+            return True
+        if row.resource_type:
+            return row.resource_type in resource_types
+        return include_document
+
     def search(  # noqa: D102
-        self, query_vector: list[float], kb_ids: list[str], top_k: int
+        self,
+        query_vector: list[float],
+        kb_ids: list[str],
+        top_k: int,
+        resource_types: list[str] | None = None,
+        include_document: bool = True,
     ) -> list[dict]:
         kb_set = set(kb_ids)
 
@@ -435,6 +508,7 @@ class InMemoryVectorStore(BaseVectorStore):
             (_cosine(query_vector, v.dense_vector), v)
             for v in self._rows.values()
             if v.kb_id in kb_set
+            and self._match_resource(v, resource_types, include_document)
         ]
         scored.sort(key=lambda t: t[0], reverse=True)
         return [
@@ -458,7 +532,12 @@ class InMemoryVectorStore(BaseVectorStore):
         ]
 
     def search_sparse(  # noqa: D102
-        self, query_sparse: dict, kb_ids: list[str], top_k: int
+        self,
+        query_sparse: dict,
+        kb_ids: list[str],
+        top_k: int,
+        resource_types: list[str] | None = None,
+        include_document: bool = True,
     ) -> list[dict]:
         kb_set = set(kb_ids)
         if not query_sparse:
@@ -471,7 +550,9 @@ class InMemoryVectorStore(BaseVectorStore):
         scored = [
             (_ip(query_sparse, v.sparse_vector), v)
             for v in self._rows.values()
-            if v.kb_id in kb_set and v.sparse_vector
+            if v.kb_id in kb_set
+            and v.sparse_vector
+            and self._match_resource(v, resource_types, include_document)
         ]
         scored = [(s, v) for s, v in scored if s > 0]
         scored.sort(key=lambda t: t[0], reverse=True)

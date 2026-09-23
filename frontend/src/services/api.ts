@@ -8,6 +8,10 @@ import type {
   DocumentItem,
   EvaluationHistoryItem,
   EvaluationReport,
+  EvidenceGroup,
+  EvidenceSummary,
+  QueryAnalysis,
+  RouterDecision,
   EvaluationRunItem,
   EvalTestCaseItem,
   EvalTestCaseOut,
@@ -78,6 +82,16 @@ export interface ChatAnswer {
   message_id: string;
   answer: string;
   citations: Citation[];
+  /** 阶段十：统一 Evidence 与多来源分组（非流式 /ask） */
+  evidence?: Citation[];
+  evidence_groups?: EvidenceGroup[];
+  evidence_summary?: EvidenceSummary;
+  /** 阶段十一：Query 分析结果 */
+  query_analysis?: QueryAnalysis;
+  /** 阶段十二：Dynamic Router 决策 */
+  router_decision?: RouterDecision;
+  /** 阶段十三：KG 关系证据切片（citations/evidence 已包含，此处为可选视图） */
+  kg_evidence?: Citation[];
 }
 
 /** RAG 问答：向量检索 → Rerank → LLM 生成 → 引用溯源。 */
