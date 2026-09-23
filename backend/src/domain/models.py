@@ -306,6 +306,22 @@ class EvaluationResult(Base, TimestampMixin):
     question_type: Mapped[str] = mapped_column(String(32), default="general")
     answer: Mapped[str] = mapped_column(Text, default="")
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 阶段十四：Evidence Gate 归档（最小迁移，全部可空；Gate 关闭时为 None）
+    # gate_decision ∈ {accept, insufficient, retry}
+    gate_decision: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    gate_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Gate 判定 retry 时实际重试使用的策略（未重试为 None）
+    retry_strategy: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 阶段十五：Self Reflection 归档（最小迁移，全部可空；Reflection 关闭时为 None）
+    # reflection_decision ∈ {accept, revise, retry}
+    reflection_decision: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    reflection_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Reflection 判定 retry 时实际使用的策略（未重试为 None）
+    reflection_retry_strategy: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    # Reflection 给出的原因/问题清单（受控词表，+ 连接），供后续按原因归类分析
+    reflection_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
 
 class Feedback(Base, TimestampMixin):

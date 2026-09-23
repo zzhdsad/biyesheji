@@ -159,6 +159,67 @@ class RouterDecisionOut(BaseModel):
     fallback_reason: str | None = None
 
 
+class GateDecisionOut(BaseModel):
+    """阶段十四：Evidence Gate 决策（解释"证据是否足够 / 是否重试过"）。
+
+    字段与 application.evidence_gate.GateDecision.to_dict() 对齐。
+    decision ∈ {accept, insufficient, retry}；Gate 关闭时整个字段为 None。
+    """
+
+    decision: str
+    reason: str = ""
+    gate_version: str = "gate-v1"
+    evidence_count: int = 0
+    accepted_count: int = 0
+    high_count: int = 0
+    medium_count: int = 0
+    weak_count: int = 0
+    source_kind_counts: dict = Field(default_factory=dict)
+    best_score: float = 0.0
+    is_valid: bool = True
+    fallback_reason: str | None = None
+    # retry 信息：最多一次，retry 后仍不足 → decision=insufficient
+    retry_reason: str | None = None
+    original_strategy: str | None = None
+    retry_strategy: str | None = None
+    retried: bool = False
+    details: dict = Field(default_factory=dict)
+
+
+class ReflectionDecisionOut(BaseModel):
+    """阶段十五：Self Reflection 决策（解释"答案是否忠实使用了证据"）。
+
+    字段与 application.self_reflection.ReflectionDecision.to_dict() 对齐。
+    decision ∈ {accept, revise, retry}：
+    - accept：答案与证据一致
+    - revise：答案表达超出证据，已基于同一份证据重写（最多一次）
+    - retry：证据不足以支撑答案，已换策略重检索一次（最多一次）
+    Reflection 关闭时整个字段为 None。
+    """
+
+    decision: str
+    reason: str = ""
+    reflection_version: str = "reflection-v1"
+    confidence: float = 0.0
+    issues: list[str] = Field(default_factory=list)
+    retry_strategy: str | None = None
+    retried: bool = False
+    is_valid: bool = True
+    fallback_reason: str | None = None
+    details: dict = Field(default_factory=dict)
+    # 阶段十五 §6：Gate retry 与 Reflection retry 分别计数，保证总次数有界
+    gate_retry_count: int = 0
+    reflection_retry_count: int = 0
+    total_retry_count: int = 0
+    revised: bool = False
+    # 直接引用 Gate 结论（Reflection 不重复计算 Evidence Gate）
+    gate_decision: str | None = None
+    gate_version: str | None = None
+    original_strategy: str | None = None
+    retry_reason: str | None = None
+    llm_used: bool = False
+
+
 class ChatAnswerResponse(BaseModel):
     conversation_id: str
     message_id: str
@@ -174,6 +235,10 @@ class ChatAnswerResponse(BaseModel):
     router_decision: RouterDecisionOut | None = None
     # 阶段十三：KG 关系证据切片（citations/evidence 已包含，此处仅为便于观察/实验）
     kg_evidence: list[Evidence] = []
+    # 阶段十四：Evidence Gate 决策（向后兼容：Gate 关闭时为 None，旧字段不变）
+    evidence_gate: GateDecisionOut | None = None
+    # 阶段十五：Self Reflection 决策（向后兼容：Reflection 关闭时为 None）
+    reflection: ReflectionDecisionOut | None = None
 
 
 class ConversationOut(BaseModel):
@@ -301,6 +366,18 @@ async def ask(
         kg_evidence=[
             Evidence(**c) for c in citations if c.get("source_kind") == SOURCE_KIND_KG
         ],
+        # 阶段十四：Evidence Gate 决策（Gate 关闭时为 None）
+        evidence_gate=(
+            GateDecisionOut(**service.last_gate_decision.to_dict())
+            if service.last_gate_decision is not None
+            else None
+        ),
+        # 阶段十五：Self Reflection 决策（Reflection 关闭时为 None）
+        reflection=(
+            ReflectionDecisionOut(**service.last_reflection_decision.to_dict())
+            if service.last_reflection_decision is not None
+            else None
+        ),
     )
 
 

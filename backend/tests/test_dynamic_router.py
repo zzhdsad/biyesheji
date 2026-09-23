@@ -666,7 +666,7 @@ def _recorded_rag(monkeypatch):
     calls: list[dict] = []
 
     async def _rec(self, kb_ids, question, history=None, strategy=None,
-                   resource_types=None, analysis=None):
+                   resource_types=None, analysis=None, router_decision=None):
         calls.append({
             "strategy": strategy.name if strategy else None,
             "resource_types": resource_types or [],

@@ -56,6 +56,18 @@ class Settings(BaseSettings):
     RRF_K: int = 60  # RRF 融合平滑常数
     # 相关性门槛（BUSINESS_RULES §6：检索相关度 < 0.3 时拒答）
     RELEVANCE_THRESHOLD: float = 0.3
+    # 阶段十四：Evidence Gate 总开关（False = 完全回到阶段十三及之前的行为）。
+    # 默认开启；评测可用 use_evidence_gate 显式覆盖，用于"Gate 开 / 关"对照实验。
+    EVIDENCE_GATE_ENABLED: bool = True
+    # 阶段十五：Self Reflection 总开关（False = 完全回到阶段十四的行为）。
+    # 默认开启；评测可用 use_self_reflection 显式覆盖，用于 ON/OFF 对照实验。
+    SELF_REFLECTION_ENABLED: bool = True
+    # 阶段十五：可选的 LLM Reflection（一致性检查）。默认关闭。
+    # 说明：默认方案是纯规则反思（确定性、零额外延迟）；开启后每个答案额外调用
+    # 一次 LLM，仅用于判断"答案是否被资料支持"，不得用于生成新事实/新结论。
+    SELF_REFLECTION_LLM_ENABLED: bool = False
+    # LLM Reflection 单次调用的超时上限（秒）；超时即视为不可用，回落到原答案
+    SELF_REFLECTION_LLM_TIMEOUT_SECONDS: float = 20.0
     # mock（确定性伪重排，开发/测试）/ flagreranker（BGE-Reranker-v2-m3 真实精排）
     RERANK_BACKEND: str = "mock"
     RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"  # HuggingFace 模型 ID

@@ -68,6 +68,12 @@ class EvaluationRunRequest(BaseModel):
     # 阶段十二：True = 逐条经 Query Analyzer + Dynamic Router 选择策略
     # （run 级 retrieval_strategy 记为 dynamic_router，逐条策略写入 results）
     use_dynamic_router: bool = False
+    # 阶段十四：显式开关 Evidence Gate（None = 沿用全局 settings.EVIDENCE_GATE_ENABLED）
+    # 用于「Gate 开 / 关」对照实验；关闭即完全回到阶段十三及之前的行为
+    use_evidence_gate: bool | None = None
+    # 阶段十五：显式开关 Self Reflection（None = 沿用 settings.SELF_REFLECTION_ENABLED）
+    # 用于「Reflection ON / OFF」对照实验；关闭即完全回到阶段十四的行为
+    use_self_reflection: bool | None = None
 
 
 class TestCaseUpdateRequest(BaseModel):
@@ -97,6 +103,16 @@ class CaseResultOut(BaseModel):
     needs_review: bool = False
     # 阶段十二：该用例实际使用的检索策略（动态路由运行逐条不同）
     retrieval_strategy: str | None = None
+    # 阶段十四：Evidence Gate 归档（Gate 关闭时为 None）
+    gate_decision: str | None = None
+    gate_version: str | None = None
+    # Gate 判定 retry 时实际重试使用的策略（未重试为 None）
+    retry_strategy: str | None = None
+    # 阶段十五：Self Reflection 归档（Reflection 关闭时为 None）
+    reflection_decision: str | None = None
+    reflection_version: str | None = None
+    reflection_retry_strategy: str | None = None
+    reflection_reason: str | None = None
 
 
 class QuestionTypeMetric(BaseModel):
@@ -146,6 +162,15 @@ class EvaluationHistoryItem(BaseModel):
     retrieval_strategy: str | None = None
     dataset_version: str | None = None
     question_type: str | None = None
+    # 阶段十四：Evidence Gate 归档（Gate 关闭时为 None）
+    gate_decision: str | None = None
+    gate_version: str | None = None
+    retry_strategy: str | None = None
+    # 阶段十五：Self Reflection 归档（Reflection 关闭时为 None）
+    reflection_decision: str | None = None
+    reflection_version: str | None = None
+    reflection_retry_strategy: str | None = None
+    reflection_reason: str | None = None
 
 
 class EvaluationRunOut(BaseModel):
@@ -197,6 +222,15 @@ def _to_case_out(r: CaseResult) -> CaseResultOut:
         dataset_version=r.dataset_version,
         needs_review=r.needs_review,
         retrieval_strategy=r.retrieval_strategy,
+        # 阶段十四：Gate 决策（Gate 关闭时为 None）
+        gate_decision=r.gate_decision,
+        gate_version=r.gate_version,
+        retry_strategy=r.retry_strategy,
+        # 阶段十五：Reflection 决策（Reflection 关闭时为 None）
+        reflection_decision=r.reflection_decision,
+        reflection_version=r.reflection_version,
+        reflection_retry_strategy=r.reflection_retry_strategy,
+        reflection_reason=r.reflection_reason,
     )
 
 
@@ -296,6 +330,8 @@ async def run_evaluation(
         retrieval_strategy=payload.retrieval_strategy,
         dataset_version=payload.dataset_version,
         use_dynamic_router=payload.use_dynamic_router,
+        use_evidence_gate=payload.use_evidence_gate,
+        use_self_reflection=payload.use_self_reflection,
     )
     cr, ac, passed = aggregate(results)
     return EvaluationReport(

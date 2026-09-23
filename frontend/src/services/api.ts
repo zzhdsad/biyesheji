@@ -15,7 +15,9 @@ import type {
   EvaluationRunItem,
   EvalTestCaseItem,
   EvalTestCaseOut,
+  GateDecision,
   HealthResponse,
+  ReflectionDecision,
   Herb,
   HerbListResponse,
   KBMember,
@@ -92,6 +94,10 @@ export interface ChatAnswer {
   router_decision?: RouterDecision;
   /** 阶段十三：KG 关系证据切片（citations/evidence 已包含，此处为可选视图） */
   kg_evidence?: Citation[];
+  /** 阶段十四：Evidence Gate 决策（Gate 关闭时为 null） */
+  evidence_gate?: GateDecision | null;
+  /** 阶段十五：Self Reflection 决策（Reflection 关闭时为 null） */
+  reflection?: ReflectionDecision | null;
 }
 
 /** RAG 问答：向量检索 → Rerank → LLM 生成 → 引用溯源。 */

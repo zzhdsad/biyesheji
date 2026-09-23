@@ -59,8 +59,11 @@ export interface Citation {
   source_type?: SourceType | null;
   era?: SourceEra | null;
   credibility_level?: number | null;
-  /** 来源类别：document（上传文献） / resource（中药·方剂·理论·文献条目） */
-  source_kind?: 'document' | 'resource';
+  /**
+   * 来源类别：document（上传文献） / resource（中药·方剂·理论·文献条目） /
+   * kg（阶段十三知识图谱关系证据，后端 application/evidence.py 三值之一）。
+   */
+  source_kind?: 'document' | 'resource' | 'kg';
   /** 证据等级：high / medium / insufficient */
   evidence_level?: EvidenceLevel;
   /** Resource 专属：资源细分类型 */
@@ -159,6 +162,71 @@ export interface RouterDecision {
   fallback_reason?: string | null;
 }
 
+/**
+ * 阶段十四：Evidence Gate 决策（结构化，与后端 GateDecisionOut 对齐）。
+ *
+ * decision ∈ {accept, insufficient, retry}：
+ * - accept：证据足够，正常生成
+ * - insufficient：证据不足，已拒答（证据/引用仍保留）
+ * - retry：证据不足但已换策略重试一次（响应中为重试后的最终判定）
+ *
+ * 仅用于解释/调试；前端不得据其改变请求行为。Gate 关闭时该字段为 null。
+ */
+export interface GateDecision {
+  decision: 'accept' | 'insufficient' | 'retry' | string;
+  reason?: string;
+  gate_version?: string;
+  evidence_count?: number;
+  accepted_count?: number;
+  high_count?: number;
+  medium_count?: number;
+  weak_count?: number;
+  source_kind_counts?: Record<string, number>;
+  best_score?: number;
+  is_valid?: boolean;
+  fallback_reason?: string | null;
+  retry_reason?: string | null;
+  original_strategy?: string | null;
+  retry_strategy?: string | null;
+  retried?: boolean;
+  details?: Record<string, unknown>;
+}
+
+/**
+ * 阶段十五：Self Reflection 决策（结构化，与后端 ReflectionDecisionOut 对齐）。
+ *
+ * decision ∈ {accept, revise, retry}：
+ * - accept：答案与证据一致
+ * - revise：答案表达超出证据，已基于同一份证据重写（最多一次，revised=true）
+ * - retry：证据不足以支撑答案，已换策略重检索一次（最多一次，retried=true）
+ *
+ * gate_retry_count / reflection_retry_count / total_retry_count 分别记录两类
+ * retry 次数，保证总次数有界（均 ≤ 1 次 Combination）。
+ *
+ * 仅用于解释/调试；前端不得据其改变请求行为。Reflection 关闭时该字段为 null。
+ */
+export interface ReflectionDecision {
+  decision: 'accept' | 'revise' | 'retry' | string;
+  reason?: string;
+  reflection_version?: string;
+  confidence?: number;
+  issues?: string[];
+  retry_strategy?: string | null;
+  retried?: boolean;
+  is_valid?: boolean;
+  fallback_reason?: string | null;
+  gate_retry_count?: number;
+  reflection_retry_count?: number;
+  total_retry_count?: number;
+  revised?: boolean;
+  gate_decision?: string | null;
+  gate_version?: string | null;
+  original_strategy?: string | null;
+  retry_reason?: string | null;
+  llm_used?: boolean;
+  details?: Record<string, unknown>;
+}
+
 export interface ChatMessage {
   id: string;
   role: Role;
@@ -172,6 +240,12 @@ export interface ChatMessage {
   queryAnalysis?: QueryAnalysis;
   /** 阶段十二：检索策略路由决策（流式由 start 事件下发） */
   routerDecision?: RouterDecision;
+  /** 阶段十三：KG 关系证据切片（流式由 citations 事件下发；citations 已包含，此处为同一份数据的视图） */
+  kgEvidence?: Citation[];
+  /** 阶段十四：证据门控决策（流式由 citations 事件下发） */
+  evidenceGate?: GateDecision;
+  /** 阶段十五：自反思决策（流式由 done 事件下发） */
+  reflection?: ReflectionDecision;
 }
 
 export interface KnowledgeBase {
@@ -358,6 +432,17 @@ export interface EvalCaseResult {
   question_type: string;
   dataset_version: string;
   needs_review: boolean;
+  /** 阶段十二：该用例实际使用的检索策略 */
+  retrieval_strategy?: string | null;
+  // 阶段十四：Evidence Gate 归档（Gate 关闭时为 null）
+  gate_decision?: string | null;
+  gate_version?: string | null;
+  retry_strategy?: string | null;
+  // 阶段十五：Self Reflection 归档（Reflection 关闭时为 null）
+  reflection_decision?: string | null;
+  reflection_version?: string | null;
+  reflection_retry_strategy?: string | null;
+  reflection_reason?: string | null;
 }
 
 /** 评估报告（POST /evaluation/run）。 */
@@ -413,6 +498,15 @@ export interface EvaluationHistoryItem {
   dataset_version?: string | null;
   question_type?: string | null;
   question_type_label?: string | null;
+  // 阶段十四：Evidence Gate 归档（Gate 关闭时为 null）
+  gate_decision?: string | null;
+  gate_version?: string | null;
+  retry_strategy?: string | null;
+  // 阶段十五：Self Reflection 归档（Reflection 关闭时为 null）
+  reflection_decision?: string | null;
+  reflection_version?: string | null;
+  reflection_retry_strategy?: string | null;
+  reflection_reason?: string | null;
 }
 
 // ─────────────────────────── 分类与标签（TASK-002）───────────────────────────

@@ -699,7 +699,7 @@ async def test_evaluation_supports_kg_strategy(client, eval_kb, monkeypatch):
     recorded: list[dict] = []
 
     async def _rec(self, kb_ids, question, history=None, strategy=None,
-                  resource_types=None, analysis=None):
+                  resource_types=None, analysis=None, router_decision=None):
         recorded.append({
             "strategy": strategy.name if strategy else None,
             "has_analysis": analysis is not None,

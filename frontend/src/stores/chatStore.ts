@@ -214,8 +214,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   : s.messages,
             }));
           },
-          onCitations: ({ citations, evidence, evidence_groups, evidence_summary }) => {
+          onCitations: ({
+            citations,
+            evidence,
+            evidence_groups,
+            evidence_summary,
+            kg_evidence,
+            evidence_gate,
+          }) => {
             // 引用卡片在生成前实时展示；阶段十：同时保存多来源证据分组
+            // 阶段十三：保存 KG 证据切片（与 citations 同源，供后续区分展示）
+            // 阶段十四：附带保存 Evidence Gate 决策（暂不展示，仅留待后续阶段）
             set((s) => ({
               messages: s.messages.map((m) =>
                 m.id === assistantId
@@ -225,6 +234,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                       evidence: evidence ?? citations,
                       evidenceGroups: evidence_groups,
                       evidenceSummary: evidence_summary,
+                      ...(kg_evidence ? { kgEvidence: kg_evidence } : {}),
+                      ...(evidence_gate ? { evidenceGate: evidence_gate } : {}),
                     }
                   : m,
               ),
@@ -238,10 +249,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
               ),
             }));
           },
-          onDone: ({ message_id, conversation_id }) => {
+          onDone: ({ message_id, conversation_id, answer, reflection }) => {
             set((s) => ({
               messages: s.messages.map((m) =>
-                m.id === assistantId ? { ...m, id: message_id || m.id } : m,
+                m.id === assistantId
+                  ? {
+                      ...m,
+                      id: message_id || m.id,
+                      // 阶段十五：Reflection 可能把流式答案改写为更保守的版本，
+                      // done 事件带回最终权威文本（后端已按该文本持久化）
+                      ...(answer ? { content: answer } : {}),
+                      ...(reflection ? { reflection } : {}),
+                    }
+                  : m,
               ),
               currentConversationId: conversation_id,
               sending: false,
@@ -271,6 +291,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         ),
         sending: false,
       }));
+    } finally {
+      // 阶段十六：流异常终止（既没收到 done 也没收到 error，例如连接被中断）时，
+      // 必须恢复可发送状态，否则 sending 永久为 true，用户再也无法提问。
+      // 已流式渲染出的内容保留，交由用户判断是否重发。
+      set((s) => (s.sending ? { sending: false } : s));
     }
   },
 

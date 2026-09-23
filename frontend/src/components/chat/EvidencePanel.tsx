@@ -96,7 +96,14 @@ export function EvidencePanel({
         <div key={group.group_key} style={{ marginTop: 6 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 4 }}>
             <Tag
-              color={group.source_kind === 'resource' ? 'geekblue' : 'blue'}
+              // 阶段十三：KG 证据单独着色，与 document / resource 三类来源区分
+              color={
+                group.source_kind === 'kg'
+                  ? 'purple'
+                  : group.source_kind === 'resource'
+                    ? 'geekblue'
+                    : 'blue'
+              }
               style={{ margin: 0, fontWeight: 500 }}
             >
               {group.source_label}

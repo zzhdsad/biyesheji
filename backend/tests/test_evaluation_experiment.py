@@ -80,8 +80,9 @@ async def _fake_retrieve_and_answer(
     strategy=None,
     resource_types=None,
     analysis=None,
+    router_decision=None,
 ):
-    """桩：忽略阶段十二/十三的检索参数（策略与 KG 实验由专项测试覆盖）。"""
+    """桩：忽略阶段十二/十三/十四的检索参数（策略 / KG / Gate 由专项测试覆盖）。"""
     return _stub_answer(question), [
         {
             "content": f"模拟上下文：{question}",

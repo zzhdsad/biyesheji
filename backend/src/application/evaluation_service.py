@@ -37,6 +37,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.dynamic_router import DYNAMIC_ROUTER_STRATEGY, ROUTER_VERSION
 from src.application.eval_metrics import RAGASMetrics, get_metrics
+from src.application.evidence_gate import GATE_VERSION, gate_config
+from src.application.self_reflection import REFLECTION_VERSION, reflection_config
 from src.application.rag_service import RagService
 from src.application.retrieval_strategies import (
     RetrievalStrategy,
@@ -97,6 +99,16 @@ class CaseResult:
     # 阶段十二：该用例实际使用的检索策略（固定策略运行 = 全 run 同一策略；
     # 动态路由运行 = 由 Dynamic Router 按 question_type 逐条选择）
     retrieval_strategy: str | None = None
+    # 阶段十四：Evidence Gate 归档（Gate 关闭时为 None）
+    gate_decision: str | None = None
+    gate_version: str | None = None
+    # Gate 判定 retry 时实际重试使用的策略（未重试为 None）
+    retry_strategy: str | None = None
+    # 阶段十五：Self Reflection 归档（Reflection 关闭时为 None）
+    reflection_decision: str | None = None
+    reflection_version: str | None = None
+    reflection_retry_strategy: str | None = None
+    reflection_reason: str | None = None
 
 
 class EvaluationService:
@@ -247,6 +259,8 @@ class EvaluationService:
         retrieval_strategy: str = BASELINE_RETRIEVAL_STRATEGY,
         dataset_version: str | None = None,
         use_dynamic_router: bool = False,
+        use_evidence_gate: bool | None = None,
+        use_self_reflection: bool | None = None,
     ) -> tuple[EvaluationRun, list[CaseResult]]:
         """运行评估。返回 (EvaluationRun 归档记录, per-case results)。
 
@@ -263,7 +277,45 @@ class EvaluationService:
         - use_dynamic_router=True：逐条走 Query Analyzer + Dynamic Router，
           每条用例记录其实际使用的策略到 evaluation_results.retrieval_strategy，
           run 级 retrieval_strategy 记为 dynamic_router，便于与 Baseline 对比。
+
+        阶段十四：
+        - use_evidence_gate=True/False 显式开关 Evidence Gate（None = 沿用全局
+          settings.EVIDENCE_GATE_ENABLED），用于「Gate 开 / 关」对照实验；
+        - 每条用例的 gate_decision / gate_version / retry_strategy 写入
+          evaluation_results 的新增可空列；
+        - Gate 配置与本次运行的决策分布写入 config_snapshot["evidence_gate"]。
+          本阶段只建立 Gate 评测能力，不产出 Gate 效果结论。
+
+        阶段十五：
+        - use_self_reflection=True/False 显式开关 Self Reflection（None = 沿用全局
+          settings.SELF_REFLECTION_ENABLED），用于「Reflection ON / OFF」对照实验；
+        - 每条用例的 reflection_decision / reflection_version /
+          reflection_retry_strategy / reflection_reason 写入 evaluation_results；
+        - Reflection 配置与决策分布写入 config_snapshot["self_reflection"]。
+          本阶段只建立 Reflection 评测能力，不产出任何 Reflection 效果结论。
         """
+        # 阶段十五：显式开关 Reflection（None = 沿用全局配置）
+        reflection_enabled = (
+            bool(getattr(settings, "SELF_REFLECTION_ENABLED", True))
+            if use_self_reflection is None
+            else bool(use_self_reflection)
+        )
+        try:
+            self.rag.reflector.enabled = reflection_enabled
+        except AttributeError:  # 注入的 rag 未提供 Reflection（如测试桩）
+            logger.warning("RagService 未提供 Self Reflection，本次运行不记录反思决策")
+            reflection_enabled = False
+        # 阶段十四：显式开关 Gate（None = 沿用全局配置）
+        gate_enabled = (
+            bool(getattr(settings, "EVIDENCE_GATE_ENABLED", True))
+            if use_evidence_gate is None
+            else bool(use_evidence_gate)
+        )
+        try:
+            self.rag.gate.enabled = gate_enabled
+        except AttributeError:  # 注入的 rag 未提供 Gate（如测试桩）：不记录 Gate 决策
+            logger.warning("RagService 未提供 Evidence Gate，本次运行不记录 Gate 决策")
+            gate_enabled = False
         cases = await self._load_cases(kb_id, case_ids)
         if not cases:
             raise AppException(404, "未找到测试用例：请先上传测试集")
@@ -277,7 +329,11 @@ class EvaluationService:
             None if use_dynamic_router else get_strategy(retrieval_strategy)
         )
         config_snapshot = await self._config_snapshot(
-            strategy_label, strategy=fixed_strategy, dynamic_router=use_dynamic_router
+            strategy_label,
+            strategy=fixed_strategy,
+            dynamic_router=use_dynamic_router,
+            gate_enabled=gate_enabled,
+            reflection_enabled=reflection_enabled,
         )
 
         run = EvaluationRun(
@@ -314,10 +370,42 @@ class EvaluationService:
                     question_type=tc.question_type,
                     answer=res.answer,
                     error=res.error,
+                    # 阶段十四：Gate 决策归档（Gate 关闭时为 None）
+                    gate_decision=res.gate_decision,
+                    gate_version=res.gate_version,
+                    retry_strategy=res.retry_strategy,
+                    # 阶段十五：Reflection 归档（Reflection 关闭时为 None）
+                    reflection_decision=res.reflection_decision,
+                    reflection_version=res.reflection_version,
+                    reflection_retry_strategy=res.reflection_retry_strategy,
+                    reflection_reason=res.reflection_reason,
                 )
             )
 
         cr, ac, evaluated, skipped, passed = summarize(results)
+        # 阶段十四：把本次运行的 Gate 配置与决策分布并入配置快照（可复现 + 可对比）
+        gate_counts: dict[str, int] = {}
+        for r in results:
+            if r.gate_decision:
+                gate_counts[r.gate_decision] = gate_counts.get(r.gate_decision, 0) + 1
+        # 阶段十五：Reflection 决策分布（同样并入快照）
+        reflection_counts: dict[str, int] = {}
+        for r in results:
+            if r.reflection_decision:
+                reflection_counts[r.reflection_decision] = (
+                    reflection_counts.get(r.reflection_decision, 0) + 1
+                )
+        run.config_snapshot = {
+            **(config_snapshot or {}),
+            "evidence_gate": {
+                **gate_config(gate_enabled),
+                "decision_counts": gate_counts,
+            },
+            "self_reflection": {
+                **reflection_config(reflection_enabled),
+                "decision_counts": reflection_counts,
+            },
+        }
         run.case_count = len(results)
         run.evaluated_count = evaluated
         run.skipped_count = skipped
@@ -330,6 +418,8 @@ class EvaluationService:
         logger.info(
             f"评估完成 run_id={run.id} experiment={run.experiment_name} "
             f"strategy={run.retrieval_strategy} dataset={run.dataset_version} "
+            f"gate={'on' if gate_enabled else 'off'}:{GATE_VERSION} "
+            f"reflection={'on' if reflection_enabled else 'off'}:{REFLECTION_VERSION} "
             f"kb={kb_id} cases={len(results)} evaluated={evaluated} skipped={skipped} "
             f"cr={cr:.3f} ac={'None' if ac is None else f'{ac:.3f}'}"
         )
@@ -409,6 +499,15 @@ class EvaluationService:
                 "answer": er.answer,
                 "answer_correctness": er.answer_correctness,
                 "context_relevancy": er.context_relevancy,
+                # 阶段十四：Evidence Gate 归档（Gate 关闭时为 None）
+                "gate_decision": er.gate_decision,
+                "gate_version": er.gate_version,
+                "retry_strategy": er.retry_strategy,
+                # 阶段十五：Self Reflection 归档（Reflection 关闭时为 None）
+                "reflection_decision": er.reflection_decision,
+                "reflection_version": er.reflection_version,
+                "reflection_retry_strategy": er.reflection_retry_strategy,
+                "reflection_reason": er.reflection_reason,
                 "created_at": er.created_at.isoformat() if er.created_at else None,
             }
             for er, tc in rows
@@ -443,11 +542,19 @@ class EvaluationService:
         retrieval_strategy: str,
         strategy: RetrievalStrategy | None = None,
         dynamic_router: bool = False,
+        gate_enabled: bool = True,
+        reflection_enabled: bool = True,
     ) -> dict[str, Any]:
         """采集本次运行的配置快照（不含密钥），保证实验可复现。
 
         阶段十二：额外记录 Router 版本、可用策略清单与本次生效的检索参数
         （strategy 存在时以其解析结果为准）。
+
+        阶段十四：记录 Evidence Gate 版本 / 开关 / 阈值（决策分布由 run() 在
+        用例跑完后补写，因为需要实际结果）。
+
+        阶段十五：记录 Self Reflection 版本 / 开关 / LLM 开关 / 上限
+        （决策分布同样由 run() 补写）。
         """
         runtime: dict[str, Any] = {}
         try:
@@ -477,6 +584,10 @@ class EvaluationService:
                 "router_version": ROUTER_VERSION,
                 "strategies": strategy_names(),
             },
+            # 阶段十四：Evidence Gate 配置（version / enabled / 阈值 / retry 映射）
+            "evidence_gate": gate_config(gate_enabled),
+            # 阶段十五：Self Reflection 配置（version / enabled / llm_enabled / 上限）
+            "self_reflection": reflection_config(reflection_enabled),
             "evaluation": {"accuracy_threshold": settings.EVAL_ACCURACY_THRESHOLD},
         }
 
@@ -488,6 +599,14 @@ class EvaluationService:
         dynamic_router: bool = False,
     ) -> CaseResult:
         """单条用例评估：RAG 问答 + 指标计算。失败不抛出，记录 error 并产出 0 分。
+
+        阶段十四：读取本次检索的 Evidence Gate 决策（RagService.last_gate_decision），
+        归档 gate_decision / gate_version / retry_strategy（Gate 关闭时为 None）。
+
+        阶段十五：读取本次生成的 Self Reflection 决策
+        （RagService.last_reflection_decision），归档 reflection_decision /
+        reflection_version / reflection_retry_strategy / reflection_reason
+        （Reflection 关闭时为 None）。
 
         TASK-009：标准答案缺失或待人工确认时，answer_correctness 记为 None，
         不参与均值（AGENTS.md：不得把未标注当成错误答案）。
@@ -509,6 +628,7 @@ class EvaluationService:
             use_strategy = strategy
             resource_types: list[str] | None = None
             analysis = None
+            decision = None  # 阶段十四：动态路由时供 Evidence Gate 选择 retry 策略
             if dynamic_router:
                 # 逐条 Analyzer → Router（两者均带兜底，失败不影响整批评估）
                 analysis, decision = self.rag.plan_retrieval(tc.question)
@@ -529,7 +649,39 @@ class EvaluationService:
                 strategy=use_strategy,
                 resource_types=resource_types,
                 analysis=analysis,
+                router_decision=decision if dynamic_router else None,
             )
+            # 阶段十四：归档本次检索的 Gate 决策（Gate 关闭时为 None）
+            gate_decision = getattr(self.rag, "last_gate_decision", None)
+            if gate_decision is not None:
+                base.gate_decision = gate_decision.decision
+                base.gate_version = gate_decision.gate_version
+                base.retry_strategy = (
+                    gate_decision.retry_strategy if gate_decision.retried else None
+                )
+                logger.info(
+                    f"Evidence Gate type={tc.question_type} "
+                    f"decision={gate_decision.decision} reason={gate_decision.reason} "
+                    f"q={tc.question[:30]}"
+                )
+            # 阶段十五：归档本次生成的 Self Reflection 决策
+            reflection_decision = getattr(self.rag, "last_reflection_decision", None)
+            if reflection_decision is not None:
+                base.reflection_decision = reflection_decision.decision
+                base.reflection_version = reflection_decision.reflection_version
+                base.reflection_retry_strategy = (
+                    reflection_decision.retry_strategy
+                    if reflection_decision.retried
+                    else None
+                )
+                base.reflection_reason = reflection_decision.reason[:255] or None
+                logger.info(
+                    f"Self Reflection type={tc.question_type} "
+                    f"decision={reflection_decision.decision} "
+                    f"issues={reflection_decision.issues} "
+                    f"retry={reflection_decision.reflection_retry_count} "
+                    f"revised={reflection_decision.revised} q={tc.question[:30]}"
+                )
             contexts = [h.get("content", "") for h in hits]
             cr = await self.metrics.context_relevancy(tc.question, contexts)
             base.answer = answer

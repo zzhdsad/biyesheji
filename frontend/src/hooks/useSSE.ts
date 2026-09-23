@@ -5,7 +5,9 @@ import type {
   Citation,
   EvidenceGroup,
   EvidenceSummary,
+  GateDecision,
   QueryAnalysis,
+  ReflectionDecision,
   RouterDecision,
 } from '@/types';
 import { getToken } from '@/services/token';
@@ -21,15 +23,26 @@ export interface SSEHandlers {
     query_analysis?: QueryAnalysis;
     router_decision?: RouterDecision;
   }) => void;
-  /** 阶段十：citations 事件在原 citations 之外附带多来源证据结构。 */
+  /** 阶段十/十四：citations 事件在原 citations 之外附带多来源证据结构与门控决策。 */
   onCitations?: (data: {
     citations: Citation[];
     evidence?: Citation[];
     evidence_groups?: EvidenceGroup[];
     evidence_summary?: EvidenceSummary;
+    /** 阶段十三：KG 证据切片 */
+    kg_evidence?: Citation[];
+    /** 阶段十四：Evidence Gate 决策（Gate 关闭时为 null） */
+    evidence_gate?: GateDecision | null;
   }) => void;
   onDelta?: (data: { content: string }) => void;
-  onDone?: (data: { conversation_id: string; message_id: string }) => void;
+  // 阶段十五：done 事件额外下发最终答案与自反思决策
+  // （流式答案可能被 revise 改写，answer 为最终权威文本；事件名与顺序不变）
+  onDone?: (data: {
+    conversation_id: string;
+    message_id: string;
+    answer?: string;
+    reflection?: ReflectionDecision | null;
+  }) => void;
   onError?: (data: { message: string }) => void;
 }
 
@@ -119,7 +132,14 @@ export async function streamSSE(
       }
     }
   }
-  // 流结束后若仍有未派发的事件，补派一次
+  // 流结束后仍有未处理的内容：先消费最后一行（未以换行结尾的行仍在 buffer 中），
+  // 再补派一次未结束的事件（阶段十六修复：尾部分块缺少换行时最后一个事件会被丢弃）
+  const tailLine = buffer;
+  if (tailLine.startsWith('event: ')) {
+    currentEvent = tailLine.slice(7).trim();
+  } else if (tailLine.startsWith('data: ')) {
+    pendingData += tailLine.slice(6);
+  }
   if (currentEvent && pendingData) {
     dispatch(currentEvent, pendingData);
   }

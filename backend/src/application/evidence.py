@@ -150,6 +150,20 @@ def hit_to_evidence(hit: dict, source_index: int) -> dict:
         "source_label": source_label,
         "evidence_text": content,
         "evidence_level": evidence_level(score),
+        # ── 阶段十四：KG 证据的关系属性（可选）───────────────────────────
+        # Evidence Gate 需要按「关系类型 + 跳数 + 来源」判断 KG 证据可信度，
+        # 不能只依赖 score（KG score 是实体匹配分，不是向量相似度）。
+        # 仅 KG 证据携带；Citation / Evidence 的 Pydantic 输出字段保持不变，
+        # 因此 API 响应结构与旧客户端解析不受影响。
+        **(
+            {
+                "kg_relation": hit.get("kg_relation"),
+                "kg_hop": hit.get("kg_hop"),
+                "kg_provenance": hit.get("kg_provenance"),
+            }
+            if is_kg
+            else {}
+        ),
     }
 
 

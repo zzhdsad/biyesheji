@@ -64,6 +64,13 @@ REFUSAL_ANSWER = (
     "请尝试更换提问方式，或确认知识库中已包含相关文档。"
 )
 
+# 阶段十四：Evidence Gate 判定证据不足时的拒答文案（保留证据/引用，禁止编造）。
+# 与 REFUSAL_ANSWER 同前缀，保证前端与既有测试对"拒答"的识别逻辑不变。
+GATE_REFUSAL_ANSWER = (
+    "根据现有资料，我无法回答该问题。当前检索到的证据不足以支撑可靠回答"
+    "（已换用其他检索策略重试仍未获得充分证据），请补充相关资料或调整提问方式。"
+)
+
 _CONTEXT_MARKER = "参考资料"
 # [citation: 1, 3] 或 [citation: 1]；页码可选，兼容有无空格
 _CITATION_PATTERN = re.compile(r"\[citation:\s*(\d+)\s*(?:,\s*(\d+)\s*)?\]", re.IGNORECASE)
@@ -86,6 +93,29 @@ from src.application.evidence import (  # noqa: E402
     build_evidence,
     hit_to_evidence,
     package_evidence,
+)
+from src.application.evidence_gate import (  # noqa: E402
+    DECISION_ACCEPT,
+    DECISION_RETRY,
+    EvidenceGate,
+    GateDecision,
+    fallback_gate_decision,
+    with_retry,
+)
+from src.application.self_reflection import (  # noqa: E402
+    CONSERVATIVE_ANSWER,
+    DECISION_ACCEPT as REFLECTION_ACCEPT,
+    DECISION_REVISE as REFLECTION_REVISE,
+    DECISION_RETRY as REFLECTION_RETRY,
+    SelfReflection,
+    ReflectionDecision,
+    build_revision_messages,
+    fallback_reflection_decision,
+    llm_consistency_check,
+    with_counts,
+    with_fallback,
+    with_reflection_retry,
+    with_revision,
 )
 from src.application.kg_retrieval import KgRetriever  # noqa: E402
 from src.application.query_analyzer import (  # noqa: E402
@@ -121,6 +151,8 @@ class RagService:
         analyzer: QueryAnalyzer | None = None,
         router: DynamicRouter | None = None,
         kg: KgRetriever | None = None,
+        gate: EvidenceGate | None = None,
+        reflector: SelfReflection | None = None,
     ) -> None:
         self.db = db
         # 运行时配置（DB 优先，env 兜底），供工厂选择后端
@@ -137,6 +169,14 @@ class RagService:
         self.router = router or DynamicRouter()
         # 阶段十三：KG 检索（可选来源，仅在策略开启时执行；失败不影响向量检索）
         self.kg = kg or KgRetriever(db)
+        # 阶段十四：Evidence Gate（Vector + KG 证据合并后的统一质量判断）
+        self.gate = gate or EvidenceGate()
+        # 本次问答的 Gate 决策（供 /chat/ask 输出；旧调用方不感知，默认 None）
+        self.last_gate_decision: GateDecision | None = None
+        # 阶段十五：Self Reflection（生成之后的答案忠实性检查）
+        self.reflector = reflector or SelfReflection()
+        # 本次问答的 Reflection 决策（供 /chat/ask 输出；默认 None）
+        self.last_reflection_decision: ReflectionDecision | None = None
 
     async def _ensure_components(self) -> None:
         """惰性加载运行时配置并初始化 embedding/llm/rerank/hyde。
@@ -163,11 +203,21 @@ class RagService:
         strategy: RetrievalStrategy | None = None,
         resource_types: list[str] | None = None,
         analysis: QueryAnalysis | None = None,
+        router_decision: RouterDecision | None = None,
     ) -> tuple[str, list[dict]]:
         """RAG 检索+生成核心（不持久化，供评估与编排复用）。
 
         流程：HyDE 改写 → 混合检索 → RRF 融合 → Rerank → 上下文拼接 → LLM 生成。
         不写会话/消息/缓存，避免评估批量调用污染聊天记录。
+
+        阶段十四：Rerank 之后、生成之前插入 Evidence Gate（Vector + KG 证据合并
+        后的统一质量判断）；Gate 判为 insufficient 时返回拒答文案并保留 hits
+        （证据/引用仍可展示），retry 时最多换一次已有策略。
+        阶段十五：生成之后插入 Self Reflection（accept / revise / retry）。
+
+        阶段十五：生成之后插入 Self Reflection（答案是否忠实使用了这些证据）：
+        revise = 基于同一份证据重写一次（最多一次），retry = 换策略重检索一次
+        （最多一次，与 Gate retry 分别计数）。Reflection 自身异常不影响原答案。
 
         Args:
             kb_ids: 检索范围（权限隔离，禁止越权）
@@ -178,6 +228,8 @@ class RagService:
             resource_types: 动态策略（multi_source）运行时解析出的资源类型过滤
             analysis: 阶段十三 QueryAnalysis（KG 策略需要实体做图遍历；未提供时
                 由本方法内部调用 Analyzer 补算，保证 KG 永远由结构化分析驱动）
+            router_decision: 阶段十四 RouterDecision（Gate 需要当前策略名以选择
+                retry 策略；未提供时回退 strategy.name）
 
         Returns:
             (answer, hits) — hits 含 doc_name/content/page_num/title_path/score，
@@ -199,6 +251,22 @@ class RagService:
             kb_ids, question, strategy, resource_types, analysis=analysis
         )
 
+        # 阶段十四：Evidence Gate（Vector + KG 证据合并后的统一质量判断）
+        # - accept：继续生成（行为与阶段十三完全一致）
+        # - retry：换一个已注册的检索策略重试一次（最多一次）
+        # - insufficient：返回拒答文案 + 保留 hits（证据/引用仍展示），不调用 LLM
+        hits, gate_decision = await self._apply_evidence_gate(
+            kb_ids, question, hits, analysis, router_decision, strategy
+        )
+        self.last_gate_decision = gate_decision
+        if gate_decision is not None and gate_decision.decision != DECISION_ACCEPT:
+            logger.info(
+                f"Evidence Gate 判定 {gate_decision.decision}（{gate_decision.reason}）"
+                f" evidence={gate_decision.evidence_count} "
+                f"accepted={gate_decision.accepted_count} q={question[:30]!r}"
+            )
+            return GATE_REFUSAL_ANSWER, hits
+
         # 相关性门槛（PRD §8.3 幻觉兜底）：Top 候选稠密相似度均低于阈值 →
         # 仅词语重叠、答非所问（如问"你觉得产品如何"仅命中含"产品"的 PRD），
         # 直接拒答且不调用 LLM，杜绝模型用通用知识补答
@@ -215,6 +283,23 @@ class RagService:
             logger.error(f"RAG 生成失败: {exc}")
             raise AppException(422, f"回答生成失败：{exc}") from exc
         answer = answer.strip() or "（模型未返回内容，请重试）"
+
+        # 阶段十五：Self Reflection（答案忠实性检查；异常不影响原答案）
+        answer, hits, gate_decision, _reflection = await self._reflect_and_finalize(
+            kb_ids=kb_ids,
+            question=question,
+            history=history,
+            analysis=analysis,
+            hits=hits,
+            gate_decision=gate_decision,
+            answer=answer,
+            strategy_name=(
+                router_decision.strategy_name
+                if router_decision is not None
+                else (strategy.name if strategy is not None else None)
+            ),
+            allow_retry=True,
+        )
         return answer, hits
 
     async def _retrieve(
@@ -361,6 +446,401 @@ class RagService:
             return False
         return True
 
+    def evaluate_evidence_gate(
+        self,
+        hits: list[dict],
+        analysis: QueryAnalysis | None = None,
+        router_decision: RouterDecision | None = None,
+        *,
+        allow_retry: bool = True,
+        strategy_name: str | None = None,
+    ) -> GateDecision | None:
+        """阶段十四：检索命中 → 统一 Evidence → Gate 决策。
+
+        - Gate 关闭（settings.EVIDENCE_GATE_ENABLED=False）返回 None，
+          调用方按阶段十三及之前的行为继续（不拦截）。
+        - Gate 自身异常由 EvidenceGate 内部兜底为 accept（is_valid=False）；
+          此处再兜一层，保证门控永远不会让问答失败（非单点故障）。
+        """
+        if not getattr(self.gate, "enabled", False):
+            return None
+        try:
+            evidence = build_evidence(hits)
+            return self.gate.evaluate(
+                evidence,
+                analysis,
+                router_decision,
+                allow_retry=allow_retry,
+                strategy_name=strategy_name,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Evidence Gate 不可用，安全放行: {exc}")
+            return fallback_gate_decision(
+                f"gate_unavailable: {exc}", len(hits or [])
+            )
+
+    async def _apply_evidence_gate(
+        self,
+        kb_ids: list[uuid.UUID],
+        question: str,
+        hits: list[dict],
+        analysis: QueryAnalysis | None,
+        router_decision: RouterDecision | None,
+        strategy: RetrievalStrategy | None,
+    ) -> tuple[list[dict], GateDecision | None]:
+        """阶段十四：执行 Gate，并在 retry 判定时换策略重试（**最多一次**）。
+
+        返回 (最终 hits, GateDecision)：
+        - retry 后重新评估一次（allow_retry=False），仍不足即 insufficient；
+        - retry 未改善（被接受证据数变少）时保留原 hits，决策按最终评估给出；
+        - retry 检索异常 → 保留原 hits 与原决策（不因重试失败丢证据）。
+        """
+        if not getattr(self.gate, "enabled", False):
+            return hits, None
+
+        strategy_name = (
+            router_decision.strategy_name
+            if router_decision is not None
+            else (strategy.name if strategy is not None else None)
+        )
+        decision = self.evaluate_evidence_gate(
+            hits, analysis, router_decision, strategy_name=strategy_name
+        )
+        if decision is None or decision.decision != DECISION_RETRY:
+            return hits, decision
+        if not decision.retry_strategy:
+            return hits, decision
+
+        retry_strategy = get_strategy(decision.retry_strategy)
+        if retry_strategy is None:
+            return hits, decision
+
+        original = decision.original_strategy or strategy_name
+        retry_reason = decision.reason
+        logger.info(
+            f"Evidence Gate 建议重试（{retry_reason}）: "
+            f"{original} → {decision.retry_strategy}"
+        )
+        # retry 策略可能需要 QueryAnalysis（multi_source 运行时过滤 / KG 图遍历）
+        ana = analysis if analysis is not None else self.analyze_query(question)
+        retry_types: list[str] | None = None
+        if retry_strategy.resource_types_from_analysis:
+            retry_types = list(ana.resource_types or [])
+
+        try:
+            retry_hits = await self._retrieve(
+                kb_ids, question, retry_strategy, retry_types, analysis=ana
+            )
+        except Exception as exc:  # noqa: BLE001  重试失败不应丢掉原结果
+            logger.warning(f"Evidence Gate retry 检索失败，保留原结果: {exc}")
+            return hits, decision
+
+        final = self.evaluate_evidence_gate(
+            retry_hits,
+            ana,
+            router_decision,
+            allow_retry=False,
+            strategy_name=decision.retry_strategy,
+        )
+        merged = with_retry(
+            final if final is not None else decision,
+            original_strategy=original,
+            retry_strategy=decision.retry_strategy,
+            retry_reason=retry_reason,
+        )
+        # retry 未改善 → 保留原证据（引用仍可展示），决策按最终评估给出
+        if final is not None and final.accepted_count < decision.accepted_count:
+            return hits, merged
+        return retry_hits, merged
+
+    # ── 阶段十五：Self Reflection（生成之后）───────────────────────────────
+
+    def evaluate_reflection(
+        self,
+        answer: str,
+        hits: list[dict],
+        *,
+        query: str = "",
+        analysis: QueryAnalysis | None = None,
+        gate_decision: GateDecision | None = None,
+        allow_retry: bool = True,
+        allow_revise: bool = True,
+        strategy_name: str | None = None,
+        llm_findings: dict | None = None,
+        counts: dict | None = None,
+    ) -> ReflectionDecision | None:
+        """阶段十五：Answer + Evidence + GateDecision → ReflectionDecision。
+
+        - Reflection 关闭（settings.SELF_REFLECTION_ENABLED=False）返回 None，
+          调用方按阶段十四行为继续（不反思）。
+        - Reflection 自身异常由 SelfReflection 内部兜底为 accept（is_valid=False）；
+          此处再兜一层，保证反思永远不会让问答失败（非单点故障）。
+        """
+        if not getattr(self.reflector, "enabled", False):
+            return None
+        try:
+            return self.reflector.evaluate(
+                answer,
+                hits,
+                query=query,
+                query_analysis=analysis,
+                gate_decision=gate_decision,
+                allow_retry=allow_retry,
+                allow_revise=allow_revise,
+                strategy_name=strategy_name,
+                llm_findings=llm_findings,
+                counts=counts,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Self Reflection 不可用，保留原答案: {exc}")
+            return fallback_reflection_decision(
+                f"reflection_unavailable: {exc}", len(hits or [])
+            )
+
+    async def _llm_consistency_check(
+        self, question: str, hits: list[dict], answer: str
+    ) -> dict | None:
+        """可选 LLM 一致性检查（单次调用，超时/异常都不影响链路）。
+
+        关闭或不可用返回 None（调用方按"不采纳 LLM 结论"处理）。
+        """
+        reflector = getattr(self, "reflector", None)
+        if reflector is None or not getattr(reflector, "enabled", False):
+            return None
+        if not getattr(reflector, "llm_enabled", False):
+            return None
+        if self.llm is None:
+            await self._ensure_components()
+        if self.llm is None:
+            return None
+        try:
+            findings = await llm_consistency_check(
+                self.llm, question, build_evidence(hits), answer
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"LLM Reflection 不可用，回落到规则反思: {exc}")
+            return None
+        if findings.get("error"):
+            logger.info(f"LLM Reflection 结论不可用: {findings.get('error')}")
+        logger.info(
+            f"LLM Reflection supported={findings.get('supported')} "
+            f"claims={len(findings.get('unsupported_claims') or [])} q={question[:30]!r}"
+        )
+        return findings
+
+    async def _revise_answer(
+        self, question: str, hits: list[dict], answer: str
+    ) -> tuple[str, bool]:
+        """revise：基于**现有证据**重写一次更保守的答案（不重新检索，最多一次）。
+
+        Returns:
+            (revised_answer, ok) — ok=False 表示 LLM 调用失败，保留原答案。
+        """
+        try:
+            await self._ensure_components()
+            messages = build_revision_messages(question, build_evidence(hits), answer)
+            revised = await self.llm.chat(messages)  # type: ignore[union-attr]
+            revised = (revised or "").strip()
+            if not revised:
+                return answer, False
+            return revised, True
+        except Exception as exc:  # noqa: BLE001  revise 失败不得影响原答案
+            logger.warning(f"Reflection revise 失败，保留原答案: {exc}")
+            return answer, False
+
+    async def _generate_answer(
+        self, question: str, hits: list[dict], history: list[dict] | None = None
+    ) -> str:
+        """按既有 Prompt 结构（System + 历史 + 带编号资料）生成一次答案。"""
+        await self._ensure_components()
+        user_prompt = self._build_user_prompt(question, hits)
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            *(history or []),
+            {"role": "user", "content": user_prompt},
+        ]
+        answer = await self.llm.chat(messages)  # type: ignore[union-attr]
+        return (answer or "").strip() or "（模型未返回内容，请重试）"
+
+    async def _reflect_and_finalize(
+        self,
+        *,
+        kb_ids: list[uuid.UUID],
+        question: str,
+        history: list[dict] | None,
+        analysis: QueryAnalysis | None,
+        hits: list[dict],
+        gate_decision: GateDecision | None,
+        answer: str,
+        strategy_name: str | None,
+        allow_retry: bool,
+    ) -> tuple[str, list[dict], GateDecision | None, ReflectionDecision | None]:
+        """阶段十五：生成之后执行 Self Reflection 并产出最终答案。
+
+        流程（次数上限严格受限）：
+        1. accept → 原答案返回
+        2. revise → 基于同一份证据重写一次（最多一次），重写后不再 revise/retry
+        3. retry  → 换策略重检索一次（最多一次）→ Gate（不再给 Gate retry）
+                    → 重新生成 → 再反思一次；仍失败 → 保守回答
+        计数：gate_retry_count / reflection_retry_count / total_retry_count
+        分别记录，保证总数有界（Gate ≤1 + Reflection ≤1）。
+
+        Returns:
+            (final_answer, final_hits, gate_decision, reflection_decision)
+        """
+        if not getattr(self.reflector, "enabled", False):
+            self.last_reflection_decision = None
+            return answer, hits, gate_decision, None
+
+        # Gate retry 次数直接引用 GateDecision（不重复计算 Gate）
+        counts: dict = {
+            "gate_retry_count": 1 if getattr(gate_decision, "retried", False) else 0,
+            "reflection_retry_count": 0,
+            "revised": False,
+        }
+        ana = analysis if analysis is not None else self.analyze_query(question)
+        findings = await self._llm_consistency_check(question, hits, answer)
+        decision = self.evaluate_reflection(
+            answer,
+            hits,
+            query=question,
+            analysis=ana,
+            gate_decision=gate_decision,
+            allow_retry=allow_retry,
+            allow_revise=True,
+            strategy_name=strategy_name,
+            llm_findings=findings,
+            counts=counts,
+        )
+        if decision is None:
+            self.last_reflection_decision = None
+            return answer, hits, gate_decision, None
+
+        if decision.decision == REFLECTION_ACCEPT:
+            self.last_reflection_decision = decision
+            return answer, hits, gate_decision, decision
+
+        if decision.decision == REFLECTION_REVISE:
+            logger.info(f"Self Reflection revise: {decision.reason} q={question[:30]!r}")
+            revised, ok = await self._revise_answer(question, hits, answer)
+            counts["revised"] = ok
+            final = self.evaluate_reflection(
+                revised,
+                hits,
+                query=question,
+                analysis=ana,
+                gate_decision=gate_decision,
+                allow_retry=False,  # revise 之后不再 retry（预算有界）
+                allow_revise=False,  # revise 最多一次
+                strategy_name=strategy_name,
+                llm_findings=None,
+                counts=counts,
+            )
+            if final is None:
+                final = decision
+            final = with_counts(with_revision(final), counts)
+            if not ok:
+                final = with_fallback(final, "revision_failed")
+            self.last_reflection_decision = final
+            return (revised if ok else answer), hits, gate_decision, final
+
+        # ── DECISION_RETRY：换策略重检索一次（最多一次）─────────────────────
+        retry_strategy = get_strategy(decision.retry_strategy or "")
+        if not allow_retry or retry_strategy is None:
+            # 无可用 retry 预算/策略：沿用降级后的决策，保留原答案与证据
+            final = with_counts(decision, counts)
+            self.last_reflection_decision = final
+            return answer, hits, gate_decision, final
+
+        logger.info(
+            f"Self Reflection retry: {decision.reason} → "
+            f"{decision.retry_strategy} q={question[:30]!r}"
+        )
+        counts["reflection_retry_count"] += 1
+        retry_types: list[str] | None = None
+        if retry_strategy.resource_types_from_analysis:
+            retry_types = list(ana.resource_types or [])
+        try:
+            retry_hits = await self._retrieve(
+                kb_ids, question, retry_strategy, retry_types, analysis=ana
+            )
+        except Exception as exc:  # noqa: BLE001  重试失败不得丢掉原结果
+            logger.warning(f"Self Reflection retry 检索失败，保留原结果: {exc}")
+            final = with_fallback(with_counts(decision, counts), "reflection_retry_failed")
+            self.last_reflection_decision = final
+            return answer, hits, gate_decision, final
+
+        # retry 之后重新执行 Gate（不再给 Gate retry，避免与 Reflection retry 叠加）
+        retry_gate = self.evaluate_evidence_gate(
+            retry_hits,
+            ana,
+            None,
+            allow_retry=False,
+            strategy_name=retry_strategy.name,
+        )
+        if retry_gate is not None and retry_gate.decision != DECISION_ACCEPT:
+            # 仍然拿不到足够的证据 → 进入最终保守回答（禁止模型编造）
+            logger.info("Self Reflection retry 后 Gate 仍判定不足，进入保守回答")
+            final = with_reflection_retry(
+                with_counts(decision, counts),
+                original_strategy=strategy_name,
+                retry_strategy=retry_strategy.name,
+                retry_reason=decision.reason,
+            )
+            self.last_reflection_decision = final
+            return CONSERVATIVE_ANSWER, retry_hits, retry_gate, final
+
+        try:
+            retry_answer = await self._generate_answer(question, retry_hits, history)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Self Reflection retry 生成失败，保留原答案: {exc}")
+            final = with_fallback(with_counts(decision, counts), "reflection_retry_generate_failed")
+            self.last_reflection_decision = final
+            return answer, hits, gate_decision, final
+
+        retry_findings = await self._llm_consistency_check(question, retry_hits, retry_answer)
+        final = self.evaluate_reflection(
+            retry_answer,
+            retry_hits,
+            query=question,
+            analysis=ana,
+            gate_decision=retry_gate,
+            allow_retry=False,  # Reflection retry 最多一次
+            allow_revise=True,
+            strategy_name=retry_strategy.name,
+            llm_findings=retry_findings,
+            counts=counts,
+        )
+        if final is not None and final.decision == REFLECTION_REVISE:
+            revised, ok = await self._revise_answer(question, retry_hits, retry_answer)
+            counts["revised"] = ok
+            after = self.evaluate_reflection(
+                revised,
+                retry_hits,
+                query=question,
+                analysis=ana,
+                gate_decision=retry_gate,
+                allow_retry=False,
+                allow_revise=False,
+                strategy_name=retry_strategy.name,
+                llm_findings=None,
+                counts=counts,
+            )
+            final = with_counts(with_revision(after or final), counts)
+            if not ok:
+                final = with_fallback(final, "revision_failed")
+            retry_answer = revised if ok else retry_answer
+
+        # retry 未改善（比如反思仍认为答案超出证据）→ 保留 retry 后的证据，原样返回
+        final = with_reflection_retry(
+            with_counts(final if final is not None else decision, counts),
+            original_strategy=strategy_name,
+            retry_strategy=retry_strategy.name,
+            retry_reason=decision.reason,
+        )
+        self.last_reflection_decision = final
+        return retry_answer, retry_hits, retry_gate, final
+
     def _hits_to_citations(self, hits: list[dict]) -> list[dict]:
         """将检索命中转为引用来源（BUSINESS_RULES §6：只展示相关度 ≥ 0.3 的引用）。
 
@@ -379,7 +859,7 @@ class RagService:
         return build_evidence(hits)
 
     @staticmethod
-    def _evidence_payload(citations: list[dict]) -> dict:
+    def _evidence_payload(citations: list[dict], gate: dict | None = None) -> dict:
         """构造 SSE citations 事件 data：兼容旧 citations，并附加阶段十证据结构。
 
         返回 {"citations", "evidence", "evidence_groups", "evidence_summary"}：
@@ -387,6 +867,7 @@ class RagService:
         - evidence：统一 Evidence 列表（与 citations 同内容，语义更明确）
         - evidence_groups：多来源分组（document / herb / prescription / ...）
         - evidence_summary：证据数、来源数、分组数、各等级数量
+        - evidence_gate（阶段十四，可选）：Gate 决策 dict；Gate 关闭时为 None
         """
         groups, summary = package_evidence(citations)
         return {
@@ -398,6 +879,8 @@ class RagService:
             "kg_evidence": [
                 c for c in citations if c.get("source_kind") == SOURCE_KIND_KG
             ],
+            # 阶段十四：证据门控决策（事件名与顺序不变，旧客户端忽略新增字段即可）
+            "evidence_gate": gate,
         }
 
     def analyze_query(self, question: str) -> QueryAnalysis:
@@ -491,7 +974,7 @@ class RagService:
         answer, hits = await self.retrieve_and_answer(
             kb_ids, question, history,
             strategy=strategy, resource_types=resource_types,
-            analysis=query_analysis,
+            analysis=query_analysis, router_decision=router_decision,
         )
 
         # 引用后处理：解析答案中的 [citation: 编号, 页码] → 引用来源；无标记时兜底全部来源
@@ -571,10 +1054,19 @@ class RagService:
 
         # 检索+重排核心（不持久化；阶段十二按路由选择的策略执行；
         # 阶段十三透传 QueryAnalysis，供 KG 策略做图遍历）
+        # 阶段十五：拒绝/保守分支不进入生成，不产出 Reflection
+        self.last_reflection_decision = None
         hits = await self._retrieve(
             kb_ids, question, strategy=strategy, resource_types=resource_types,
             analysis=query_analysis,
         )
+
+        # 阶段十四：Evidence Gate（含最多一次 retry）；Gate 关闭时返回 None
+        hits, gate_decision = await self._apply_evidence_gate(
+            kb_ids, question, hits, query_analysis, router_decision, strategy
+        )
+        self.last_gate_decision = gate_decision
+        gate_payload = gate_decision.to_dict() if gate_decision is not None else None
 
         if not self._is_relevant(hits):
             # 相关性门槛（PRD §8.3 幻觉兜底）：答非所问时直接拒答，不送 LLM，
@@ -582,11 +1074,30 @@ class RagService:
             logger.info(f"检索相关性不足，拒答: question={question[:50]!r}")
             citations: list[dict] = []
             answer = REFUSAL_ANSWER
-            yield {"event": "citations", "data": self._evidence_payload(citations)}
+            yield {
+                "event": "citations",
+                "data": self._evidence_payload(citations, gate_payload),
+            }
+            yield {"event": "delta", "data": {"content": answer}}
+        elif gate_decision is not None and gate_decision.decision != DECISION_ACCEPT:
+            # 阶段十四：证据不足 → 拒答 + 保留证据/引用（禁止模型编造）
+            logger.info(
+                f"Evidence Gate 判定 {gate_decision.decision}"
+                f"（{gate_decision.reason}），拒答: question={question[:50]!r}"
+            )
+            citations = self._hits_to_citations(hits)
+            answer = GATE_REFUSAL_ANSWER
+            yield {
+                "event": "citations",
+                "data": self._evidence_payload(citations, gate_payload),
+            }
             yield {"event": "delta", "data": {"content": answer}}
         else:
             citations = self._hits_to_citations(hits)
-            yield {"event": "citations", "data": self._evidence_payload(citations)}
+            yield {
+                "event": "citations",
+                "data": self._evidence_payload(citations, gate_payload),
+            }
 
             # 构造 Prompt 并流式生成
             user_prompt = self._build_user_prompt(question, hits)
@@ -602,6 +1113,21 @@ class RagService:
                 yield {"event": "error", "data": {"message": f"回答生成失败：{exc}"}}
                 return
             answer = "".join(answer_parts).strip() or "（模型未返回内容，请重试）"
+
+            # 阶段十五：Self Reflection（流式路径 Citations 事件已先发出，
+            # 因此不做 Reflection retry——换检索策略会导致证据与已下发 citations
+            # 不一致；此处只允许 accept / revise，且 revise 不改变 Evidence）
+            answer, _hits, _gate, _reflection = await self._reflect_and_finalize(
+                kb_ids=kb_ids,
+                question=question,
+                history=history,
+                analysis=query_analysis,
+                hits=hits,
+                gate_decision=gate_decision,
+                answer=answer,
+                strategy_name=router_decision.strategy_name,
+                allow_retry=False,
+            )
 
         elapsed_ms = int((asyncio.get_event_loop().time() - started_at) * 1000)
         logger.info(
@@ -622,11 +1148,20 @@ class RagService:
         # 同步追加到 Redis 缓存（24h TTL，自动裁剪至最近 N 轮）
         await self.cache.append_message(conversation.id, "user", question)
         await self.cache.append_message(conversation.id, "assistant", answer)
+        reflection_decision = self.last_reflection_decision
         yield {
             "event": "done",
             "data": {
                 "conversation_id": str(conversation.id),
                 "message_id": str(assistant.id),
+                # 阶段十五：Reflection 可能把流式答案改写为更保守的版本，
+                # done 事件下发最终权威文本（事件名与顺序不变，旧客户端忽略即可）
+                "answer": answer,
+                "reflection": (
+                    reflection_decision.to_dict()
+                    if reflection_decision is not None
+                    else None
+                ),
             },
         }
 
