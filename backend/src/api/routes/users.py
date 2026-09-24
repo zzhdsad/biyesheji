@@ -28,6 +28,8 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.config import settings
+from src.core.deps import require_admin
 from src.core.exceptions import PermissionDeniedError
 from src.core.security import generate_random_password, hash_password
 from src.domain.models import User
@@ -38,7 +40,11 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 ALLOWED_ROLES = {"admin", "member", "viewer"}
 CSV_HEADERS = ["username", "name", "department", "email", "role"]
-TRASH_RETENTION_DAYS = 7  # 回收站保留天数
+
+# BUG-069：回收站保留天数**统一读 settings.TRASH_RETENTION_DAYS**（1-30 天可配），
+# 不再在本模块写死 7 天——否则通过 /settings/system 把保留期改成 3 天后，
+# 用户模块的清理时机与"X 天内可恢复"提示仍按旧口径输出。
+# 注意：必须在**函数内**读取，import 时固化成常量等于换了个地方写死。
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
@@ -123,7 +129,10 @@ class BatchDeleteResult(BaseModel):
 
     total: int
     success: int
-    message: str = "已移入回收站，7 天内可恢复"
+    # BUG-069：文案跟随配置（default_factory 每次实例化时求值，避免 import 期固化）
+    message: str = Field(
+        default_factory=lambda: f"已移入回收站，{settings.TRASH_RETENTION_DAYS} 天内可恢复"
+    )
 
 
 class BatchDeleteErrorResponse(BaseModel):
@@ -137,10 +146,12 @@ class BatchDeleteErrorResponse(BaseModel):
 
 
 def _require_admin(request: Request) -> User:
-    user: User = request.state.user
-    if user.role != "admin":
-        raise PermissionDeniedError("仅管理员可操作用户")
-    return user
+    """仅 admin 可操作用户。
+
+    实现收敛到 src.core.deps.require_admin（BUG-068），业务文案与返回值保持不变
+    （返回值被用于"操作者 = 当前管理员"的场景）。
+    """
+    return require_admin(request, "仅管理员可操作用户")
 
 
 async def _get_active_user(db: AsyncSession, user_id: uuid.UUID) -> User | None:
@@ -178,8 +189,8 @@ async def _ensure_admin_kept(
 
 
 async def _purge_expired_trash(db: AsyncSession) -> None:
-    """清理回收站中超过 7 天的用户（硬删除）。"""
-    cutoff = utcnow() - timedelta(days=TRASH_RETENTION_DAYS)
+    """清理回收站中超过保留期的用户（硬删除，保留天数见 settings.TRASH_RETENTION_DAYS）。"""
+    cutoff = utcnow() - timedelta(days=settings.TRASH_RETENTION_DAYS)
     expired = (
         await db.scalars(
             select(User).where(User.deleted_at < cutoff)
@@ -288,7 +299,8 @@ async def delete_user(
 
     user.deleted_at = utcnow()
     await db.commit()
-    return {"message": "用户已移入回收站，7 天内可恢复"}
+    days = settings.TRASH_RETENTION_DAYS
+    return {"message": f"用户已移入回收站，{days} 天内可恢复"}
 
 
 @router.post("/{user_id}/disable")
@@ -429,12 +441,19 @@ async def batch_restore_users(
     _require_admin(request)
 
     errors: list[str] = []
-    # 先把要恢复的用户全取出来
+    # BUG-071：原先是 select(User) 全表加载（连带 hashed_password 一起进内存，
+    # 且没有 deleted_at 过滤），用户量增长后一次批量恢复会拖垮整个请求。
+    # 改为：只查本次要恢复的用户 + 只查可能与它们冲突的**活跃**用户。
     to_restore: list[User] = []
-    users_by_id = {u.id: u for u in (await db.scalars(select(User))).all()}
+    candidates = {
+        u.id: u
+        for u in (
+            await db.scalars(select(User).where(User.id.in_(payload.user_ids)))
+        ).all()
+    }
 
     for uid in payload.user_ids:
-        u = users_by_id.get(uid)
+        u = candidates.get(uid)
         if u is None:
             errors.append(f"用户 {uid}：不存在")
             continue
@@ -444,8 +463,19 @@ async def batch_restore_users(
         to_restore.append(u)
 
     # 冲突检查：恢复后 email/username 不能与活跃用户冲突
-    active_emails = {u.email for u in users_by_id.values() if u.deleted_at is None}
-    active_usernames = {u.username for u in users_by_id.values() if u.deleted_at is None}
+    # 只按待恢复用户当前的 email / username 精确查询，而不是把全表拉进内存比对
+    restore_emails = [u.email for u in to_restore]
+    restore_usernames = [u.username for u in to_restore]
+    active_rows = (
+        await db.scalars(
+            select(User).where(
+                User.deleted_at.is_(None),
+                User.email.in_(restore_emails) | User.username.in_(restore_usernames),
+            )
+        )
+    ).all() if to_restore else []
+    active_emails = {row.email for row in active_rows}
+    active_usernames = {row.username for row in active_rows}
     for u in to_restore:
         if u.email in active_emails:
             errors.append(f"用户 {u.username}：邮箱 {u.email} 已被占用，无法恢复")

@@ -26,6 +26,8 @@ Query → HyDE → BGE-M3 Dense+Sparse → RRF → Reranker → Gate → 【Evid
 
 from __future__ import annotations
 
+import hashlib
+
 from src.core.config import settings
 
 # ── 来源类别（已有概念，Stage 4-4 引入，继续复用）────────────────────────────
@@ -80,6 +82,23 @@ def hit_score(hit: dict) -> float:
 def is_resource_hit(hit: dict) -> bool:
     """判断命中是否来自 Resource（Stage 4-4 判定逻辑，保持一致）。"""
     return hit.get("source_kind") == SOURCE_KIND_RESOURCE or bool(hit.get("resource_type"))
+
+
+def stable_evidence_id(source_kind: str, source_id: str | None, content: str) -> str:
+    """为"没有 chunk_id 的命中"生成稳定且不重复的 evidence_id（BUG-063）。
+
+    为什么不能用 source_index：它是**展示位次**（重排后可变），混进主键会导致
+    同一条证据在不同请求 / 不同排序下得到不同 evidence_id，前端无法用它做 React key
+    或做"这条证据是否已在展示列表里"的判断。
+
+    为什么不能只用 source_kind + source_id：同一个来源（同一味中药 / 同一篇文献）
+    会切出多个 chunk，只用来源维度会让多条不同证据撞成同一个 id。
+
+    方案：`来源身份 + 内容摘要`。内容摘要对同一条 chunk 恒定，对不同 chunk 区分，
+    与命中顺序无关，因此既稳定又可区分。
+    """
+    digest = hashlib.sha256((content or "").encode("utf-8")).hexdigest()[:12]
+    return f"{source_kind}:{source_id}:{digest}"
 
 
 def hit_to_evidence(hit: dict, source_index: int) -> dict:
@@ -144,7 +163,11 @@ def hit_to_evidence(hit: dict, source_index: int) -> dict:
         "resource_id": hit.get("resource_id") if is_resource else None,
         "resource_name": hit.get("resource_name") if is_resource else None,
         # ── 阶段十：统一 Evidence 访问入口 ──────────────────────────────
-        "evidence_id": str(chunk_id) if chunk_id else f"{source_kind}:{source_id}:{source_index}",
+        # BUG-063：有 chunk_id 时用 chunk_id（天然稳定）；否则用"来源 + 内容摘要"，
+        # 不再掺入 source_index（展示位次，随重排变化）
+        "evidence_id": (
+            str(chunk_id) if chunk_id else stable_evidence_id(source_kind, source_id, content)
+        ),
         "source_id": str(source_id) if source_id is not None else None,
         "source_name": source_name,
         "source_label": source_label,

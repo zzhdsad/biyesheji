@@ -32,6 +32,8 @@ import { createKb, deleteKb, fetchKnowledgeBases, updateKb } from '@/services/ap
 import { useChatStore } from '@/stores/chatStore';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
+// BUG-059：窗口渲染，避免一次性渲染上千张卡片阻塞主线程
+import { KB_WINDOW_SIZE, clampVisibleCount, nextVisibleCount } from '@/utils/pagination';
 
 interface KbFormValues {
   name: string;
@@ -44,6 +46,8 @@ export default function KBPage() {
 
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [loading, setLoading] = useState(false);
+  // 当前渲染窗口大小；只影响本页渲染数量，不影响 GET /kb 请求参数
+  const [visibleCount, setVisibleCount] = useState(KB_WINDOW_SIZE);
 
   // 创建弹窗
   const [createForm] = Form.useForm<KbFormValues>();
@@ -60,6 +64,8 @@ export default function KBPage() {
     try {
       const list = await fetchKnowledgeBases();
       setKbs(list);
+      // 重新加载后重置窗口（数据变化后旧窗口值可能越界）
+      setVisibleCount(KB_WINDOW_SIZE);
     } catch {
       message.error('知识库列表加载失败');
     } finally {
@@ -132,6 +138,11 @@ export default function KBPage() {
     }
   };
 
+  // 窗口内的卡片；clampVisibleCount 保证"数据变少"时不会残留越界窗口
+  const renderedCount = clampVisibleCount(kbs.length, visibleCount);
+  const visibleKbs = kbs.slice(0, renderedCount);
+  const hasMore = kbs.length > renderedCount;
+
   const headerLeft = <h2 style={{ margin: 0 }}>知识库管理</h2>;
   const headerRight = (
     <Space size="large" align="center">
@@ -148,11 +159,11 @@ export default function KBPage() {
   return (
     <AppLayout pageTitle="" headerLeft={headerLeft} headerRight={headerRight}>
       <Spin spinning={loading}>
-        {kbs.length === 0 ? (
+        {visibleKbs.length === 0 ? (
           <Empty description="暂无知识库" />
         ) : (
           <Row gutter={[16, 16]}>
-            {kbs.map((kb) => (
+            {visibleKbs.map((kb) => (
               <Col key={kb.id} xs={24} sm={12} lg={8}>
                 <Card
                   title={
@@ -220,6 +231,13 @@ export default function KBPage() {
               </Col>
             ))}
           </Row>
+        )}
+        {hasMore && (
+          <div style={{ marginTop: 16, textAlign: 'center' }}>
+            <Button onClick={() => setVisibleCount((cur) => nextVisibleCount(kbs.length, cur))}>
+              加载更多（已显示 {renderedCount} / 共 {kbs.length}）
+            </Button>
+          </div>
         )}
       </Spin>
 

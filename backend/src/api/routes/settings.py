@@ -13,8 +13,7 @@ from src.application.model_config_service import (
     ModelConfigService,
     invalidate_config_cache,
 )
-from src.core.deps import get_current_user, get_db
-from src.core.exceptions import PermissionDeniedError
+from src.core.deps import get_current_user, get_db, require_admin
 from src.infrastructure.llm import OpenAICompatibleLLM
 from src.utils.net import assert_safe_public_url
 
@@ -22,10 +21,11 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 
 def _require_admin(request: Request) -> None:
-    """模型配置属全局配置，仅系统管理员可修改/测试。"""
-    user = request.state.user
-    if user.role != "admin":
-        raise PermissionDeniedError("仅管理员可修改模型配置")
+    """模型配置属全局配置，仅系统管理员可修改/测试。
+
+    实现收敛到 src.core.deps.require_admin（BUG-068），业务文案保持不变。
+    """
+    require_admin(request, "仅管理员可修改模型配置")
 
 
 class ModelConfigUpdate(BaseModel):
@@ -170,11 +170,8 @@ async def update_system_config(
     """更新系统级配置（仅 admin）。"""
     from src.domain.models import SystemConfig
     from src.core.config import settings as cfg
-    from src.core.exceptions import PermissionDeniedError
 
-    user = request.state.user
-    if user.role != "admin":
-        raise PermissionDeniedError("仅管理员可修改系统配置")
+    require_admin(request, "仅管理员可修改系统配置")
 
     row = await db.get(SystemConfig, 1)
     if row is None:

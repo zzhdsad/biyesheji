@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.audit_service import AuditService
+from src.core.deps import require_admin
 from src.infrastructure.database import get_db
 
 router = APIRouter(prefix="/audit", tags=["audit"])
@@ -31,10 +32,11 @@ class AuditLogOut(BaseModel):
 
 
 def _require_admin(request: Request) -> None:
-    user = request.state.user
-    if user.role != "admin":
-        from src.core.exceptions import PermissionDeniedError
-        raise PermissionDeniedError("仅管理员可查看审计日志")
+    """仅 admin 可查看审计日志。
+
+    实现收敛到 src.core.deps.require_admin（BUG-068），业务文案保持不变。
+    """
+    require_admin(request, "仅管理员可查看审计日志")
 
 
 @router.get("", response_model=list[AuditLogOut])

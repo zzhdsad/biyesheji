@@ -183,6 +183,61 @@ async def require_kb_write(db: AsyncSession, user: User, kb_id: uuid.UUID) -> st
     return role
 
 
+# ── 审计用客户端 IP（BUG-072）────────────────────────────────────────────────
+def get_client_ip(request: Request) -> str:
+    """审计日志用的客户端 IP（原先 6 个路由各有一份 request.client.host 拷贝）。
+
+    默认行为与改动前**完全一致**：返回直连 peer（request.client.host）。
+    反向代理部署下该值是代理自身地址 → 需要显式配置 ``settings.TRUSTED_PROXY_IPS``
+    （可信代理 IP，逗号分隔）才会解析 ``X-Forwarded-For`` 的最左跳。
+
+    为什么必须有白名单门禁：XFF 是**客户端可伪造**的请求头。若无条件采信，
+    任何人都能让自己的操作在审计日志里显示为任意 IP，审计溯源形同虚设。
+    因此只有"直连来源就是可信代理"时才读取 XFF；不在白名单的请求一律用直连 IP。
+
+    注意：容器/代理部署若想拿到真实 IP，需要**同时**满足
+    (1) 这里配置了正确的代理 IP，(2) 代理确实转发了 XFF（uvicorn --proxy-headers
+    或 nginx proxy_set_header X-Forwarded-For）。两者缺其一都只会表现为"IP 仍是代理地址"，
+    不会造成错误溯源，也不会让 IP 可被伪造。
+    """
+    direct_ip = request.client.host if request.client else ""
+    trusted = [ip.strip() for ip in (settings.TRUSTED_PROXY_IPS or "").split(",") if ip.strip()]
+    if not trusted or direct_ip not in trusted:
+        return direct_ip
+
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if not forwarded:
+        return direct_ip
+    # 最左跳 = 原始客户端（代理已追加时保留原值在前）
+    return forwarded.split(",")[0].strip()
+
+
+# ── 系统管理员校验（BUG-068）─────────────────────────────────────────────────
+DEFAULT_ADMIN_ONLY_MESSAGE = "仅管理员可执行该操作"
+
+
+def require_admin(request: Request, message: str = DEFAULT_ADMIN_ONLY_MESSAGE) -> User:
+    """系统级管理员校验：非 admin 抛 PermissionDeniedError（403）。
+
+    BUG-068：此前 audit.py / users.py / settings.py / admin.py 各写过一份
+    「从 request.state.user 取 role 再比对」的重复实现，且返回类型不一致
+    （有返回 User 的、也有返回 None 的），文案分散在四处。现统一收敛到本函数。
+    各调用点仍**按业务传入原有文案**，因此 403 响应体与旧行为完全一致
+    （不涉及 API 契约变更）。
+
+    Args:
+        request: FastAPI Request；get_current_user 已把 User 挂到 request.state.user
+        message: 403 的业务文案（由调用点按具体业务给）
+
+    Returns:
+        当前请求用户（role == "admin"）
+    """
+    user: User | None = getattr(request.state, "user", None)
+    if user is None or user.role != "admin":
+        raise PermissionDeniedError(message)
+    return user
+
+
 async def require_password_changed(
     user: User = Depends(get_current_user),
 ) -> None:

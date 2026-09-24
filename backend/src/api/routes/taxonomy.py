@@ -1,4 +1,4 @@
-"""分类与标签管理路由（TASK-002）。
+﻿"""分类与标签管理路由（TASK-002）。
 
 - GET/POST/PUT/DELETE /categories
 - GET/POST/PUT/DELETE /tags
@@ -23,6 +23,7 @@ from sqlalchemy import literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.audit_service import AuditService
+from src.core.deps import get_client_ip
 from src.core.exceptions import AppException
 from src.domain.models import Base, Category, Tag
 from src.infrastructure.database import get_db
@@ -91,8 +92,8 @@ class TagOut(BaseModel):
 
 
 def _get_client_ip(request: Request) -> str:
-    return request.client.host if request.client else ""
-
+    """审计用客户端 IP（实现统一到 src.core.deps.get_client_ip，BUG-072）。"""
+    return get_client_ip(request)
 
 async def _get_category_or_404(db: AsyncSession, category_id: uuid.UUID) -> Category:
     category = await db.get(Category, category_id)

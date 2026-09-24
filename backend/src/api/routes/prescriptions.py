@@ -1,4 +1,4 @@
-"""方剂资源管理路由（TASK-004 Stage 3）。
+﻿"""方剂资源管理路由（TASK-004 Stage 3）。
 
 - GET /prescriptions：登录用户均可浏览，支持 keyword / category_id / tag_id + 分页
 - GET /prescriptions/{id}：详情（含组成 ingredients / 标签 / 分类）
@@ -24,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.audit_service import AuditService
+from src.core.deps import get_client_ip
 from src.core.exceptions import AppException
 from src.domain.models import (
     Category,
@@ -200,8 +201,8 @@ class PrescriptionListResponse(BaseModel):
 
 
 def _get_client_ip(request: Request) -> str:
-    return request.client.host if request.client else ""
-
+    """审计用客户端 IP（实现统一到 src.core.deps.get_client_ip，BUG-072）。"""
+    return get_client_ip(request)
 
 def _prescription_to_out(prescription: Prescription) -> PrescriptionOut:
     """显式构造输出；ingredients(含 herb)/tags/category 必须已预加载。"""

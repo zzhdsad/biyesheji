@@ -77,6 +77,10 @@ export interface Citation {
   /** 来源分类展示标签：文档 / 中药 / 方剂 / 理论 / 文献 */
   source_label?: string;
   evidence_text?: string;
+  // ── 阶段十四：KG 关系属性（BUG-065：非流式路径此前丢失，现后端统一声明）──
+  kg_relation?: string | null;
+  kg_hop?: number | null;
+  kg_provenance?: string | null;
 }
 
 /** 证据等级（沿用后端既有分级规则）。 */

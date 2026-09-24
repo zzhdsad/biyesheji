@@ -381,7 +381,9 @@ async def delete_document(
 
     doc.deleted_at = utcnow()
     await db.commit()
-    return {"id": str(doc_id), "deleted": True, "message": "已移入回收站，7天内可恢复"}
+    # BUG-069：天数跟随 settings.TRASH_RETENTION_DAYS，不再写死 7 天
+    days = settings.TRASH_RETENTION_DAYS
+    return {"id": str(doc_id), "deleted": True, "message": f"已移入回收站，{days}天内可恢复"}
 
 
 @router.get("/trash/list", response_model=list[DocumentOut])

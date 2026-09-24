@@ -72,6 +72,14 @@ class Citation(BaseModel):
     source_name: str = ""
     source_label: str = ""
     evidence_text: str = ""
+    # 阶段十四：KG 关系属性（BUG-065）
+    # 这三个字段此前只存在于流式路径的 dict 里：非流式 /chat/ask 用 Citation(**hit)
+    # 构造，Pydantic 默认忽略未声明字段 → 同一条 KG 证据在流式里带关系信息、
+    # 在非流式里却静默丢失，两条路径语义不一致。这里统一声明为可选字段，
+    # 非 KG 证据保持 None，旧客户端解析不受影响（纯增量字段）。
+    kg_relation: str | None = None
+    kg_hop: int | None = None
+    kg_provenance: str | None = None
 
 
 class Evidence(Citation):

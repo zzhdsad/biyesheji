@@ -1,4 +1,4 @@
-"""中药资源管理路由（TASK-003）。
+﻿"""中药资源管理路由（TASK-003）。
 
 - GET /herbs：登录用户均可浏览，支持 keyword / category_id / tag_id + 分页
 - GET /herbs/{id}：详情
@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.audit_service import AuditService
+from src.core.deps import get_client_ip
 from src.core.exceptions import AppException
 from src.domain.models import Category, Herb, Tag
 from src.infrastructure.database import get_db
@@ -150,8 +151,8 @@ class HerbListResponse(BaseModel):
 
 
 def _get_client_ip(request: Request) -> str:
-    return request.client.host if request.client else ""
-
+    """审计用客户端 IP（实现统一到 src.core.deps.get_client_ip，BUG-072）。"""
+    return get_client_ip(request)
 
 def _herb_to_out(herb: Herb) -> HerbOut:
     """显式构造输出；tags/category 必须已预加载（模型 lazy=selectin）。"""

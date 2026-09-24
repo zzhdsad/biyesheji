@@ -1,6 +1,6 @@
-'use client';
+﻿'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   App,
   Button,
@@ -164,23 +164,24 @@ export default function TheoriesPage() {
     }
   };
 
-  const loadCategories = async () => {
+  // BUG-073（lint）：被下面挂载 effect 依赖，改为 useCallback 固定引用（行为不变）
+  const loadCategories = useCallback(async () => {
     try {
       const tree = await fetchCategories({ resource_type: 'theory', tree: true });
       setCategoryTree(tree);
     } catch {
       message.error('分类加载失败');
     }
-  };
+  }, [message]);
 
-  const loadTags = async () => {
+  const loadTags = useCallback(async () => {
     try {
       const list = await fetchTags();
       setAllTags(list);
     } catch {
       message.error('标签加载失败');
     }
-  };
+  }, [message]);
 
   useEffect(() => {
     void loadTheories();
@@ -190,7 +191,7 @@ export default function TheoriesPage() {
   useEffect(() => {
     void loadCategories();
     void loadTags();
-  }, []);
+  }, [loadCategories, loadTags]);
 
   // ── 查询操作 ──────────────────────────────────────────────────────────────
 

@@ -214,7 +214,13 @@ class KgRetriever:
                     "page_num": None,
                     "title_path": title_path,
                     "score": fact.score,
-                    # 供既有 Relevance Gate 使用（KG 匹配分，非向量相似度）
+                    # BUG-064（已知限制，本批不修改行为）：这里复用 dense_score 字段，
+                    # 是为了让 Relevance Gate 能用 KG 命中做证据充分性判断
+                    # （没有 dense_score 的命中会被计为 0 分而被过滤）。
+                    # 但两者语义不同：dense_score 原本是 BGE-M3 的 COSINE 相似度，
+                    # 而 fact.score 是"实体匹配分 × 跳数衰减"（KG_HOP_DECAY），
+                    # 不是同一个量纲，直接混用会让 Gate 的分数判断偏乐观。
+                    # 修正需要重定 Gate 口径并跑评测，不在本批（质量收尾）范围内。
                     "dense_score": fact.score,
                     "source_kind": KG_SOURCE_KIND,
                     "resource_type": node.resource_type,

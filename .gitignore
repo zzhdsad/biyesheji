@@ -14,6 +14,19 @@ node_modules/
 out/
 next-env.d.ts
 
+# 构建产物与运行期日志（BUG-073）
+# 说明：这些文件历史上曾被提交；Batch 6 已用 `git rm --cached` 移出索引
+# （本地文件保留，不影响运行），此后由本文件持续忽略。
+*.tsbuildinfo
+*.log
+
+# 临时诊断脚本 / 一次性校验脚本（BUG-073，同样已 git rm --cached）
+# 约定：仓库根目录下的 _diag* / _tmp* 与 backend/_tmp* 均为排查用一次性脚本，不入库。
+/_diag*.py
+/_tmp*.py
+backend/_tmp*.py
+backend/tests/_debug_*.py
+
 # 环境变量（保留 .env.example 模板）
 .env
 .env.local

@@ -15,6 +15,19 @@ import type { UserOut } from '@/types';
 const TOKEN_KEY = 'kp_token';
 const USER_KEY = 'kp_user';
 
+/**
+ * BUG-061：cookie 有效期必须与后端 JWT 有效期保持一致。
+ *
+ * 后端 `ACCESS_TOKEN_EXPIRE_MINUTES = 1440`（即 24 小时，见 backend/src/core/config.py），
+ * 此前前端写死 7 天：JWT 已过期但 cookie 仍在的 6 天里，Next.js middleware 会误判为
+ * "已登录"并放行受保护路由，用户要等到首个接口返回 401 才被硬跳登录页。
+ * 这里统一为 24 小时：**不**反向把 JWT TTL 改成 7 天（那是放宽安全配置）。
+ *
+ * 注意：后端若通过环境变量调整 JWT 有效期，此常量需同步修改；
+ * `tokenMaxAge.test.ts` 会锁定"前端 cookie 有效期不得超过后端 JWT 有效期"这一不变量。
+ */
+export const TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24; // 24 小时 = 1440 分钟
+
 /** localStorage 在 SSR 侧不可用，用模块级缓存兜底，避免每次读盘。 */
 let cachedToken: string | null = null;
 
@@ -31,7 +44,8 @@ export function setToken(token: string): void {
   if (typeof window !== 'undefined') {
     window.localStorage.setItem(TOKEN_KEY, token);
     // 同步写 cookie，供 Next.js middleware SSR 守卫读取
-    const maxAge = 60 * 60 * 24 * 7; // 7 天，与后端 ACCESS_TOKEN_EXPIRE_MINUTES 一致
+    // 有效期取自 TOKEN_MAX_AGE_SECONDS（24 小时），与后端 JWT TTL 对齐（BUG-061）
+    const maxAge = TOKEN_MAX_AGE_SECONDS;
     document.cookie = `${TOKEN_KEY}=${token}; path=/; max-age=${maxAge}; SameSite=Lax`;
   }
 }

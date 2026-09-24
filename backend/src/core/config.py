@@ -33,7 +33,8 @@ class Settings(BaseSettings):
     # 安全（JWT 鉴权）；默认值仅用于开发/测试，生产必须经 .env 覆盖为随机 ≥32 字节密钥
     SECRET_KEY: str = DEV_DEFAULT_SECRET_KEY
     JWT_ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 7 天
+    # 1440 分钟 = 24 小时（BUG-061：原注释误写为 7 天；前端 cookie max-age 已与之对齐）
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 
     # 模型服务
     LLM_BASE_URL: str = "http://localhost:8000/v1"
@@ -101,6 +102,12 @@ class Settings(BaseSettings):
 
     # 回收站
     TRASH_RETENTION_DAYS: int = 7  # BUSINESS_RULES §5：默认 7 天，可配置 1-30 天
+
+    # 审计 IP 来源（BUG-072）：逗号分隔的可信反向代理 IP 列表，例如 "172.18.0.2,127.0.0.1"。
+    # **留空（默认）时不解析 X-Forwarded-For**，行为与本改动前完全一致（直连 peer IP）。
+    # 一旦填写，只有当直连 peer 命中白名单时才采用 XFF 的最左跳，
+    # 避免客户端直接伪造 XFF 污染审计日志（审计 IP 是安全溯源依据）。
+    TRUSTED_PROXY_IPS: str = ""
 
     # 文档
     UPLOAD_DIR: str = "uploads"

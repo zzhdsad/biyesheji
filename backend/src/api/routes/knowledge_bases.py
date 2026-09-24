@@ -1,4 +1,4 @@
-"""知识库管理路由：创建、列表、编辑、删除（回收站）、成员管理、转移所有权。
+﻿"""知识库管理路由：创建、列表、编辑、删除（回收站）、成员管理、转移所有权。
 
 BUSINESS_RULES §3 知识库：
 - 创建者自动为 Owner
@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.audit_service import AuditService
 from src.core.config import settings
-from src.core.deps import get_accessible_kb_ids
+from src.core.deps import get_accessible_kb_ids, get_client_ip
 from src.core.exceptions import AppException, NotFoundError, PermissionDeniedError
 from src.domain.models import (
     Herb,
@@ -43,7 +43,11 @@ from src.utils.timeutil import utcnow
 router = APIRouter(prefix="/kb", tags=["knowledge-bases"])
 
 KB_ROLES = {"owner", "admin", "editor", "viewer"}
-TRASH_RETENTION_DAYS = settings.TRASH_RETENTION_DAYS
+
+# BUG-069：回收站保留天数**统一直接读 settings**（不再有模块级常量副本）。
+# 原写法把 settings 的值在 import 时固化成 TRASH_RETENTION_DAYS，导致通过
+# /settings/system 修改配置后本模块仍按旧天数清理与提示（与 users.py 写死 7 天同理）。
+# 此处改为每次调用时读取，保证三个资源模块口径一致。
 
 # TASK-008：KB 可挂载的传统资源类型（多态关联的 resource_type 受控词表）
 RESOURCE_TYPES = ("herb", "prescription", "theory", "literature")
@@ -117,8 +121,8 @@ class TransferOwnershipRequest(BaseModel):
 
 
 def _get_client_ip(request: Request) -> str:
-    return request.client.host if request.client else ""
-
+    """审计用客户端 IP（实现统一到 src.core.deps.get_client_ip，BUG-072）。"""
+    return get_client_ip(request)
 
 async def _require_kb_owner_or_admin(db: AsyncSession, request: Request, kb_id: uuid.UUID) -> KnowledgeBase:
     """校验当前用户是 KB owner 或系统 admin。返回知识库。"""
@@ -240,10 +244,11 @@ async def delete_kb(
     await audit.log(
         operator_id=user.id, operator_name=user.username,
         operation="delete", target_type="kb", target_id=str(kb.id),
-        detail={"name": kb.name, "retention_days": TRASH_RETENTION_DAYS},
+        detail={"name": kb.name, "retention_days": settings.TRASH_RETENTION_DAYS},
         ip=_get_client_ip(request),
     )
-    return {"id": str(kb_id), "deleted": True, "message": f"已移入回收站，{TRASH_RETENTION_DAYS} 天内可恢复"}
+    days = settings.TRASH_RETENTION_DAYS
+    return {"id": str(kb_id), "deleted": True, "message": f"已移入回收站，{days} 天内可恢复"}
 
 
 # ── 知识库回收站 ──────────────────────────────────────────────────────────────
@@ -260,7 +265,7 @@ async def list_trash_kbs(
         raise PermissionDeniedError("仅管理员可查看回收站")
 
     # 清理过期项
-    cutoff = utcnow() - timedelta(days=TRASH_RETENTION_DAYS)
+    cutoff = utcnow() - timedelta(days=settings.TRASH_RETENTION_DAYS)
     expired = (await db.scalars(select(KnowledgeBase).where(KnowledgeBase.deleted_at < cutoff))).all()
     for kb in expired:
         await db.delete(kb)

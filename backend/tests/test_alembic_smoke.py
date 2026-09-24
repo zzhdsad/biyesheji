@@ -58,6 +58,13 @@ EXPECTED_TABLES = {
 
 SMOKE_DB_NAME = "knowledge_platform_alembic_smoke"
 
+# BUG-067：历史上由 create_all 造成、迁移链里从未创建的"漂移列"。
+# 新环境用 Alembic 从头构建时必须同样拥有它们，否则与开发库结构不一致。
+LEGACY_DRIFT_COLUMNS: dict[tuple[str, str], str] = {
+    ("documents", "progress_percent"): "integer",
+    ("evaluation_results", "faithfulness"): "double precision",
+}
+
 
 def _admin_conn_kwargs() -> dict:
     """从应用 DATABASE_URL 解析连接参数，管理库固定为 postgres。"""
@@ -115,6 +122,32 @@ def _list_public_tables(db_url: str) -> set[str]:
         )
         await conn.close()
         return {r["tablename"] for r in rows}
+
+    return asyncio.run(_run())
+
+
+def _list_drift_columns(db_url: str) -> dict[tuple[str, str], str]:
+    """列出 BUG-067 关注的两列及其 data_type（列不存在则缺 key）。"""
+    import asyncpg
+
+    url = make_url(db_url)
+
+    async def _run() -> dict[tuple[str, str], str]:
+        conn = await asyncpg.connect(
+            host=url.host,
+            port=url.port,
+            user=url.username,
+            password=url.password,
+            database=url.database,
+        )
+        rows = await conn.fetch(
+            "SELECT table_name, column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND ("
+            " (table_name = 'documents' AND column_name = 'progress_percent') OR"
+            " (table_name = 'evaluation_results' AND column_name = 'faithfulness'))"
+        )
+        await conn.close()
+        return {(r["table_name"], r["column_name"]): r["data_type"] for r in rows}
 
     return asyncio.run(_run())
 
@@ -198,6 +231,11 @@ def test_upgrade_downgrade_roundtrip(monkeypatch) -> None:
         tables = _list_public_tables(smoke_url)
         assert tables == EXPECTED_TABLES | {"alembic_version"}
 
+        # BUG-067：全新库必须由迁移补齐"漂移列"（旧情况：只有开发库 create_all 才有）
+        assert (
+            _list_drift_columns(smoke_url) == LEGACY_DRIFT_COLUMNS
+        ), "BUG-067：新环境的 documents.progress_percent / evaluation_results.faithfulness 缺失或类型不符"
+
         # 版本号写入正确
         import asyncpg
 
@@ -225,6 +263,8 @@ def test_upgrade_downgrade_roundtrip(monkeypatch) -> None:
         command.upgrade(cfg, "head")
         tables = _list_public_tables(smoke_url)
         assert tables == EXPECTED_TABLES | {"alembic_version"}
+        # BUG-067：重复 upgrade 仍应幂等地保持两列（不重复创建、不报错）
+        assert _list_drift_columns(smoke_url) == LEGACY_DRIFT_COLUMNS
     finally:
         # 清理临时库，不影响开发库
         _drop_smoke_db()

@@ -1,4 +1,4 @@
-"""中医文献资源管理路由（TASK-006 Stage 4）。
+﻿"""中医文献资源管理路由（TASK-006 Stage 4）。
 
 - GET /literatures：登录用户均可浏览，支持 keyword / category_id / tag_id + 分页
 - GET /literatures/{id}：详情
@@ -23,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.audit_service import AuditService
+from src.core.deps import get_client_ip
 from src.core.exceptions import AppException
 from src.domain.models import Category, Literature, Tag
 from src.infrastructure.database import get_db
@@ -144,8 +145,8 @@ class LiteratureListResponse(BaseModel):
 
 
 def _get_client_ip(request: Request) -> str:
-    return request.client.host if request.client else ""
-
+    """审计用客户端 IP（实现统一到 src.core.deps.get_client_ip，BUG-072）。"""
+    return get_client_ip(request)
 
 def _literature_to_out(literature: Literature) -> LiteratureOut:
     """显式构造输出；tags/category 必须已预加载（模型 lazy=selectin）。"""

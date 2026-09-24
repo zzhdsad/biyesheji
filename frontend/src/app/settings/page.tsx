@@ -1,6 +1,6 @@
-'use client';
+﻿'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Alert,
   Button,
@@ -59,7 +59,10 @@ export default function SettingsPage() {
   const [sysLoading, setSysLoading] = useState(false);
   const [sysSaving, setSysSaving] = useState(false);
 
-  const loadConfig = async () => {
+  // BUG-073（lint）：两个加载函数被下面挂载 effect 依赖。
+  // message 这里是 antd 的静态导入（引用恒定），因此 useCallback 依赖为空数组：
+  // 引用稳定 → effect 仍只在挂载时执行一次，行为不变。
+  const loadConfig = useCallback(async () => {
     setLoading(true);
     try {
       const cfg = await fetchModelConfig();
@@ -69,14 +72,9 @@ export default function SettingsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [form]);
 
-  useEffect(() => {
-    void loadConfig();
-    void loadSysConfig();
-  }, []);
-
-  const loadSysConfig = async () => {
+  const loadSysConfig = useCallback(async () => {
     setSysLoading(true);
     try {
       const cfg = await fetchSystemConfig();
@@ -86,7 +84,12 @@ export default function SettingsPage() {
     } finally {
       setSysLoading(false);
     }
-  };
+  }, [sysForm]);
+
+  useEffect(() => {
+    void loadConfig();
+    void loadSysConfig();
+  }, [loadConfig, loadSysConfig]);
 
   const onSysSave = async () => {
     let values;

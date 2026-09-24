@@ -1,6 +1,6 @@
-'use client';
+﻿'use client';
 
-import { useEffect, useState, type Key } from 'react';
+import { useCallback, useEffect, useState, type Key } from 'react';
 import {
   Alert,
   App,
@@ -133,7 +133,8 @@ export default function UsersPage() {
     }
   };
 
-  const loadActive = async () => {
+  // BUG-073（lint）：被下面挂载 effect 依赖，改为 useCallback 固定引用（行为不变）
+  const loadActive = useCallback(async () => {
     setLoading(true);
     try {
       setUsers(await fetchUsers());
@@ -142,7 +143,7 @@ export default function UsersPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [message]);
   const loadTrash = async () => {
     setLoading(true);
     try {
@@ -160,7 +161,7 @@ export default function UsersPage() {
 
   useEffect(() => {
     void loadActive();
-  }, []);
+  }, [loadActive]);
 
   // ── 创建 ──
   const onCreate = async () => {

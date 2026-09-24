@@ -415,6 +415,13 @@ class RagService:
                 )
                 # 与向量命中同一套资源过滤口径
                 kg_hits = filter_hits(kg_hits, rtypes, include_document)
+                # BUG-064（已知限制，本批不修改行为）：KG 命中拼在末尾，
+                # 未经 Reranker 与向量命中统一排序，因此 KG 证据编号总是最大的一批；
+                # 而 group_evidence() 按组内最高分重排，会导致前端分层展示顺序与
+                # source_index 编号顺序不一致。**刻意不在此处重排**——那会改变
+                # Prompt 编号与既有引用对应关系（属于检索业务规则变更），
+                # 需要带评测数据的专门实验，不由质量收尾批次顺手改动。
+                # 当前一致性由 test_batch6_quality.py 的锁定用例守护。
                 hits = hits + kg_hits
             except Exception as exc:  # noqa: BLE001  KG 不得成为问答的单点故障
                 logger.warning(f"KG 检索不可用，本次仅用向量检索: {exc}")
@@ -1125,6 +1132,14 @@ class RagService:
             try:
                 async for chunk in self.llm.chat_stream(messages):
                     answer_parts.append(chunk)
+                    # BUG-066（已知限制，本批不修改 SSE 协议）：这里的 delta 携带的是
+                    # **Reflection 之前**的文本——citations 必须在生成前下发，
+                    # Self Reflection 又只能在完整答案产生后才能判定，二者天然有先后顺序。
+                    # 因此可能出现"打字机显示了一段最终被改写的话"。
+                    # 约定由 done 事件收口：**done.answer 才是最终权威答案**，
+                    # 客户端应以 done.answer 为准替换正文（历史消息也是用它落库的）。
+                    # 这里刻意不新增 corrected 事件、也不取消流式输出（保持协议稳定），
+                    # 由 test_batch6_quality.py 锁定"事件名集合不变"这一契约。
                     yield {"event": "delta", "data": {"content": chunk}}
             except LLMError as exc:
                 logger.error(f"RAG 流式生成失败: {exc}")

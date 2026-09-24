@@ -22,8 +22,8 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.exceptions import PermissionDeniedError
-from src.domain.models import Document, KnowledgeBase, Message, User
+from src.core.deps import require_admin
+from src.domain.models import Document, KnowledgeBase, Message
 from src.infrastructure.database import get_db
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -44,13 +44,17 @@ async def get_system_stats(
     db: AsyncSession = Depends(get_db),
 ) -> AdminStatsOut:
     """系统仪表盘全局统计（仅 admin）。"""
-    user: User = request.state.user
-    if user.role != "admin":
-        raise PermissionDeniedError("仅管理员可查看系统统计")
+    require_admin(request, "仅管理员可查看系统统计")
 
     # ── 三个计数指标（全表 COUNT，走索引/顺序扫描，数据量下足够快）────────────
-    total_docs = await db.scalar(select(func.count()).select_from(Document))
-    total_kbs = await db.scalar(select(func.count()).select_from(KnowledgeBase))
+    # BUG-070：docs / kbs 计数必须排除回收站数据（deleted_at IS NULL），
+    # 否则仪表盘数字包含已软删除的资源，与列表页（统一过滤 deleted_at）口径不一致。
+    total_docs = await db.scalar(
+        select(func.count()).select_from(Document).where(Document.deleted_at.is_(None))
+    )
+    total_kbs = await db.scalar(
+        select(func.count()).select_from(KnowledgeBase).where(KnowledgeBase.deleted_at.is_(None))
+    )
     total_qa = await db.scalar(
         select(func.count()).select_from(Message).where(Message.role == "user")
     )
