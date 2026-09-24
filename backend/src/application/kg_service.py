@@ -153,18 +153,26 @@ class KgService:
 
         Returns:
             KgBuildResult：本次新增/更新/删除计数与重建后的总数
-        """
-        if rebuild:
-            # 先边后节点（FK CASCADE 也可，但显式删除更可控）
-            await self.db.execute(delete(KgEdge))
-            await self.db.execute(delete(KgNode))
-            await self.db.commit()
 
-        created, updated, removed = await self._sync_nodes()
-        await self.db.flush()
-        index = await self._node_index()
-        edges_created = await self._sync_edges(index)
-        await self.db.commit()
+        BUG-010：清表与重建必须在**同一事务**内完成。旧实现先 commit 清空再
+        重建，中途异常会留下"已清空的空图谱"且无法回滚；现在整体成功才提交，
+        失败整体回滚（rebuild 前的数据保持不变）。
+        """
+        try:
+            if rebuild:
+                # 先边后节点（FK CASCADE 也可，但显式删除更可控）
+                await self.db.execute(delete(KgEdge))
+                await self.db.execute(delete(KgNode))
+
+            created, updated, removed = await self._sync_nodes()
+            await self.db.flush()
+            index = await self._node_index()
+            edges_created = await self._sync_edges(index)
+            await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            logger.error(f"知识图谱构建失败，已回滚（rebuild={rebuild}）", exc_info=True)
+            raise
 
         stats = await self.stats()
         result = KgBuildResult(
@@ -180,6 +188,25 @@ class KgService:
             f"知识图谱构建完成: {result.to_dict()}"
         )
         return result
+
+    async def delete_resource_nodes(
+        self, resource_type: str, resource_id: uuid.UUID
+    ) -> int:
+        """BUG-009：删除资源时同步清理其知识图谱节点（边随 FK CASCADE 删除）。
+
+        节点是资源的派生物：资源删除后若节点残留，图谱遍历仍会取到它，
+        与 BUG-008（多跳无隔离）叠加会产生指向已删除资源的证据。
+
+        Returns:
+            删除的节点数（通常为 0 或 1）
+        """
+        result = await self.db.execute(
+            delete(KgNode).where(
+                KgNode.resource_type == resource_type,
+                KgNode.resource_id == resource_id,
+            )
+        )
+        return int(result.rowcount or 0)
 
     async def _sync_nodes(self) -> tuple[int, int, int]:
         """资源 → 节点（upsert + 清理已删除资源的孤立节点）。"""

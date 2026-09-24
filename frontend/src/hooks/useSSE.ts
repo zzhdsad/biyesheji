@@ -10,7 +10,7 @@ import type {
   ReflectionDecision,
   RouterDecision,
 } from '@/types';
-import { getToken } from '@/services/token';
+import { getToken, handleUnauthorized } from '@/services/token';
 
 /** SSE 事件回调集合（与后端 chat.py /ask-stream 事件协议对应）。 */
 export interface SSEHandlers {
@@ -68,6 +68,12 @@ export async function streamSSE(
     headers,
     body: JSON.stringify(body),
   });
+  // BUG-062：流式 fetch 不过 axios 拦截器，401 必须在这里走同一套处理
+  // （清 token + 硬跳登录页），否则 token 过期只表现为"请求失败"。
+  if (resp.status === 401) {
+    handleUnauthorized();
+    throw new Error('登录已过期，请重新登录');
+  }
   if (!resp.ok || !resp.body) {
     throw new Error(`SSE 请求失败：HTTP ${resp.status}`);
   }

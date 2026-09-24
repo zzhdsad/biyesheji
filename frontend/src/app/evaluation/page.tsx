@@ -36,6 +36,7 @@ import {
 } from '@ant-design/icons';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
+import { useRequestSeq } from '@/hooks/useRequestSeq';
 import type {
   EvalCaseResult,
   EvaluationHistoryItem,
@@ -105,6 +106,7 @@ const AcProgress = ({ v, threshold }: { v: number | null; threshold: number }) =
   );
 
 export default function EvaluationPage() {
+  const reqSeq = useRequestSeq(); // BUG-048：切换知识库时丢弃过期响应
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [selectedKbId, setSelectedKbId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -180,13 +182,22 @@ export default function EvaluationPage() {
   };
 
   // 切换知识库后刷新历史、运行归档与测试集
+  // BUG-048：旧实现串行 await 三个接口且无作废机制——快速切 KB 时，先发起的
+  // 旧 KB 响应后到会覆盖新 KB 的结果。改为并发 + 请求序号守卫（过期即丢弃）。
   const handleKbChange = (kbId: string) => {
     setSelectedKbId(kbId);
+    const reqId = reqSeq.begin();
     void (async () => {
       try {
-        setHistory(await fetchEvalHistory(kbId));
-        setRuns(await fetchEvalRuns(kbId));
-        setTestCases(await fetchEvalTestCases(kbId));
+        const [history, runs, cases] = await Promise.all([
+          fetchEvalHistory(kbId),
+          fetchEvalRuns(kbId),
+          fetchEvalTestCases(kbId),
+        ]);
+        if (!reqSeq.isLatest(reqId)) return;
+        setHistory(history);
+        setRuns(runs);
+        setTestCases(cases);
       } catch {
         /* noop */
       }

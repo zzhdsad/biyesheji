@@ -17,7 +17,8 @@ BUSINESS_RULES §3 知识库：
 import uuid
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.application.audit_service import AuditService
 from src.core.config import settings
 from src.core.deps import get_accessible_kb_ids
-from src.core.exceptions import NotFoundError, PermissionDeniedError
+from src.core.exceptions import AppException, NotFoundError, PermissionDeniedError
 from src.domain.models import (
     Herb,
     KBMember,
@@ -312,7 +313,11 @@ async def purge_kb(
 ) -> dict:
     """彻底删除知识库（仅 admin，不可恢复）。
 
-    Stage 4-6：purge 前清理该 KB 下所有 Resource 向量（KBR 由 CASCADE 清理）。
+    Stage 4-6 + BUG-007：purge 前清理该 KB 下的**全部**向量：
+    - Resource 向量（按 KBR 逐条清理，KBR 记录随 KB 删除 CASCADE 清理）；
+    - Document 向量（按 kb_id 批量清理，覆盖文档 chunk 与任何遗留行）。
+
+    清理失败即中断 purge：KB 删除不可逆，残留向量会以"未知文档"形式被检索到。
     """
     user: User = request.state.user
     if user.role != "admin":
@@ -321,19 +326,28 @@ async def purge_kb(
     kb = await db.get(KnowledgeBase, kb_id)
     if kb is None:
         raise NotFoundError("知识库不存在")
+    # BUG-043：purge 是不可逆硬删除，必须先经过软删（回收站保护期）。
+    # 旧实现允许直接彻底删除活跃知识库，绕过回收站的可恢复窗口与审计链路。
+    if kb.deleted_at is None:
+        raise AppException(400, "只能彻底删除回收站中的知识库，请先执行删除移入回收站")
     kb_name = kb.name
 
-    # Stage 4-6：清理该 KB 下所有 Resource 向量（KBR 记录随 KB 删除 CASCADE 清理）
+    # 1) Resource 向量（KBR 记录随 KB 删除 CASCADE 清理）
     try:
         from src.application.resource_vector_service import ResourceVectorService
         svc = ResourceVectorService()
         await svc.cleanup_kb_resource_vectors(db, kb_id)
-    except Exception:
-        import logging
-        logging.getLogger(__name__).warning(
-            f"KB purge 前清理 Resource 向量失败 kb_id={kb_id}",
-            exc_info=True,
-        )
+    except Exception as exc:
+        logger.error(f"KB purge 前清理 Resource 向量失败 kb_id={kb_id}: {exc}")
+        raise AppException(422, f"知识库资源向量清理失败，无法彻底删除：{exc}") from exc
+
+    # 2) BUG-007：该 KB 下的全部向量（Document chunk 等），按 kb_id 兜底清理
+    try:
+        from src.infrastructure.milvus_store import get_vector_store
+        get_vector_store().delete_by_kb(str(kb_id))
+    except Exception as exc:
+        logger.error(f"KB purge 前清理知识库向量失败 kb_id={kb_id}: {exc}")
+        raise AppException(422, f"知识库向量清理失败，无法彻底删除：{exc}") from exc
 
     await db.delete(kb)
     await db.commit()
@@ -598,6 +612,16 @@ async def transfer_ownership(
     if target_member is None:
         raise NotFoundError("目标用户不是知识库成员，请先添加为成员")
 
+    # BUG-044：KBMember 行会随用户软删/停用而残留（成员表不级联），
+    # 仅校验成员关系会把所有权转移给已删除或已停用的账号 → 知识库变成孤儿。
+    target_user = await db.get(User, payload.new_owner_user_id)
+    if (
+        target_user is None
+        or target_user.deleted_at is not None
+        or not target_user.is_active
+    ):
+        raise AppException(400, "目标用户不存在或已删除/停用，无法转移所有权")
+
     # 获取当前 Owner 成员记录
     old_owner_member = await db.scalar(
         select(KBMember).where(
@@ -745,8 +769,10 @@ async def list_kb_resources(
     kb_id: uuid.UUID,
     request: Request,
     resource_type: str | None = None,
-    limit: int = 20,
-    offset: int = 0,
+    # BUG-033：分页参数加边界约束（与 herbs/prescriptions 等列表端点一致），
+    # 避免 limit=0/负数/超大值导致的空列表或全表拉取
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
 ) -> ResourceListResponse:
     """查看 KB 已挂载资源列表（Owner/Admin/Editor/Viewer 均可读）。

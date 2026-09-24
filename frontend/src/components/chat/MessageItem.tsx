@@ -4,7 +4,9 @@ import { useState, type ReactNode } from 'react';
 import { Avatar, Typography } from 'antd';
 import { RobotOutlined, UserOutlined } from '@ant-design/icons';
 import type { ChatMessage } from '@/types';
+import { resolveCitationKey } from '@/utils/evidence';
 import { EvidencePanel } from './EvidencePanel';
+import { FeedbackButtons } from './FeedbackButtons';
 
 const { Paragraph, Text } = Typography;
 
@@ -54,6 +56,18 @@ export function MessageItem({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
   const [activeKey, setActiveKey] = useState<string[]>([]);
 
+  // BUG-058：内联引用编号（LLM 生成）→ 证据面板 key（后端 source_index）映射。
+  // 越界编号没有对应来源 → 忽略点击（旧实现会点不动且无法收起）。
+  const sourceIndexes = (message.citations ?? []).map((c) => c.source_index);
+  const onChip = (index: number) => {
+    const key = resolveCitationKey(index, sourceIndexes);
+    if (!key) return;
+    // 同一个 chip 再点一次收起（旧实现永远 set 成同一个 key，无法收起）
+    setActiveKey((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key],
+    );
+  };
+
   return (
     <div style={{ display: 'flex', gap: 12, justifyContent: isUser ? 'flex-end' : 'flex-start' }}>
       {!isUser && (
@@ -80,10 +94,13 @@ export function MessageItem({ message }: { message: ChatMessage }) {
             </Paragraph>
           ) : (
             <Paragraph style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
-              {renderAnswer(message.content, (index) => setActiveKey([String(index)]))}
+              {/* BUG-053：历史脏数据 content=null 会让 renderAnswer 直接抛错（白屏） */}
+              {renderAnswer(message.content ?? '', onChip)}
             </Paragraph>
           )}
         </div>
+        {/* BUG-057：后端 /feedbacks 已实现，但组件此前全项目无引用 → 接入助手消息 */}
+        {!isUser && <FeedbackButtons messageId={message.id} />}
         {!isUser &&
           message.queryAnalysis &&
           // 阶段十一：仅开发环境展示 Query Analysis 调试信息（不改动 Chat UI 主体）

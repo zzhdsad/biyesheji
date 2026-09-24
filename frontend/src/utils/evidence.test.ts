@@ -15,6 +15,7 @@ import {
   buildEvidenceGroups,
   evidenceLevel,
   normalizeEvidence,
+  resolveCitationKey,
   summarizeEvidence,
 } from './evidence.ts';
 import type { Citation } from '@/types';
@@ -339,6 +340,31 @@ describe('阶段十六：缺省 / 空值 / 弱证据健壮性', () => {
     const groups = buildEvidenceGroups([legacy]);
     assert.equal(groups[0].group_key, 'document');
     assert.equal(groups[0].sources[0].source_label, '文档');
+  });
+});
+
+// ── BUG-058：内联引用编号 → 证据面板 key 映射 ────────────────────────────────
+
+describe('resolveCitationKey（BUG-058）', () => {
+  it('编号命中现有 source_index → 返回该 key', () => {
+    assert.equal(resolveCitationKey(1, [1, 2, 3]), '1');
+    assert.equal(resolveCitationKey(3, [1, 2, 3]), '3');
+  });
+
+  it('编号越界（模型引用了不存在的来源）→ 返回 null，调用方忽略点击', () => {
+    assert.equal(resolveCitationKey(5, [1, 2, 3]), null);
+    assert.equal(resolveCitationKey(0, [1, 2, 3]), null);
+  });
+
+  it('无来源 / 编号非法 → 一律 null（不臆造来源）', () => {
+    assert.equal(resolveCitationKey(1, []), null);
+    assert.equal(resolveCitationKey(Number.NaN, [1]), null);
+  });
+
+  it('编号不连续时按实际集合精确匹配（不按下标猜测）', () => {
+    const indexes = [2, 4, 7];
+    assert.equal(resolveCitationKey(4, indexes), '4');
+    assert.equal(resolveCitationKey(3, indexes), null);
   });
 });
 

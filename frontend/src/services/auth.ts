@@ -1,23 +1,15 @@
 import { api } from './api';
 import type { TokenResponse, UserOut } from '@/types';
 
-/** 注册请求体（与后端 RegisterRequest 对应）。 */
-export interface RegisterPayload {
-  email: string;
-  username: string;
-  password: string;
-}
+/**
+ * 账号由管理员在「用户管理」中创建（POST /users），系统不提供开放注册，
+ * 后端也没有 /auth/register 端点，因此这里不提供注册接口（BUG-014）。
+ */
 
 /** 登录请求体（与后端 LoginRequest 对应）。 */
 export interface LoginPayload {
   username_or_email: string;
   password: string;
-}
-
-/** 注册新用户（不自动登录，需调 apiLogin 拿 token）。 */
-export async function apiRegister(payload: RegisterPayload): Promise<UserOut> {
-  const { data } = await api.post<UserOut>('/auth/register', payload);
-  return data;
 }
 
 /** 用户名或邮箱登录，返回 JWT。 */

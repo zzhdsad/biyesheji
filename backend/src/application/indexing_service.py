@@ -128,12 +128,9 @@ class IndexingService:
         return rows
 
     def _write_milvus(self, doc_id: str, rows: list[VectorRow]) -> None:
-        """幂等写入：先清该文档旧向量再插入。"""
+        """幂等写入：整体替换该文档向量（BUG-046：先写新再清旧，避免空窗）。"""
         self.store.ensure_collection()
-        self.store.delete_by_doc(doc_id)
-        inserted = self.store.insert(rows)
-        if inserted != len(rows):
-            raise VectorStoreError(f"向量入库不完整：期望 {len(rows)} 条，实际 {inserted} 条")
+        self.store.replace_doc(doc_id, rows)
 
     async def _mark_failed(self, doc_id: uuid.UUID, message: str) -> None:
         await self.db.execute(

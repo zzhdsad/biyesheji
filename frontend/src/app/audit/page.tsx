@@ -136,9 +136,11 @@ export default function AuditPage() {
     {
       title: '详情',
       dataIndex: 'detail',
-      render: (v: Record<string, unknown>) => (
+      // BUG-051：detail 为 null/undefined（后端 JSONB 缺省或历史脏数据）时
+      // Object.keys(v) 直接抛 TypeError → 整页崩溃。统一按空对象兜底。
+      render: (v: Record<string, unknown> | null | undefined) => (
         <Text type="secondary" style={{ fontSize: 12 }}>
-          {Object.keys(v).length > 0 ? JSON.stringify(v) : '-'}
+          {v && Object.keys(v).length > 0 ? JSON.stringify(v) : '-'}
         </Text>
       ),
     },

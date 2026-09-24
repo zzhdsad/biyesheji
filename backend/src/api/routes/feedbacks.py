@@ -12,6 +12,11 @@ TECH_DESIGN §3 feedbacks 表：id / message_id / rating / comment
   只有会话所有者才能对自己收到的助手消息反馈，禁止越权操作他人消息
 - 同一用户对同一消息重复反馈时覆盖（update rather than insert），
   避免主键冲突并保留最新意见
+
+BUG-038：
+- 只允许对 assistant 消息反馈（对 user 消息反馈无业务含义，且污染统计）；
+- 反馈写入 user_id，唯一性按 (user_id, message_id) 判定，并由数据库唯一约束
+  uq_feedbacks_user_message 兜底并发重复插入（命中约束时退化为覆盖更新）。
 """
 
 from __future__ import annotations
@@ -22,6 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.models import Conversation, Feedback, Message, User
@@ -90,9 +96,15 @@ async def create_or_update_feedback(
     user: User = request.state.user
     msg = await _load_owned_message(db, payload.message_id, user)
 
-    # 按 message_id 查现有反馈（覆盖式：同一消息只保留一条最新反馈）
+    # BUG-038：反馈对象是助手的回答；对 user 消息反馈无业务含义（且会污染统计）
+    if msg.role != "assistant":
+        raise HTTPException(status_code=400, detail="只能对助手消息提交反馈")
+
+    # 按 (user_id, message_id) 查现有反馈（覆盖式：同一用户对同一消息只保留最新反馈）
     existing = await db.scalar(
-        select(Feedback).where(Feedback.message_id == payload.message_id)
+        select(Feedback).where(
+            Feedback.user_id == user.id, Feedback.message_id == payload.message_id
+        )
     )
 
     if existing is not None:
@@ -107,11 +119,33 @@ async def create_or_update_feedback(
 
     fb = Feedback(
         message_id=msg.id,
+        user_id=user.id,
         rating=payload.rating,
         comment=payload.comment,
     )
     db.add(fb)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # BUG-038：并发提交命中 (user_id, message_id) 唯一约束
+        # → 退化为覆盖更新，而不是把 500 抛给先到的那个请求
+        await db.rollback()
+        existing = await db.scalar(
+            select(Feedback).where(
+                Feedback.user_id == user.id, Feedback.message_id == payload.message_id
+            )
+        )
+        if existing is None:
+            raise
+        existing.rating = payload.rating
+        existing.comment = payload.comment
+        await db.commit()
+        await db.refresh(existing)
+        logger.info(
+            f"反馈并发命中唯一约束，改为更新 id={existing.id} "
+            f"message_id={msg.id} rating={payload.rating}"
+        )
+        return existing
     await db.refresh(fb)
     logger.info(
         f"反馈创建 id={fb.id} message_id={msg.id} rating={payload.rating} "
@@ -150,10 +184,14 @@ async def get_feedback_by_message(
     """查询某条消息的反馈（无反馈返回 null）。
 
     权限：消息必须属于当前用户的会话。
+    BUG-038：反馈按 (user_id, message_id) 归属——只看当前用户自己的反馈；
+    迁移前写入的历史行 user_id 为 NULL，不在此视图内（重新提交即按新归属写入）。
     """
     user: User = request.state.user
     await _load_owned_message(db, message_id, user)
     fb = await db.scalar(
-        select(Feedback).where(Feedback.message_id == message_id)
+        select(Feedback).where(
+            Feedback.user_id == user.id, Feedback.message_id == message_id
+        )
     )
     return fb

@@ -25,7 +25,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.exceptions import PermissionDeniedError
@@ -150,6 +150,33 @@ async def _get_active_user(db: AsyncSession, user_id: uuid.UUID) -> User | None:
     )
 
 
+async def _count_active_admins(db: AsyncSession) -> int:
+    """统计启用且未软删的管理员数量（BUG-040：禁止清空/禁用最后一个管理员）。"""
+    total = await db.scalar(
+        select(func.count())
+        .select_from(User)
+        .where(
+            User.role == "admin",
+            User.deleted_at.is_(None),
+            User.is_active.is_(True),
+        )
+    )
+    return int(total or 0)
+
+
+async def _ensure_admin_kept(
+    db: AsyncSession, user: User, action: str = "删除"
+) -> None:
+    """若 user 是最后一个可用管理员，禁止该操作（降级/删除/禁用）。"""
+    if user.role != "admin":
+        return
+    if await _count_active_admins(db) <= 1:
+        raise HTTPException(
+            status_code=400,
+            detail=f"至少需保留一个启用状态的管理员，不能{action}最后一个管理员",
+        )
+
+
 async def _purge_expired_trash(db: AsyncSession) -> None:
     """清理回收站中超过 7 天的用户（硬删除）。"""
     cutoff = utcnow() - timedelta(days=TRASH_RETENTION_DAYS)
@@ -233,6 +260,9 @@ async def update_user(
     if payload.department is not None:
         user.department = payload.department
     if payload.role is not None:
+        # BUG-040：不允许把最后一个管理员降级，否则系统失去管理员
+        if user.role == "admin" and payload.role != "admin":
+            await _ensure_admin_kept(db, user, action="降级")
         user.role = payload.role
     await db.commit()
     await db.refresh(user)
@@ -253,6 +283,8 @@ async def delete_user(
     user = await _get_active_user(db, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="用户不存在或已删除")
+    # BUG-040：不允许删除最后一个管理员
+    await _ensure_admin_kept(db, user, action="删除")
 
     user.deleted_at = utcnow()
     await db.commit()
@@ -277,6 +309,8 @@ async def disable_user(
     user = await _get_active_user(db, user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="用户不存在或已删除")
+    # BUG-040：不允许禁用最后一个管理员
+    await _ensure_admin_kept(db, user, action="禁用")
 
     user.is_active = False
     await db.commit()
@@ -344,6 +378,8 @@ async def batch_delete_users(
 
     # ── 预检 ──
     errors: list[str] = []
+    admin_total = await _count_active_admins(db)
+    admin_to_delete = 0
     for uid in payload.user_ids:
         if current.id == uid:
             errors.append(f"用户 {uid}：不能删除自己")
@@ -353,6 +389,12 @@ async def batch_delete_users(
             errors.append(f"用户 {uid}：不存在")
         elif user.deleted_at is not None:
             errors.append(f"用户 {uid}：已在回收站")
+        elif user.role == "admin" and user.is_active:
+            admin_to_delete += 1
+
+    # BUG-040：批量删除后必须仍保留至少一个可用管理员
+    if admin_total - admin_to_delete < 1:
+        errors.append("不能删除全部启用状态的管理员，至少需保留一个")
 
     if errors:
         raise HTTPException(

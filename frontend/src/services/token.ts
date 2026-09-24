@@ -61,5 +61,23 @@ export function setStoredUser(user: UserOut): void {
   window.localStorage.setItem(USER_KEY, JSON.stringify(user));
 }
 
+/**
+ * 401（未鉴权 / token 过期）的统一处理：清 token + 硬跳登录页（BUG-062）。
+ *
+ * 用 window.location 硬跳，避免 SPA 路由守卫与拦截器互相触发造成循环。
+ * axios 拦截器（api.ts）与 SSE（hooks/useSSE.ts）共用此实现：SSE 走原生
+ * fetch，不过 axios 拦截器，旧实现在 token 过期时只抛"请求失败"，既不清
+ * token 也不跳转，用户会一直停在失效的页面上重试。
+ */
+export function handleUnauthorized(): void {
+  if (typeof window === 'undefined') return;
+  // /login 自身的 401 不跳转（避免登录页请求失败时反复跳转）
+  const path = window.location.pathname;
+  if (path.startsWith('/login')) return;
+  clearToken();
+  const redirect = encodeURIComponent(path + window.location.search);
+  window.location.href = `/login?redirect=${redirect}`;
+}
+
 /** cookie 键名（Next.js middleware 读取用）。 */
 export const TOKEN_COOKIE_KEY = TOKEN_KEY;

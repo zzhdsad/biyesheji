@@ -12,7 +12,7 @@ import { getToken } from '@/services/token';
  * 后端的一致性：有 token 则乐观恢复 → /me 校验 → 失败清态（由响应拦截器跳登录）。
  *
  * 仅当本地存在 token 时才显示 loading（需要等待 /me 校验）；无 token 时直接渲染
- * 子内容，避免 /login、/register 出现多余的 spinner 闪烁。
+ * 子内容，避免 /login 出现多余的 spinner 闪烁。
  */
 export function AuthInit({ children }: { children: ReactNode }) {
   const initializing = useUserStore((s) => s.initializing);

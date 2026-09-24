@@ -1,9 +1,11 @@
 """模型配置路由：前端设置页动态配置 LLM/Embedding/Rerank/HyDE。
 
-所有接口受 protected_router 统一鉴权；已登录用户均可修改配置。
+所有接口受 protected_router 统一鉴权；**修改/连通性测试仅管理员可用**
+（配置影响全站问答链路，普通用户不得修改，也不得借测试端点发起任意请求）。
 """
 
 from fastapi import APIRouter, Depends, Request
+from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,9 +14,18 @@ from src.application.model_config_service import (
     invalidate_config_cache,
 )
 from src.core.deps import get_current_user, get_db
+from src.core.exceptions import PermissionDeniedError
 from src.infrastructure.llm import OpenAICompatibleLLM
+from src.utils.net import assert_safe_public_url
 
 router = APIRouter(prefix="/settings", tags=["settings"])
+
+
+def _require_admin(request: Request) -> None:
+    """模型配置属全局配置，仅系统管理员可修改/测试。"""
+    user = request.state.user
+    if user.role != "admin":
+        raise PermissionDeniedError("仅管理员可修改模型配置")
 
 
 class ModelConfigUpdate(BaseModel):
@@ -52,7 +63,8 @@ async def update_model_config(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """更新模型配置。已登录用户均可修改，保存后失效缓存，下次 RAG 调用加载新配置。"""
+    """更新模型配置（仅 admin）。保存后失效缓存，下次 RAG 调用加载新配置。"""
+    _require_admin(request)
     svc = ModelConfigService(db)
     result = await svc.update_config(payload.model_dump())
     invalidate_config_cache()
@@ -64,12 +76,19 @@ async def test_model_connection(
     payload: ModelConfigUpdate,
     request: Request,
 ) -> dict:
-    """测试 LLM 连通性：用提交的配置发一条极简 chat 请求，返回成功/失败与耗时。"""
+    """测试 LLM 连通性（仅 admin）：用提交的配置发一条极简 chat 请求。
+
+    安全：先校验调用者身份，再校验 Base URL 不属于内网/本机/云元数据地址
+    （SSRF 防护），失败信息不回显响应体原文。
+    """
+    _require_admin(request)
     # 测试不需要保存到 DB，直接用提交的参数构建客户端
     if payload.llm_provider == "mock":
         return {"ok": True, "message": "mock 模式无需测试连通性", "latency_ms": 0}
     if not payload.llm_base_url or not payload.llm_model:
         return {"ok": False, "message": "请填写 Base URL 和模型名称"}
+    # SSRF 防护：禁止内网 / 本机 / 云元数据地址
+    assert_safe_public_url(payload.llm_base_url, field="LLM Base URL")
     try:
         llm = OpenAICompatibleLLM(
             base_url=payload.llm_base_url,
@@ -94,7 +113,9 @@ async def test_model_connection(
     except asyncio.TimeoutError:
         return {"ok": False, "message": "请求超时（30s），请检查网络或 Base URL"}
     except Exception as exc:
-        return {"ok": False, "message": f"连通失败：{exc}"}
+        # 详细异常只写日志：避免把内部响应体/堆栈回显给调用方
+        logger.warning(f"模型连通性测试失败 base_url={payload.llm_base_url}: {exc}")
+        return {"ok": False, "message": f"连通失败：{type(exc).__name__}"}
 
 
 # ── 系统级配置（BUSINESS_RULES §8）────────────────────────────────────────────

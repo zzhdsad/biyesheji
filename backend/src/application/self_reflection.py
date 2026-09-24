@@ -271,14 +271,33 @@ def reflection_config(enabled: bool | None = None, llm_enabled: bool | None = No
     }
 
 
+def evidence_number(ev: dict, position: int) -> int:
+    """证据在 Prompt / Citation 中的编号（BUG-015）。
+
+    evidence 是**阈值过滤后**的列表，而答案里的 [citation:N] 与 Prompt 里的
+    [N] 都基于**未过滤的 hits** 编号。因此编号必须取证据自带的 source_index
+    （命中位序），只有在缺失时才回退到过滤后的位置，避免两套编号空间错位。
+    """
+    raw = ev.get("source_index")
+    if isinstance(raw, bool):
+        return position
+    if isinstance(raw, int) and raw > 0:
+        return raw
+    if isinstance(raw, str) and raw.isdigit() and int(raw) > 0:
+        return int(raw)
+    return position
+
+
 def build_consistency_messages(question: str, evidence: list[dict], answer: str) -> list[dict]:
     """构造 LLM 一致性检查的 messages（严格限权提示 + 编号资料 + 答案）。
 
     资料沿用 _build_user_prompt 的编号口径（[i] 编号），使 LLM 指出的编号可追溯。
+    BUG-015：编号取 evidence_number（source_index），与答案中的引用编号一致。
     """
     blocks: list[str] = []
     for i, ev in enumerate(evidence, start=1):
-        blocks.append(f"[{i}] {ev.get('source_label') or ev.get('source_kind') or ''} "
+        n = evidence_number(ev, i)
+        blocks.append(f"[{n}] {ev.get('source_label') or ev.get('source_kind') or ''} "
                       f"{ev.get('source_name') or ''}\n{ev.get('evidence_text') or ev.get('content') or ''}")
     user = (
         f"问题：{question}\n\n资料（编号即来源标识）：\n"
@@ -358,7 +377,9 @@ def build_revision_messages(question: str, evidence: list[dict], answer: str) ->
     """
     blocks: list[str] = []
     for i, ev in enumerate(evidence, start=1):
-        blocks.append(f"[{i}] {ev.get('source_label') or ev.get('source_kind') or ''} "
+        # BUG-015：编号必须用 source_index，与原文答案的 [citation:N] 同空间
+        n = evidence_number(ev, i)
+        blocks.append(f"[{n}] {ev.get('source_label') or ev.get('source_kind') or ''} "
                       f"{ev.get('source_name') or ''}\n{ev.get('evidence_text') or ev.get('content') or ''}")
     user = (
         f"问题：{question}\n\n资料（编号即来源标识，引用时标注 [citation: 编号, 页码]）：\n"
@@ -559,10 +580,17 @@ class SelfReflection:
             )
 
         # ── 引用完整性 + 证据支持检查 ──────────────────────────────────────
+        # BUG-015：evidence 是过滤后的列表，答案编号基于未过滤的 hits。
+        # 因此必须按 source_index 建映射，不能再用 evidence[i-1] 取位置，
+        # 否则会误判越界（多余 revise/retry）或取到错位证据做 Cited 判定。
+        by_index: dict[int, dict] = {}
+        for pos, ev in enumerate(evidence, start=1):
+            by_index.setdefault(evidence_number(ev, pos), ev)
+
         indices = extract_citation_indices(answer)
-        valid = [i for i in indices if 1 <= i <= len(evidence)]
+        valid = [i for i in indices if i in by_index]
         invalid_count = len(indices) - len(valid)
-        cited = [evidence[i - 1] for i in valid]
+        cited = [by_index[i] for i in valid]
         cited_accepted = [e for e in cited if classify_evidence(e)[1]]
 
         issues: list[str] = []

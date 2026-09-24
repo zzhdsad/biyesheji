@@ -33,6 +33,7 @@ import {
   unmountKbResource,
   fetchKnowledgeBases,
 } from '@/services/api';
+import { useRequestSeq } from '@/hooks/useRequestSeq';
 import type {
   Herb,
   KBResource,
@@ -97,6 +98,7 @@ function KbResourcesContent() {
   const searchParams = useSearchParams();
   const kbId = searchParams.get('kb_id') ?? '';
   const { message } = App.useApp();
+  const reqSeq = useRequestSeq(); // BUG-048：丢弃过期的列表响应
 
   const [kb, setKb] = useState<KnowledgeBase | null>(null);
   const [resources, setResources] = useState<KBResource[]>([]);
@@ -131,20 +133,23 @@ function KbResourcesContent() {
 
   const loadResources = useCallback(async () => {
     if (!kbId) return;
+    // BUG-048：快速切换筛选条件时旧慢响应覆盖新数据 → 丢弃过期响应
+    const reqId = reqSeq.begin();
     setLoading(true);
     try {
       const resp = await fetchKbResources(kbId, {
         resource_type: filterType,
         limit: 100,
       });
+      if (!reqSeq.isLatest(reqId)) return;
       setResources(resp.items);
       setTotal(resp.total);
     } catch {
-      message.error('挂载资源列表加载失败');
+      if (reqSeq.isLatest(reqId)) message.error('挂载资源列表加载失败');
     } finally {
-      setLoading(false);
+      if (reqSeq.isLatest(reqId)) setLoading(false);
     }
-  }, [kbId, filterType, message]);
+  }, [kbId, filterType, message, reqSeq]);
 
   useEffect(() => {
     void loadKb();
@@ -190,18 +195,23 @@ function KbResourcesContent() {
     }
   };
 
-  const onUnmount = async (row: KBResource) => {
-    try {
-      await unmountKbResource(kbId, row.resource_type, row.resource_id);
-      message.success(`「${row.resource_name}」已卸载`);
-      await loadResources();
-    } catch (err: unknown) {
-      const detail =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data
-          ?.detail ?? '卸载失败';
-      message.error(detail);
-    }
-  };
+  // BUG-049：columns 的 useMemo 依赖里包含本回调，必须稳定引用（useCallback），
+  // 否则闭包会捕获旧版本的 loadResources/filterType（卸载后用旧条件刷新）。
+  const onUnmount = useCallback(
+    async (row: KBResource) => {
+      try {
+        await unmountKbResource(kbId, row.resource_type, row.resource_id);
+        message.success(`「${row.resource_name}」已卸载`);
+        await loadResources();
+      } catch (err: unknown) {
+        const detail =
+          (err as { response?: { data?: { detail?: string } } })?.response?.data
+            ?.detail ?? '卸载失败';
+        message.error(detail);
+      }
+    },
+    [kbId, message, loadResources],
+  );
 
   const columns: ColumnsType<KBResource> = useMemo(
     () => [
@@ -258,7 +268,9 @@ function KbResourcesContent() {
         ),
       },
     ],
-    [kbId],
+    // BUG-049：依赖必须是闭包捕获到的回调（旧实现仅 [kbId] → 捕获旧的
+    // onUnmount/loadResources，卸载后按旧筛选条件刷新列表）
+    [onUnmount],
   );
 
   const headerLeft = (

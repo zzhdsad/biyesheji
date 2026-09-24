@@ -397,9 +397,12 @@ async def update_theory(
         from src.application.resource_vector_service import ResourceVectorService
         svc = ResourceVectorService()
         await svc.revectorize_all_mounts(db, theory, "theory")
+        # BUG-047：重新向量化失败必须留痕（审计详情），不能静默过期
+        if svc.last_revectorize_failures:
+            changed["_vector_revectorize_failed"] = svc.last_revectorize_failures
     except Exception:
         import logging
-        logging.getLogger(__name__).warning(
+        logging.getLogger(__name__).error(
             f"theory 更新后重新向量化失败 id={theory.id}", exc_info=True
         )
 
@@ -445,6 +448,16 @@ async def delete_theory(
         raise AppException(
             422, f"资源向量清理失败，无法删除：{exc}"
         ) from exc
+
+    # BUG-009：同步清理该资源的知识图谱节点（边随 FK CASCADE 删除）
+    try:
+        from src.application.kg_service import KgService
+        await KgService(db).delete_resource_nodes("theory", theory.id)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).error(
+            f"theory KG 节点清理失败 id={theory.id}: {exc}", exc_info=True
+        )
 
     await db.delete(theory)
     await db.flush()

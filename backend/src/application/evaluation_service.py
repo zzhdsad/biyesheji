@@ -33,6 +33,7 @@ from typing import Any
 
 from loguru import logger
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.dynamic_router import DYNAMIC_ROUTER_STRATEGY, ROUTER_VERSION
@@ -63,6 +64,40 @@ from src.application.question_types import (  # noqa: E402
 BASELINE_RETRIEVAL_STRATEGY = "hybrid_rrf_rerank_hyde"
 DEFAULT_EXPERIMENT_NAME = "baseline"
 DEFAULT_DATASET_VERSION = "v1"
+
+# BUG-025：动态路由运行中，连策略都没选出来就失败的用例的归档标签。
+# 不能写成 "dynamic_router"——否则「问题类型 × 策略 × 指标」对比会把基础设施
+# 故障算成该策略的效果（AGENTS.md：禁止伪造评测结果）。
+ROUTER_FAILED_STRATEGY = "router_failed"
+
+# BUG-019（已知差异，仅标注不改行为）：评测走 RagService.retrieve_and_answer
+# （非流式），该路径允许 Reflection retry；线上 SSE 路径 ask_stream 因 citations
+# 已在生成前下发，换检索策略会导致证据与已下发引用卡片不一致，故固定为 False。
+# 两侧行为均保持不变，只把差异写入 config_snapshot，使「评测结论能否迁移到线上」
+# 这件事可追溯、可解释。
+EVAL_ALLOW_RETRY = True
+ONLINE_STREAM_ALLOW_RETRY = False
+
+# BUG-023：列表分页默认值与上限。默认值沿用原先硬编码的 100 / 200，行为不变，
+# 新增分页参数后可避免「只返回前 N 条且无法翻页」。
+DEFAULT_RUN_PAGE_SIZE = 100
+DEFAULT_HISTORY_PAGE_SIZE = 200
+MAX_PAGE_SIZE = 500
+
+
+def _page_clamp(limit: int, offset: int, default: int) -> tuple[int, int]:
+    """分页参数兜底：非法值或超限时夹到安全区间（路由层另有 422 校验）。"""
+    try:
+        limit_i = int(limit)
+    except (TypeError, ValueError):
+        limit_i = default
+    try:
+        offset_i = int(offset)
+    except (TypeError, ValueError):
+        offset_i = 0
+    if limit_i <= 0:
+        limit_i = default
+    return min(limit_i, MAX_PAGE_SIZE), max(offset_i, 0)
 
 # 配置快照中记录的运行时键（不含 API Key 等敏感信息）
 _RUNTIME_CONFIG_KEYS = (
@@ -261,6 +296,86 @@ class EvaluationService:
         use_dynamic_router: bool = False,
         use_evidence_gate: bool | None = None,
         use_self_reflection: bool | None = None,
+        idempotency_key: str | None = None,
+    ) -> tuple[EvaluationRun, list[CaseResult]]:
+        """运行评估的对外入口：负责开关治理与幂等保护，实际执行见 `_execute`。
+
+        BUG-022：Gate / Reflection 开关是**就地改写** `RagService` 实例状态实现的，
+        RagService 一旦被复用（共享实例），上一次实验的开关会污染下一次。
+        这里在 `try/finally` 中设置与还原，任何异常路径都不残留状态。
+
+        BUG-023：`idempotency_key` 非空时，重复提交直接返回既有 run 与其结果
+        （并发重复提交由 `idempotency_key` 唯一索引在数据库层兜住），
+        不再产生重复的 run + evaluation_results。
+        """
+        if idempotency_key:
+            existing = await self._find_run_by_idempotency_key(idempotency_key)
+            if existing is not None:
+                if existing.kb_id != kb_id:
+                    raise AppException(
+                        409, "idempotency_key 已绑定其他知识库的评估运行"
+                    )
+                logger.info(
+                    f"幂等键命中，返回既有运行 key={idempotency_key} "
+                    f"run_id={existing.id}"
+                )
+                return existing, await self._load_results(existing.id)
+
+        reflection_enabled = (
+            bool(getattr(settings, "SELF_REFLECTION_ENABLED", True))
+            if use_self_reflection is None
+            else bool(use_self_reflection)
+        )
+        gate_enabled = (
+            bool(getattr(settings, "EVIDENCE_GATE_ENABLED", True))
+            if use_evidence_gate is None
+            else bool(use_evidence_gate)
+        )
+        # BUG-022：记录原始值 → 覆盖 → finally 还原（不再依赖 try/except AttributeError）
+        restore: list[tuple[Any, bool]] = []
+        reflector = getattr(self.rag, "reflector", None)
+        if reflector is not None and hasattr(reflector, "enabled"):
+            restore.append((reflector, bool(reflector.enabled)))
+            reflector.enabled = reflection_enabled
+        else:  # 注入的 rag 未提供 Reflection（如测试桩）
+            logger.warning("RagService 未提供 Self Reflection，本次运行不记录反思决策")
+            reflection_enabled = False
+        gate = getattr(self.rag, "gate", None)
+        if gate is not None and hasattr(gate, "enabled"):
+            restore.append((gate, bool(gate.enabled)))
+            gate.enabled = gate_enabled
+        else:  # 注入的 rag 未提供 Gate（如测试桩）
+            logger.warning("RagService 未提供 Evidence Gate，本次运行不记录 Gate 决策")
+            gate_enabled = False
+
+        try:
+            return await self._execute(
+                kb_id=kb_id,
+                case_ids=case_ids,
+                experiment_name=experiment_name,
+                retrieval_strategy=retrieval_strategy,
+                dataset_version=dataset_version,
+                use_dynamic_router=use_dynamic_router,
+                gate_enabled=gate_enabled,
+                reflection_enabled=reflection_enabled,
+                idempotency_key=idempotency_key or None,
+            )
+        finally:
+            for target, original in restore:
+                target.enabled = original
+
+    async def _execute(
+        self,
+        *,
+        kb_id: uuid.UUID,
+        case_ids: list[uuid.UUID] | None = None,
+        experiment_name: str = DEFAULT_EXPERIMENT_NAME,
+        retrieval_strategy: str = BASELINE_RETRIEVAL_STRATEGY,
+        dataset_version: str | None = None,
+        use_dynamic_router: bool = False,
+        gate_enabled: bool = True,
+        reflection_enabled: bool = True,
+        idempotency_key: str | None = None,
     ) -> tuple[EvaluationRun, list[CaseResult]]:
         """运行评估。返回 (EvaluationRun 归档记录, per-case results)。
 
@@ -294,28 +409,7 @@ class EvaluationService:
         - Reflection 配置与决策分布写入 config_snapshot["self_reflection"]。
           本阶段只建立 Reflection 评测能力，不产出任何 Reflection 效果结论。
         """
-        # 阶段十五：显式开关 Reflection（None = 沿用全局配置）
-        reflection_enabled = (
-            bool(getattr(settings, "SELF_REFLECTION_ENABLED", True))
-            if use_self_reflection is None
-            else bool(use_self_reflection)
-        )
-        try:
-            self.rag.reflector.enabled = reflection_enabled
-        except AttributeError:  # 注入的 rag 未提供 Reflection（如测试桩）
-            logger.warning("RagService 未提供 Self Reflection，本次运行不记录反思决策")
-            reflection_enabled = False
-        # 阶段十四：显式开关 Gate（None = 沿用全局配置）
-        gate_enabled = (
-            bool(getattr(settings, "EVIDENCE_GATE_ENABLED", True))
-            if use_evidence_gate is None
-            else bool(use_evidence_gate)
-        )
-        try:
-            self.rag.gate.enabled = gate_enabled
-        except AttributeError:  # 注入的 rag 未提供 Gate（如测试桩）：不记录 Gate 决策
-            logger.warning("RagService 未提供 Evidence Gate，本次运行不记录 Gate 决策")
-            gate_enabled = False
+        # Gate / Reflection 开关由 run() 统一设置并在 finally 中还原（BUG-022）
         cases = await self._load_cases(kb_id, case_ids)
         if not cases:
             raise AppException(404, "未找到测试用例：请先上传测试集")
@@ -342,9 +436,19 @@ class EvaluationService:
             retrieval_strategy=strategy_label,
             dataset_version=version,
             config_snapshot=config_snapshot,
+            idempotency_key=idempotency_key,
         )
         self.db.add(run)
-        await self.db.flush()  # 取 run.id 供 evaluation_results.run_id 引用
+        try:
+            await self.db.flush()  # 取 run.id 供 evaluation_results.run_id 引用
+        except IntegrityError:
+            # BUG-023：并发重复提交（另一个事务抢先落了同一幂等键）→ 回滚并返回既有运行
+            await self.db.rollback()
+            existing = await self._find_run_by_idempotency_key(idempotency_key or "")
+            if existing is not None:
+                logger.info(f"并发幂等去重 run_id={existing.id} key={idempotency_key}")
+                return existing, await self._load_results(existing.id)
+            raise AppException(409, "并发提交冲突，请携带唯一的 idempotency_key 重试")
 
         results: list[CaseResult] = []
         for tc in cases:
@@ -364,8 +468,17 @@ class EvaluationService:
                     answer_correctness=res.answer_correctness,
                     run_id=str(run.id),
                     experiment_name=run.experiment_name,
-                    # 阶段十二：动态路由运行记录逐条实际策略；否则记录 run 级策略
-                    retrieval_strategy=res.retrieval_strategy or run.retrieval_strategy,
+                    # 阶段十二：动态路由运行记录逐条实际策略；否则记录 run 级策略。
+                    # BUG-025：动态路由未能选出策略就失败的用例归档为 ROUTER_FAILED_STRATEGY，
+                    # 绝不回落成 run 级的 "dynamic_router"（否则把故障算成策略效果）。
+                    retrieval_strategy=(
+                        res.retrieval_strategy
+                        or (
+                            ROUTER_FAILED_STRATEGY
+                            if use_dynamic_router
+                            else run.retrieval_strategy
+                        )
+                    ),
                     dataset_version=tc.dataset_version,
                     question_type=tc.question_type,
                     answer=res.answer,
@@ -382,7 +495,7 @@ class EvaluationService:
                 )
             )
 
-        cr, ac, evaluated, skipped, passed = summarize(results)
+        summary = summarize_full(results)
         # 阶段十四：把本次运行的 Gate 配置与决策分布并入配置快照（可复现 + 可对比）
         gate_counts: dict[str, int] = {}
         for r in results:
@@ -395,8 +508,18 @@ class EvaluationService:
                 reflection_counts[r.reflection_decision] = (
                     reflection_counts.get(r.reflection_decision, 0) + 1
                 )
+        # BUG-025：动态路由「选策略即失败」的用例数，便于把故障与策略效果分开看
+        router_failed = sum(
+            1
+            for r in results
+            if use_dynamic_router and r.error is not None and not r.retrieval_strategy
+        )
         run.config_snapshot = {
             **(config_snapshot or {}),
+            "router": {
+                **(config_snapshot or {}).get("router", {}),
+                "failed_count": router_failed,
+            },
             "evidence_gate": {
                 **gate_config(gate_enabled),
                 "decision_counts": gate_counts,
@@ -404,14 +527,19 @@ class EvaluationService:
             "self_reflection": {
                 **reflection_config(reflection_enabled),
                 "decision_counts": reflection_counts,
+                # BUG-019：仅标注两侧差异，不改变任何运行时行为
+                "allow_retry": bool(reflection_enabled and EVAL_ALLOW_RETRY),
+                "allow_retry_online_stream": ONLINE_STREAM_ALLOW_RETRY,
             },
         }
         run.case_count = len(results)
-        run.evaluated_count = evaluated
-        run.skipped_count = skipped
-        run.context_relevancy = cr
-        run.answer_correctness = ac
-        run.passed = passed
+        run.evaluated_count = summary.evaluated_count
+        run.skipped_count = summary.skipped_count
+        # BUG-011：失败用例单独计数，且已从上文所有均值中剔除
+        run.failed_count = summary.failed_count
+        run.context_relevancy = summary.context_relevancy
+        run.answer_correctness = summary.answer_correctness
+        run.passed = summary.passed
         run.threshold = settings.EVAL_ACCURACY_THRESHOLD
         run.by_question_type = breakdown_by_question_type(results)
         await self.db.commit()
@@ -420,10 +548,67 @@ class EvaluationService:
             f"strategy={run.retrieval_strategy} dataset={run.dataset_version} "
             f"gate={'on' if gate_enabled else 'off'}:{GATE_VERSION} "
             f"reflection={'on' if reflection_enabled else 'off'}:{REFLECTION_VERSION} "
-            f"kb={kb_id} cases={len(results)} evaluated={evaluated} skipped={skipped} "
-            f"cr={cr:.3f} ac={'None' if ac is None else f'{ac:.3f}'}"
+            f"kb={kb_id} cases={len(results)} evaluated={summary.evaluated_count} "
+            f"skipped={summary.skipped_count} failed={summary.failed_count} "
+            f"cr={summary.context_relevancy:.3f} "
+            f"ac={'None' if summary.answer_correctness is None else f'{summary.answer_correctness:.3f}'}"
         )
+        if summary.failed_count:
+            # 失败通常代表基础设施故障（Milvus / LLM / Embedding 不可用），必须显性暴露，
+            # 不能混进"检索质量为 0"的报告里（AGENTS.md：禁止伪造评测结果）
+            logger.error(
+                f"评估存在失败用例 run_id={run.id} "
+                f"failed={summary.failed_count}/{len(results)}："
+                f"这些用例未计入任何均值，请检查基础设施可用性"
+            )
         return run, results
+
+    # ── BUG-023：幂等查询入口 ───────────────────────────────────────────────
+
+    async def _find_run_by_idempotency_key(
+        self, key: str
+    ) -> EvaluationRun | None:
+        """按幂等键查找既有运行（NULL 键不参与）。"""
+        if not key:
+            return None
+        stmt = select(EvaluationRun).where(EvaluationRun.idempotency_key == key)
+        return (await self.db.scalars(stmt)).first()
+
+    async def _load_results(self, run_id: uuid.UUID) -> list[CaseResult]:
+        """从 evaluation_results 重建 per-case 结果（幂等/并发去重后复用既有运行）。"""
+        rows = (
+            await self.db.execute(
+                select(EvaluationResult, TestCase)
+                .join(TestCase, TestCase.id == EvaluationResult.test_case_id)
+                .where(EvaluationResult.run_id == str(run_id))
+                .order_by(EvaluationResult.created_at.asc())
+            )
+        ).all()
+        return [
+            CaseResult(
+                test_case_id=str(er.test_case_id),
+                question=tc.question,
+                golden_answer=tc.golden_answer,
+                golden_contexts=tc.golden_contexts or [],
+                answer=er.answer or "",
+                retrieved_contexts=er.retrieved_contexts or [],
+                context_relevancy=float(er.context_relevancy or 0.0),
+                answer_correctness=er.answer_correctness,
+                error=er.error,
+                question_type=er.question_type or "general",
+                dataset_version=er.dataset_version or DEFAULT_DATASET_VERSION,
+                needs_review=tc.needs_review,
+                retrieval_strategy=er.retrieval_strategy,
+                gate_decision=er.gate_decision,
+                gate_version=er.gate_version,
+                retry_strategy=er.retry_strategy,
+                reflection_decision=er.reflection_decision,
+                reflection_version=er.reflection_version,
+                reflection_retry_strategy=er.reflection_retry_strategy,
+                reflection_reason=er.reflection_reason,
+            )
+            for er, tc in rows
+        ]
 
     @staticmethod
     def list_strategies() -> list[dict]:
@@ -434,11 +619,32 @@ class EvaluationService:
         """
         return [strategy_out(name) for name in strategy_names()]
 
-    async def list_runs(self, kb_id: uuid.UUID | None = None) -> list[dict]:
-        """实验运行归档列表（按时间倒序），用于 Baseline 与消融实验对比。"""
-        stmt = select(EvaluationRun).order_by(EvaluationRun.created_at.desc()).limit(100)
+    async def list_runs(
+        self,
+        kb_id: uuid.UUID | None = None,
+        accessible_kb_ids: set[uuid.UUID] | None = None,
+        limit: int = DEFAULT_RUN_PAGE_SIZE,
+        offset: int = 0,
+    ) -> list[dict]:
+        """实验运行归档列表（按时间倒序），用于 Baseline 与消融实验对比。
+
+        accessible_kb_ids：非 None 时只返回这些知识库下的运行（权限隔离，
+        BUG-001）。默认 None 表示不过滤，保持旧调用行为兼容。
+
+        BUG-023：默认值与旧行为一致（limit=100、offset=0），新增分页参数，
+        上限由 `_page_clamp` 兜住，避免一次性拉取全表。
+        """
+        limit, offset = _page_clamp(limit, offset, DEFAULT_RUN_PAGE_SIZE)
+        stmt = (
+            select(EvaluationRun)
+            .order_by(EvaluationRun.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        )
         if kb_id is not None:
             stmt = stmt.where(EvaluationRun.kb_id == kb_id)
+        elif accessible_kb_ids is not None:
+            stmt = stmt.where(EvaluationRun.kb_id.in_(accessible_kb_ids))
         rows = (await self.db.scalars(stmt)).all()
         return [self._run_out(r) for r in rows]
 
@@ -450,6 +656,8 @@ class EvaluationService:
 
     @staticmethod
     def _run_out(run: EvaluationRun) -> dict:
+        # getattr 兜底：迁移尚未执行的历史库/对象无该属性时按 0 处理
+        failed = int(getattr(run, "failed_count", 0) or 0)
         return {
             "run_id": str(run.id),
             "kb_id": str(run.kb_id),
@@ -459,6 +667,9 @@ class EvaluationService:
             "case_count": run.case_count,
             "evaluated_count": run.evaluated_count,
             "skipped_count": run.skipped_count,
+            # BUG-011：失败用例数 + 整轮是否因基础设施故障不可信
+            "failed_count": failed,
+            "infra_failed": infra_failed(failed, run.case_count),
             "context_relevancy": run.context_relevancy,
             "answer_correctness": run.answer_correctness,
             "passed": run.passed,
@@ -469,17 +680,33 @@ class EvaluationService:
         }
 
     async def list_history(
-        self, kb_id: uuid.UUID | None = None, run_id: str | None = None
+        self,
+        kb_id: uuid.UUID | None = None,
+        run_id: str | None = None,
+        accessible_kb_ids: set[uuid.UUID] | None = None,
+        limit: int = DEFAULT_HISTORY_PAGE_SIZE,
+        offset: int = 0,
     ) -> list[dict]:
-        """历史评估结果（关联 test_case 取问题与标准答案）。"""
+        """历史评估结果（关联 test_case 取问题与标准答案）。
+
+        accessible_kb_ids：非 None 时只返回这些知识库下的用例结果（权限隔离，
+        BUG-001）。默认 None 表示不过滤，保持旧调用行为兼容。
+
+        BUG-023：默认值与旧行为一致（limit=200、offset=0），新增分页参数，
+        上限由 `_page_clamp` 兜住。
+        """
+        limit, offset = _page_clamp(limit, offset, DEFAULT_HISTORY_PAGE_SIZE)
         stmt = (
             select(EvaluationResult, TestCase)
             .join(TestCase, TestCase.id == EvaluationResult.test_case_id)
             .order_by(EvaluationResult.created_at.desc())
-            .limit(200)
+            .limit(limit)
+            .offset(offset)
         )
         if kb_id is not None:
             stmt = stmt.where(TestCase.kb_id == kb_id)
+        elif accessible_kb_ids is not None:
+            stmt = stmt.where(TestCase.kb_id.in_(accessible_kb_ids))
         if run_id:
             stmt = stmt.where(EvaluationResult.run_id == run_id)
         rows = (await self.db.execute(stmt)).all()
@@ -717,17 +944,93 @@ def aggregate(results: list[CaseResult]) -> tuple[float, float, bool]:
     return cr, (ac if ac is not None else 0.0), passed
 
 
+@dataclass
+class RunSummary:
+    """一次评估运行的聚合结果。
+
+    BUG-011：三类计数互斥且覆盖全部用例，语义不再混淆——
+    - evaluated_count：实际计算了 answer_correctness 的用例
+    - skipped_count：标准答案缺失/待人工确认，未计算 answer_correctness
+    - failed_count：检索/生成抛异常，本轮没有拿到任何结果（error 非空）
+
+    failed_count **不参与任何均值**：基础设施故障（Milvus 宕机、LLM 不可用）
+    不等于「检索质量为 0」，混进均值会直接污染实验结论。
+    """
+
+    context_relevancy: float
+    answer_correctness: float | None
+    evaluated_count: int
+    skipped_count: int
+    failed_count: int
+    passed: bool
+
+    @property
+    def total_count(self) -> int:
+        return self.evaluated_count + self.skipped_count + self.failed_count
+
+    @property
+    def infra_failed(self) -> bool:
+        """整轮运行是否因基础设施故障而不可信（所有用例都失败了）。"""
+        return infra_failed(self.failed_count, self.total_count)
+
+
+def infra_failed(failed_count: int, case_count: int) -> bool:
+    """BUG-011：全部用例失败 ⇒ 本报告不可信，调用方应显式提示而非展示一份 0 分报告。"""
+    failed = int(failed_count or 0)
+    total = int(case_count or 0)
+    return failed > 0 and total > 0 and failed >= total
+
+
+def summarize_full(results: list[CaseResult]) -> RunSummary:
+    """完整聚合（含失败维度）：失败用例不计入 CR / AC 均值，只计入 failed_count。"""
+    ok = [r for r in results if r.error is None]
+    failed_count = len(results) - len(ok)
+    cr = _mean([r.context_relevancy for r in ok])
+    scored = [r.answer_correctness for r in ok if r.answer_correctness is not None]
+    ac = _mean(scored) if scored else None
+    evaluated = len(scored)
+    skipped = len(ok) - evaluated
+    passed = evaluated > 0 and ac is not None and ac >= settings.EVAL_ACCURACY_THRESHOLD
+    return RunSummary(
+        context_relevancy=round(cr, 4),
+        answer_correctness=round(ac, 4) if ac is not None else None,
+        evaluated_count=evaluated,
+        skipped_count=skipped,
+        failed_count=failed_count,
+        passed=passed,
+    )
+
+
 def summarize(
     results: list[CaseResult],
 ) -> tuple[float, float | None, int, int, bool]:
-    """完整聚合：均值 CR、均值 AC（无已评估用例时为 None）、已评估数、跳过数、门禁。"""
-    cr = _mean([r.context_relevancy for r in results])
-    scored = [r.answer_correctness for r in results if r.answer_correctness is not None]
-    ac = _mean(scored) if scored else None
-    evaluated = len(scored)
-    skipped = len(results) - evaluated
-    passed = evaluated > 0 and ac is not None and ac >= settings.EVAL_ACCURACY_THRESHOLD
-    return round(cr, 4), (round(ac, 4) if ac is not None else None), evaluated, skipped, passed
+    """旧签名聚合（均值语义随 BUG-011 修正：失败用例不进均值）。
+
+    保留五元组形式兼容 TASK-008 及之前的调用方；需要失败维度请用 `summarize_full`。
+    """
+    s = summarize_full(results)
+    return (
+        s.context_relevancy,
+        s.answer_correctness,
+        s.evaluated_count,
+        s.skipped_count,
+        s.passed,
+    )
+
+
+def _bucket_out(qtype: str, group: list[CaseResult]) -> dict:
+    """单个 question_type 分组的指标（含失败计数）。"""
+    s = summarize_full(group)
+    return {
+        "question_type": qtype,
+        "question_type_label": QUESTION_TYPE_LABELS.get(qtype, qtype),
+        "case_count": len(group),
+        "evaluated_count": s.evaluated_count,
+        "skipped_count": s.skipped_count,
+        "failed_count": s.failed_count,
+        "context_relevancy": s.context_relevancy,
+        "answer_correctness": s.answer_correctness,
+    }
 
 
 def breakdown_by_question_type(results: list[CaseResult]) -> list[dict]:
@@ -735,37 +1038,7 @@ def breakdown_by_question_type(results: list[CaseResult]) -> list[dict]:
     buckets: dict[str, list[CaseResult]] = {}
     for r in results:
         buckets.setdefault(r.question_type or "general", []).append(r)
-    out: list[dict] = []
-    for qtype in QUESTION_TYPES:
-        if qtype not in buckets:
-            continue
-        group = buckets[qtype]
-        cr, ac, evaluated, skipped, _ = summarize(group)
-        out.append(
-            {
-                "question_type": qtype,
-                "question_type_label": QUESTION_TYPE_LABELS.get(qtype, qtype),
-                "case_count": len(group),
-                "evaluated_count": evaluated,
-                "skipped_count": skipped,
-                "context_relevancy": cr,
-                "answer_correctness": ac,
-            }
-        )
+    ordered = [_bucket_out(q, buckets[q]) for q in QUESTION_TYPES if q in buckets]
     # 未知类型（历史/自定义数据）兜底排在最后
-    for qtype, group in buckets.items():
-        if qtype in QUESTION_TYPES:
-            continue
-        cr, ac, evaluated, skipped, _ = summarize(group)
-        out.append(
-            {
-                "question_type": qtype,
-                "question_type_label": QUESTION_TYPE_LABELS.get(qtype, qtype),
-                "case_count": len(group),
-                "evaluated_count": evaluated,
-                "skipped_count": skipped,
-                "context_relevancy": cr,
-                "answer_correctness": ac,
-            }
-        )
-    return out
+    extra = [_bucket_out(q, g) for q, g in buckets.items() if q not in QUESTION_TYPES]
+    return ordered + extra

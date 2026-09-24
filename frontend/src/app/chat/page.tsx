@@ -1,12 +1,15 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Empty, Input, Space, Tooltip, Typography, Button, Select, Tag } from 'antd';
+import { App, Empty, Input, Space, Tooltip, Typography, Button, Select, Tag } from 'antd';
 import { SendOutlined } from '@ant-design/icons';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { ChatHeaderRight } from '@/components/layout/AppSider';
 import { MessageItem } from '@/components/chat/MessageItem';
 import { useChatStore } from '@/stores/chatStore';
+
+/** 与后端 chat.py `ChatAskRequest.question` 的 max_length=2000 保持一致（BUG-052）。 */
+const QUESTION_MAX_LENGTH = 2000;
 
 export default function ChatPage() {
   const {
@@ -22,6 +25,7 @@ export default function ChatPage() {
   } = useChatStore();
   const [input, setInput] = useState('');
   const bottomRef = useRef<HTMLDivElement>(null);
+  const { message } = App.useApp();
 
   const hasKb = knowledgeBases.length > 0;
 
@@ -39,6 +43,11 @@ export default function ChatPage() {
   const handleSend = async () => {
     const text = input.trim();
     if (!text || !hasKb || sending) return;
+    // BUG-052：超出后端上限时前端直接拦截（旧实现要等提交后才返回 422）
+    if (text.length > QUESTION_MAX_LENGTH) {
+      message.warning(`问题最长 ${QUESTION_MAX_LENGTH} 字，当前 ${text.length} 字`);
+      return;
+    }
     setInput('');
     await sendMessage(text);
   };
@@ -115,6 +124,9 @@ export default function ChatPage() {
         }
         autoSize={{ minRows: 1, maxRows: 4 }}
         disabled={!hasKb}
+        // BUG-052：与后端 max_length 对齐，输入即限长（并显示计数）
+        maxLength={QUESTION_MAX_LENGTH}
+        showCount
         onPressEnter={(e) => {
           if (!e.shiftKey) {
             e.preventDefault();

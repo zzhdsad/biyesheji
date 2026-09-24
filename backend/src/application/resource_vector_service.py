@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import uuid
 from dataclasses import dataclass
 from decimal import Decimal
@@ -43,6 +44,29 @@ LONG_TEXT_THRESHOLD = 6000
 
 # 受控资源类型词表（与 KnowledgeBaseResource.resource_type 对齐）。
 RESOURCE_TYPES: tuple[str, ...] = ("herb", "prescription", "theory", "literature")
+
+
+def _row_from_dict(raw: dict) -> VectorRow:
+    """快照 dict → VectorRow（BUG-045 补偿回写用）。"""
+    return VectorRow(
+        id=str(raw.get("id")),
+        doc_id=str(raw.get("doc_id")),
+        kb_id=str(raw.get("kb_id")),
+        chunk_index=int(raw.get("chunk_index") or 0),
+        content=raw.get("content") or "",
+        page_num=raw.get("page_num"),
+        title_path=raw.get("title_path"),
+        dense_vector=[float(x) for x in (raw.get("dense_vector") or [])],
+        sparse_vector={
+            int(k): float(v) for k, v in (raw.get("sparse_vector") or {}).items()
+        },
+        source_type=raw.get("source_type"),
+        credibility_level=raw.get("credibility_level"),
+        resource_type=raw.get("resource_type"),
+        resource_id=raw.get("resource_id"),
+        resource_name=raw.get("resource_name"),
+        era=raw.get("era"),
+    )
 
 
 class ResourceVectorError(Exception):
@@ -357,6 +381,11 @@ class ResourceVectorService:
     ) -> None:
         self.embedding = embedding
         self.store = store or get_vector_store()
+        # BUG-047：最近一次 revectorize_all_mounts 的失败清单
+        # （[{kb_id, error}]，空列表表示全部成功），供调用方写入审计
+        self.last_revectorize_failures: list[dict] = []
+        # BUG-045：最近一次 cleanup_resource_mounts 中"向量补回失败"的清单
+        self.last_cleanup_failures: list[dict] = []
 
     def _resolve_embedding(
         self, embedding: BaseEmbedding | None = None
@@ -521,14 +550,10 @@ class ResourceVectorService:
         )
         if not rows:
             return []
-        # 幂等：同一 (Resource + KB) 重新挂载/重新向量化时先清旧向量
+        # 幂等：同一 (Resource + KB) 重新挂载/重新向量化时整体替换
+        # （BUG-046：先写新再清旧，避免"删了插失败"导致该资源向量全灭）
         self.store.ensure_collection()
-        self.store.delete_by_doc(rows[0].doc_id)
-        inserted = self.store.insert(rows)
-        if inserted != len(rows):
-            raise VectorStoreError(
-                f"资源向量入库不完整：期望 {len(rows)} 条，实际 {inserted} 条"
-            )
+        self.store.replace_doc(rows[0].doc_id, rows)
         return rows
 
     def delete_vectors(
@@ -560,10 +585,14 @@ class ResourceVectorService:
         """Resource 更新后，对所有已挂载它的 KB 重新向量化并写入。
 
         遍历 knowledge_base_resources 表中该资源的全部挂载记录，
-        对每个 KB 调用 vectorize_and_store（先 delete_by_doc 清旧再 insert）。
+        对每个 KB 调用 vectorize_and_store（整体替换，见 BUG-046）。
+
+        BUG-047：失败不再只是 warning —— 失败清单写入
+        ``last_revectorize_failures``（[{kb_id, error}]）并以 error 级记录，
+        调用方据此把失败写进审计详情，避免"PG 已更新、向量静默过期"。
 
         Returns:
-            重新向量化的 KB 数量
+            重新向量化成功的 KB 数量
         """
         import asyncio
 
@@ -579,6 +608,8 @@ class ResourceVectorService:
                 )
             )
         ).all()
+        logger = logging.getLogger(__name__)
+        failures: list[dict] = []
         count = 0
         for kbr in kbrs:
             try:
@@ -589,13 +620,16 @@ class ResourceVectorService:
                     resource_type=resource_type,
                 )
                 count += 1
-            except Exception:
-                import logging
-                logging.getLogger(__name__).warning(
+            except Exception as exc:
+                failures.append(
+                    {"kb_id": str(kbr.knowledge_base_id), "error": str(exc)}
+                )
+                logger.error(
                     f"重新向量化失败 {resource_type}={resource.id} "
-                    f"kb={kbr.knowledge_base_id}",
+                    f"kb={kbr.knowledge_base_id}: {exc}",
                     exc_info=True,
                 )
+        self.last_revectorize_failures = failures
         return count
 
     async def cleanup_resource_mounts(
@@ -606,8 +640,12 @@ class ResourceVectorService:
     ) -> int:
         """Resource 删除时，清理所有 KBR 关联及对应 Milvus vectors。
 
-        遍历所有挂载该资源的 KB，逐个删除 Milvus 向量 + KBR 记录。
-        向量删除失败时抛出异常，阻止资源删除（避免孤儿向量）。
+        遍历所有挂载该资源的 KB，逐个删除 KBR 记录 + Milvus 向量。
+
+        BUG-045（顺序即安全）：**先删 KBR（同一事务、未提交），再删向量**。
+        向量删除失败 → 抛异常 → 调用方事务回滚，KBR 恢复，
+        不会出现"资源仍挂载但向量永久消失"；反之（先删向量）一旦挂载删除
+        回滚就会留下永久检索不到的挂载。
 
         Returns:
             清理的挂载数量
@@ -627,14 +665,51 @@ class ResourceVectorService:
             )
         ).all()
         self.store.ensure_collection()
-        for kbr in kbrs:
-            doc_id = make_doc_id(
-                resource_type, resource_id, kbr.knowledge_base_id
+        # (doc_id, 快照)：已删向量的挂载，失败时用于补偿回写
+        done: list[tuple[str, list[dict]]] = []
+        try:
+            for kbr in kbrs:
+                doc_id = make_doc_id(
+                    resource_type, resource_id, kbr.knowledge_base_id
+                )
+                # 先删挂载（未提交，失败可回滚），再删向量
+                await db.delete(kbr)
+                await db.flush()
+                snapshot = await asyncio.to_thread(self.store.query_rows, doc_id)
+                await asyncio.to_thread(self.store.delete_by_doc, doc_id)
+                done.append((doc_id, snapshot))
+        except Exception as exc:
+            # 失败安全：挂载删除随事务回滚；已删向量尽力补回，
+            # 避免出现"资源仍挂载但永久检索不到"（BUG-045）
+            failed = self._restore_vectors(done)
+            self.last_cleanup_failures = [
+                {"doc_id": doc_id, "error": str(exc)}
+                for doc_id, _ in done
+                if doc_id in failed
+            ]
+            logging.getLogger(__name__).error(
+                f"资源挂载清理失败 {resource_type}={resource_id}: {exc}；"
+                f"已恢复向量 {len(done) - len(failed)}/{len(done)} 个 KB"
             )
-            # 向量删除失败抛异常，阻止后续 KBR 删除 + 资源删除
-            await asyncio.to_thread(self.store.delete_by_doc, doc_id)
-            await db.delete(kbr)
+            raise
+        self.last_cleanup_failures = []
         return len(kbrs)
+
+    def _restore_vectors(self, done: list[tuple[str, list[dict]]]) -> set[str]:
+        """把已删除的向量补回（用删除前快照）；返回补回失败的 doc_id 集合。"""
+        failed: set[str] = set()
+        for doc_id, snapshot in done:
+            if not snapshot:
+                continue
+            try:
+                rows = [_row_from_dict(r) for r in snapshot]
+                self.store.insert(rows)
+            except Exception as exc:  # noqa: BLE001  补偿失败只记录，不掩盖原始异常
+                failed.add(doc_id)
+                logging.getLogger(__name__).error(
+                    f"向量补回失败 doc_id={doc_id}: {exc}", exc_info=True
+                )
+        return failed
 
     async def cleanup_kb_resource_vectors(self, db, kb_id) -> int:
         """KB purge 时，删除该 KB 下所有 Resource 向量。

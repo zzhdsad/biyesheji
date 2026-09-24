@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { UserOut } from '@/types';
-import { apiChangePassword, apiLogin, apiLogout, apiRegister, apiFetchMe } from '@/services/auth';
+import { apiChangePassword, apiLogin, apiLogout, apiFetchMe } from '@/services/auth';
 import {
   clearToken,
   getStoredUser,
@@ -12,7 +12,7 @@ import {
 interface UserState {
   token: string | null;
   user: UserOut | null;
-  loading: boolean; // 登录/注册请求进行中
+  loading: boolean; // 登录请求进行中（无开放注册，账号由管理员创建）
   initializing: boolean; // 应用启动时恢复登录态进行中
   error: string | null;
   /** 是否强制修改密码（首次登录/管理员重置后） */
@@ -22,8 +22,6 @@ interface UserState {
   init: () => Promise<void>;
   /** 登录：成功写入 token + user，返回是否成功。 */
   login: (usernameOrEmail: string, password: string) => Promise<boolean>;
-  /** 注册：不自动登录（与后端语义一致），返回是否成功。 */
-  register: (email: string, username: string, password: string) => Promise<boolean>;
   /** 登出：清本地态 + 调后端语义端点 + 跳登录页。 */
   logout: () => Promise<void>;
   /** 修改密码（首次登录强制修改时调用）。 */
@@ -85,21 +83,6 @@ export const useUserStore = create<UserState>((set, get) => ({
       const detail =
         (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
         '登录失败，请稍后重试';
-      set({ loading: false, error: detail });
-      return false;
-    }
-  },
-
-  register: async (email, username, password) => {
-    set({ loading: true, error: null });
-    try {
-      await apiRegister({ email, username, password });
-      set({ loading: false });
-      return true;
-    } catch (err) {
-      const detail =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        '注册失败，请稍后重试';
       set({ loading: false, error: detail });
       return false;
     }

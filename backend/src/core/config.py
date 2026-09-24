@@ -3,7 +3,12 @@
 import os
 from functools import lru_cache
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# 仅用于本地开发/测试的默认密钥；生产环境必须经环境变量 SECRET_KEY 覆盖，
+# 否则启动即失败（BUG-026：固定密钥可被用于伪造 JWT）。
+DEV_DEFAULT_SECRET_KEY = "hfimJesB4aztr41rt3zgnBWKgyY7VIgq5C0LmNoUCSHnUCicRImiHt-_wDpmmbYN"
 
 
 class Settings(BaseSettings):
@@ -26,7 +31,7 @@ class Settings(BaseSettings):
     MILVUS_COLLECTION: str = "document_chunks"
 
     # 安全（JWT 鉴权）；默认值仅用于开发/测试，生产必须经 .env 覆盖为随机 ≥32 字节密钥
-    SECRET_KEY: str = "hfimJesB4aztr41rt3zgnBWKgyY7VIgq5C0LmNoUCSHnUCicRImiHt-_wDpmmbYN"
+    SECRET_KEY: str = DEV_DEFAULT_SECRET_KEY
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440  # 7 天
 
@@ -38,6 +43,11 @@ class Settings(BaseSettings):
     # openai（OpenAI 兼容接口，如 vLLM）/ mock（确定性假回答，开发/测试）
     LLM_BACKEND: str = "openai"
     LLM_TIMEOUT_SECONDS: int = 120
+    # SSE 流式问答保活（BUG-035）：反向代理（如 nginx proxy_read_timeout=60s）
+    # 会在检索阶段掐断"长时间无数据"的连接，故在业务事件之间插入注释帧心跳；
+    # 总超时用于收敛卡住不返回的流（超时先发 error 事件再关闭）。
+    SSE_HEARTBEAT_INTERVAL_SECONDS: int = 15
+    SSE_TOTAL_TIMEOUT_SECONDS: int = 900
 
     # 向量化（TECH_DESIGN：BGE-M3 稠密 1024d + 稀疏向量）
     # flagembedding（本地 FlagEmbedding，需下载模型）/ mock（确定性伪向量，开发/测试）
@@ -116,6 +126,16 @@ class Settings(BaseSettings):
 
     # 评估质量门禁（AGENTS.md：answer_correctness ≥ 0.75 才允许合入）
     EVAL_ACCURACY_THRESHOLD: float = 0.75
+
+    @model_validator(mode="after")
+    def _check_production_secret(self) -> "Settings":
+        """生产环境禁止使用内置默认密钥（否则任何人都能签发管理员 JWT）。"""
+        if self.ENV == "prod" and self.SECRET_KEY == DEV_DEFAULT_SECRET_KEY:
+            raise ValueError(
+                "生产环境（ENV=prod）必须通过环境变量 SECRET_KEY 配置独立随机密钥，"
+                "禁止使用内置默认值"
+            )
+        return self
 
 
 @lru_cache

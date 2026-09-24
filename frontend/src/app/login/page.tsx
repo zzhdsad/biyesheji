@@ -16,6 +16,18 @@ interface LoginFormValues {
  * 注意：useSearchParams() 在 Next.js 14 静态预渲染时要求 Suspense 边界
  * （missing-suspense-with-csr-bailout），因此默认导出用 <Suspense> 包裹。
  */
+/**
+ * 只允许站内绝对路径跳转，杜绝开放重定向（BUG-028）：
+ * `?redirect=https://evil.com` 或 `//evil.com` 会被丢弃并回退到 /chat。
+ */
+function safeRedirect(raw: string | null | undefined): string {
+  if (!raw) return '/chat';
+  if (!raw.startsWith('/') || raw.startsWith('//') || raw.startsWith('/\\')) {
+    return '/chat';
+  }
+  return raw;
+}
+
 function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -24,16 +36,14 @@ function LoginForm() {
   // 已登录 → 直接跳目标页（避免登录页反复可访问）
   useEffect(() => {
     if (token) {
-      const redirect = searchParams.get('redirect') || '/chat';
-      router.replace(redirect);
+      router.replace(safeRedirect(searchParams.get('redirect')));
     }
   }, [token, router, searchParams]);
 
   const onFinish = async (values: LoginFormValues) => {
     const ok = await login(values.username_or_email, values.password);
     if (ok) {
-      const redirect = searchParams.get('redirect') || '/chat';
-      router.replace(redirect);
+      router.replace(safeRedirect(searchParams.get('redirect')));
     }
   };
 

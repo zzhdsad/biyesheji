@@ -421,13 +421,16 @@ async def update_herb(
         raise AppException(409, "同名中药已存在")
 
     # Stage 4-6：更新后重新向量化所有已挂载的 KB（best-effort，失败不阻塞更新）
+    # BUG-047：失败不再静默 —— 失败清单进入审计详情，便于发现"向量过期"
     try:
         from src.application.resource_vector_service import ResourceVectorService
         svc = ResourceVectorService()
         await svc.revectorize_all_mounts(db, herb, "herb")
+        if svc.last_revectorize_failures:
+            changed["_vector_revectorize_failed"] = svc.last_revectorize_failures
     except Exception:
         import logging
-        logging.getLogger(__name__).warning(
+        logging.getLogger(__name__).error(
             f"herb 更新后重新向量化失败 id={herb.id}", exc_info=True
         )
 
@@ -473,6 +476,16 @@ async def delete_herb(
         raise AppException(
             422, f"资源向量清理失败，无法删除：{exc}"
         ) from exc
+
+    # BUG-009：同步清理该资源的知识图谱节点（边随 FK CASCADE 删除）
+    try:
+        from src.application.kg_service import KgService
+        await KgService(db).delete_resource_nodes("herb", herb.id)
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).error(
+            f"herb KG 节点清理失败 id={herb.id}: {exc}", exc_info=True
+        )
 
     await db.delete(herb)
     await db.flush()

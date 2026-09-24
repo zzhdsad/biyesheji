@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { streamSSE } from '@/hooks/useSSE';
+import { createRequestSeq } from '@/utils/requestSeq';
 import type { ChatMessage, Conversation, HealthResponse, KnowledgeBase } from '@/types';
 import {
   createKb as apiCreateKb,
@@ -67,6 +68,14 @@ function storeKbIds(ids: string[]): void {
   }
 }
 
+/**
+ * 会话视图序号（BUG-013）：切换会话 / 新建会话 / 删除会话都会作废在飞的
+ * 消息加载与流式回调，避免"慢响应覆盖新会话""已删会话的消息复活"。
+ * 注意：这只是状态守卫（丢弃过期写入），不负责取消请求——SSE 无 AbortController，
+ * 继续跑的流因按 assistantId 匹配不到消息而自然无副作用。
+ */
+const conversationSeq = createRequestSeq();
+
 export const useChatStore = create<ChatState>((set, get) => ({
   knowledgeBases: [],
   selectedKbIds: loadStoredKbIds(),
@@ -132,16 +141,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   selectConversation: async (conversationId: string) => {
+    const reqId = conversationSeq.begin();
     set({ currentConversationId: conversationId, messages: [] });
     try {
       const msgs = await fetchMessages(conversationId);
+      // BUG-013：期间若又切换/删除/清空了会话，本次响应已过期 → 丢弃
+      if (!conversationSeq.isLatest(reqId)) return;
       set({ messages: msgs });
     } catch {
       // 加载失败保持空消息列表
     }
   },
 
-  newConversation: () => set({ currentConversationId: null, messages: [] }),
+  newConversation: () => {
+    // BUG-013：作废在飞的旧会话消息加载
+    conversationSeq.invalidate();
+    set({ currentConversationId: null, messages: [] });
+  },
 
   deleteConversation: async (conversationId: string) => {
     try {
@@ -149,6 +165,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch {
       // 删除失败仍从列表中移除，避免幽灵会话残留
     }
+    // BUG-013：会话已删除，在飞的消息加载不得再写回消息区（旧实现会让
+    // 已删会话的历史消息"复活"在被清空的消息区）
+    conversationSeq.invalidate();
     const { currentConversationId, conversations } = get();
     const filtered = conversations.filter((c) => c.id !== conversationId);
     set({ conversations: filtered });
@@ -164,6 +183,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     } catch {
       // 删除失败仍清空列表，避免幽灵残留
     }
+    conversationSeq.invalidate(); // BUG-013：同 deleteConversation
     set({ conversations: [], currentConversationId: null, messages: [] });
   },
 
@@ -191,6 +211,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       sending: true,
     }));
 
+    // BUG-013：记录本次发送时的会话视图；期间用户切走/删除会话后，
+    // 流式回调不得再把 currentConversationId 写回这条旧流的会话。
+    const viewId = conversationSeq.current();
+
     try {
       await streamSSE(
         '/api/v1/chat/ask-stream',
@@ -199,7 +223,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           onStart: ({ conversation_id, query_analysis, router_decision }) => {
             // 阶段十一/十二：start 事件携带 Query 分析与路由决策（仅展示，不影响请求行为）
             set((s) => ({
-              currentConversationId: conversation_id,
+              currentConversationId: conversationSeq.isLatest(viewId)
+                ? conversation_id
+                : s.currentConversationId,
               messages:
                 query_analysis || router_decision
                   ? s.messages.map((m) =>
@@ -263,7 +289,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     }
                   : m,
               ),
-              currentConversationId: conversation_id,
+              currentConversationId: conversationSeq.isLatest(viewId)
+                ? conversation_id
+                : s.currentConversationId,
               sending: false,
             }));
             // 发送成功后刷新侧边栏会话列表（标题/排序变化）

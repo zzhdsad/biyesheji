@@ -167,18 +167,40 @@ def hit_to_evidence(hit: dict, source_index: int) -> dict:
     }
 
 
+def displayable_hits(hits: list[dict]) -> list[dict]:
+    """可展示命中的子集（BUSINESS_RULES §6：相关度 ≥ RELEVANCE_THRESHOLD）。
+
+    BUG-016：Prompt 编号 / Evidence 编号 / Citation 编号必须共用同一份
+    「可展示命中」，否则模型会引用一个最终被阈值过滤掉的编号，UI 出现
+    无对应卡片的 [citation:N]。阈值本身不变。
+
+    注意：**缺少分数字段的命中视为相关度未知，不做静默丢弃**（按 0 处理会
+    把这类命中整体过滤掉，与既有行为不兼容）；只有明确低于阈值的才过滤。
+    """
+    threshold = settings.RELEVANCE_THRESHOLD
+    displayable: list[dict] = []
+    for h in hits:
+        raw = h.get("rerank_score", h.get("score", None))
+        if raw is None:
+            displayable.append(h)
+            continue
+        if float(raw or 0.0) >= threshold:
+            displayable.append(h)
+    return displayable
+
+
 def build_evidence(hits: list[dict]) -> list[dict]:
     """检索命中 → 统一 Evidence 列表（过滤 + 分级）。
 
     过滤规则与既有 Citation 一致（BUSINESS_RULES §6）：
     低于 RELEVANCE_THRESHOLD 的命中不作为 Evidence 展示。
+
+    BUG-016：编号按**过滤后**的顺序连续编号，与 Prompt 中展示给模型的
+    编号一致（过去用未过滤位序，导致 Evidence/Reflection 与答案编号错位）。
     """
-    threshold = settings.RELEVANCE_THRESHOLD
     evidence: list[dict] = []
-    for i, hit in enumerate(hits, start=1):
-        if hit_score(hit) < threshold:
-            continue
-        evidence.append(hit_to_evidence(hit, i))
+    for hit in displayable_hits(hits):
+        evidence.append(hit_to_evidence(hit, len(evidence) + 1))
     return evidence
 
 

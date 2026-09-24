@@ -41,6 +41,7 @@ import {
 import { AppLayout } from '@/components/layout/AppLayout';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
 import { useUserStore } from '@/stores/userStore';
+import { useRequestSeq } from '@/hooks/useRequestSeq';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
@@ -109,6 +110,7 @@ export default function HerbsPage() {
   const { message } = App.useApp();
   const user = useUserStore((s) => s.user);
   const isAdmin = user?.role === 'admin';
+  const reqSeq = useRequestSeq(); // BUG-048：丢弃过期的列表响应
 
   // 列表数据
   const [herbs, setHerbs] = useState<Herb[]>([]);
@@ -144,6 +146,8 @@ export default function HerbsPage() {
     const tg = opts ? opts.tagId : tagId;
     const pg = opts ? opts.current : current;
     const ps = opts ? opts.pageSize : pageSize;
+    // BUG-048：快速翻页/改条件时旧慢响应覆盖新数据与 total → 丢弃过期响应
+    const reqId = reqSeq.begin();
     setLoading(true);
     try {
       const resp = await fetchHerbs({
@@ -153,12 +157,13 @@ export default function HerbsPage() {
         limit: ps,
         offset: (pg - 1) * ps,
       });
+      if (!reqSeq.isLatest(reqId)) return;
       setHerbs(resp.items);
       setTotal(resp.total);
     } catch (err) {
-      message.error(pickErrorMessage(err, '中药列表加载失败'));
+      if (reqSeq.isLatest(reqId)) message.error(pickErrorMessage(err, '中药列表加载失败'));
     } finally {
-      setLoading(false);
+      if (reqSeq.isLatest(reqId)) setLoading(false);
     }
   };
 

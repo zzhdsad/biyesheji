@@ -199,9 +199,22 @@ def test_protected_endpoint_without_token_401(auth_client):
 
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 def test_protected_endpoint_with_token_200(auth_client, _unique_user):
+    """带 token 可访问业务接口。
+
+    注意（BUG-005）：管理员创建的用户 must_change_password=True，服务端强制
+    先改密。因此这里先完成改密再访问业务接口（与强制改密规则保持一致）。
+    """
     token = _login_and_get_token(
         auth_client, _unique_user["username"], _unique_user["password"]
     )
+    # 初始密码 → 先改密（否则业务接口 403）
+    resp_chg = auth_client.post(
+        "/api/v1/auth/change-password",
+        json={"old_password": _unique_user["password"], "new_password": "NewPass123"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert resp_chg.status_code == 200, resp_chg.text
+
     resp = auth_client.get(
         "/api/v1/chat/conversations",
         headers={"Authorization": f"Bearer {token}"},

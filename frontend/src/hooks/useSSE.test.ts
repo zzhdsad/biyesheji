@@ -291,6 +291,33 @@ describe('阶段十六：SSE 事件顺序与解析', () => {
     assert.match(error.message, /HTTP 500/);
   });
 
+  // ── BUG-062：SSE 的 401 必须与 axios 拦截器一致处理 ──────────────────────
+
+  it('401 → 清 token 并硬跳登录页（不再只报"请求失败"）', async () => {
+    const win = installBrowserStub({ pathname: '/chat', token: 'expired-token' });
+    try {
+      const { events, error } = await collect('', { status: 401 });
+      assert.deepEqual(events, []);
+      assert.ok(error);
+      assert.match(error.message, /登录已过期/);
+      assert.equal(win.location.href, '/login?redirect=%2Fchat');
+      assert.equal(win.localStorage.getItem('kp_token'), null, 'token 必须被清除');
+    } finally {
+      uninstallBrowserStub();
+    }
+  });
+
+  it('登录页自身的 401 不跳转（避免反复跳登录页）', async () => {
+    const win = installBrowserStub({ pathname: '/login', token: 'expired-token' });
+    try {
+      const { error } = await collect('', { status: 401 });
+      assert.ok(error);
+      assert.equal(win.location.href, '', '登录页自身 401 不应触发跳转');
+    } finally {
+      uninstallBrowserStub();
+    }
+  });
+
   it('流最后一个事件缺尾随空行时仍被补派发', async () => {
     // 真实后端总是以 \n\n 结尾；此处模拟连接尾部分块缺失的极端情况
     const text = event('start', { conversation_id: 'c' }) + 'event: done\ndata: {"conversation_id":"c","message_id":"m9"}';
@@ -319,3 +346,36 @@ describe('阶段十六：SSE 事件顺序与解析', () => {
     );
   });
 });
+
+// ── BUG-062 测试辅助：最小浏览器环境桩 ──────────────────────────────────────
+
+interface BrowserStub {
+  localStorage: {
+    getItem(key: string): string | null;
+    setItem(key: string, value: string): void;
+    removeItem(key: string): void;
+  };
+  location: { pathname: string; search: string; href: string };
+}
+
+/** 安装 window / document 桩，使 token.ts 的 401 处理可以在 node 下验证。 */
+function installBrowserStub(opts: { pathname: string; token?: string }): BrowserStub {
+  const data = new Map<string, string>();
+  if (opts.token) data.set('kp_token', opts.token);
+  const stub: BrowserStub = {
+    localStorage: {
+      getItem: (key) => data.get(key) ?? null,
+      setItem: (key, value) => void data.set(key, value),
+      removeItem: (key) => void data.delete(key),
+    },
+    location: { pathname: opts.pathname, search: '', href: '' },
+  };
+  (globalThis as unknown as { window: unknown }).window = stub;
+  (globalThis as unknown as { document: unknown }).document = { cookie: '' };
+  return stub;
+}
+
+function uninstallBrowserStub(): void {
+  delete (globalThis as unknown as { window?: unknown }).window;
+  delete (globalThis as unknown as { document?: unknown }).document;
+}

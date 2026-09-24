@@ -108,11 +108,31 @@ class KgRetriever:
         facts: dict[uuid.UUID, KgFact] = {}
         visited: set[uuid.UUID] = set(seeds)
         frontier: dict[uuid.UUID, float] = dict(seeds)
+        # node_id → (resource_type, resource_id)：逐跳隔离判定用，按需加载并缓存
+        res_of: dict[uuid.UUID, tuple[str, uuid.UUID]] = {}
+        # 种子节点已知挂载（构造 seeds 时已加载过 match_nodes 的 node 对象）
+        res_of.update({n.id: (n.resource_type, n.resource_id) for n, _ in matches})
+
+        def _mounted(node_id: uuid.UUID) -> bool:
+            res = res_of.get(node_id)
+            return res is not None and res in allowed
 
         for hop in range(1, hops + 1):
             if not frontier:
                 break
             edges: list[KgEdge] = await self.service.edges_of(list(frontier))
+            # BUG-008：先把本跳涉及节点的资源身份补齐，才能逐跳判定挂载
+            pending = [
+                nid
+                for e in edges
+                for nid in (e.source_node_id, e.target_node_id)
+                if nid not in res_of
+            ]
+            if pending:
+                loaded = await self.service.nodes_by_ids(pending)
+                res_of.update(
+                    {n.id: (n.resource_type, n.resource_id) for n in loaded.values()}
+                )
             next_frontier: dict[uuid.UUID, float] = {}
             for edge in edges:
                 if edge.id in facts:
@@ -120,6 +140,10 @@ class KgRetriever:
                 src_in = edge.source_node_id in frontier
                 tgt_in = edge.target_node_id in frontier
                 if not (src_in or tgt_in):
+                    continue
+                # 两端节点都必须挂载在当前 KB 集合内：未挂载甚至只挂载在别的用户
+                # KB 中的资源，不得作为"事实验证"进入 Prompt（跨 KB 泄露）
+                if not (_mounted(edge.source_node_id) and _mounted(edge.target_node_id)):
                     continue
                 base = max(
                     frontier.get(edge.source_node_id, 0.0),

@@ -11,6 +11,10 @@ RBAC 辅助：get_accessible_kb_ids 返回用户可访问的知识库 ID 集合�
 
 测试模式：设置 TEST_MODE_ENABLED = True 可跳过 JWT 校验，直接返回测试管理员用户，
 无需 patch Depends.dependency（FastAPI 路由注册时已缓存函数引用）。
+仅 dev / test 环境生效：生产环境（ENV=prod）强制忽略该开关，避免鉴权被绕过。
+
+RBAC 角色：get_kb_role 返回用户在指定知识库中的有效角色
+（owner / admin / editor / viewer），写操作必须落在 KB_WRITE_ROLES 内。
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import jwt as pyjwt
 
 from src.core.config import settings
+from src.core.exceptions import PermissionDeniedError
 from src.core.security import decode_access_token
 from src.domain.models import KnowledgeBase, KBMember, User
 from src.infrastructure.database import get_db
@@ -32,6 +37,24 @@ from src.infrastructure.database import get_db
 # 设置为 True 时，get_current_user 跳过 JWT 校验直接返回 TEST_USER
 # 这样即使 FastAPI 已经缓存了函数引用，动态切换也能生效
 TEST_MODE_ENABLED: bool = False
+# 非生产环境才允许测试模式生效（生产误开也不至于直接绕过鉴权）
+TEST_MODE_ALLOWED_ENVS = ("dev", "test", "testing")
+
+
+def test_mode_active() -> bool:
+    """测试模式是否真正生效（生产环境恒为 False）。"""
+    return TEST_MODE_ENABLED and settings.ENV in TEST_MODE_ALLOWED_ENVS
+
+
+# ── 知识库角色（BUSINESS_RULES §3：Owner/Admin/Editor/Viewer）─────────────────
+KB_ROLE_OWNER = "owner"
+KB_ROLE_ADMIN = "admin"
+KB_ROLE_EDITOR = "editor"
+KB_ROLE_VIEWER = "viewer"
+# 可执行写操作的角色（viewer 只读）
+KB_WRITE_ROLES = frozenset({KB_ROLE_OWNER, KB_ROLE_ADMIN, KB_ROLE_EDITOR})
+VALID_KB_ROLES = frozenset({KB_ROLE_OWNER, KB_ROLE_ADMIN, KB_ROLE_EDITOR, KB_ROLE_VIEWER})
+
 TEST_USER = User(
     id=uuid.UUID("4e7742e2-d751-4947-b85a-4076c054bbc4"),
     email="admin@example.com",
@@ -48,11 +71,12 @@ async def get_current_user(
 ) -> User:
     """解析 Authorization: Bearer xxx → 查 DB → 挂 request.state.user。
 
-    测试模式（TEST_MODE_ENABLED=True）：跳过 JWT 校验，直接返回 TEST_USER。
-    这样 FastAPI 路由注册时已经缓存了对本函数的引用，无需 patch Depends 对象。
+    测试模式（TEST_MODE_ENABLED=True 且 ENV 非 prod）：跳过 JWT 校验，
+    直接返回 TEST_USER。这样 FastAPI 路由注册时已经缓存了对本函数的引用，
+    无需 patch Depends 对象。生产环境该开关一律不生效。
     """
-    # ── 测试模式：直接返回测试管理员 ──
-    if TEST_MODE_ENABLED:
+    # ── 测试模式：直接返回测试管理员（生产环境不生效）──
+    if test_mode_active():
         request.state.user = TEST_USER
         return TEST_USER
 
@@ -110,3 +134,65 @@ async def get_accessible_kb_ids(db: AsyncSession, user: User) -> set[uuid.UUID]:
     )
     rows = (await db.scalars(stmt)).all()
     return set(rows)
+
+
+async def get_kb_role(db: AsyncSession, user: User, kb_id: uuid.UUID) -> str | None:
+    """返回当前用户在指定知识库中的**有效角色**；无权访问返回 None。
+
+    规则（与 get_accessible_kb_ids 的"可读"口径保持一致，并补上写权限语义）：
+    - 系统 admin：视为 admin（可读写全部 KB）
+    - KB owner：owner
+    - KB 成员：membership 角色（非法值按 viewer 处理，防止脏数据提权）
+    - public 知识库：登录用户按 viewer（只读）
+    - 其余（含不存在/已软删的 KB）：None
+    """
+    if user.role == "admin":
+        return KB_ROLE_ADMIN
+
+    kb = await db.get(KnowledgeBase, kb_id)
+    if kb is None or kb.deleted_at is not None:
+        return None
+    if kb.owner_id == user.id:
+        return KB_ROLE_OWNER
+
+    role = await db.scalar(
+        select(KBMember.role).where(
+            KBMember.kb_id == kb_id, KBMember.user_id == user.id
+        )
+    )
+    if role:
+        return role if role in VALID_KB_ROLES else KB_ROLE_VIEWER
+    if kb.visibility == "public":
+        return KB_ROLE_VIEWER
+    return None
+
+
+async def require_kb_read(db: AsyncSession, user: User, kb_id: uuid.UUID) -> str:
+    """校验可读权限，返回有效角色；无权访问抛 403。"""
+    role = await get_kb_role(db, user, kb_id)
+    if role is None:
+        raise PermissionDeniedError("无权访问该知识库")
+    return role
+
+
+async def require_kb_write(db: AsyncSession, user: User, kb_id: uuid.UUID) -> str:
+    """校验可写权限（owner/admin/editor），viewer 与公开库只读用户抛 403。"""
+    role = await require_kb_read(db, user, kb_id)
+    if role not in KB_WRITE_ROLES:
+        raise PermissionDeniedError("当前角色为只读，无权执行该操作")
+    return role
+
+
+async def require_password_changed(
+    user: User = Depends(get_current_user),
+) -> None:
+    """强制修改初始密码（服务端强制点，BUG-005）。
+
+    管理员创建/重置的用户 must_change_password=True，在完成修改密码前
+    不得调用任何业务接口（/auth/me、/auth/logout、/auth/change-password
+    不在 protected_router 下，不受此限制）。
+    """
+    if getattr(user, "must_change_password", False):
+        raise HTTPException(
+            status_code=403, detail="请先修改初始密码，再使用系统功能"
+        )

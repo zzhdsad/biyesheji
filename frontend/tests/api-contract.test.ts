@@ -47,14 +47,12 @@ const PREFIX_TO_ROUTE_FILE: Record<string, string> = {
  *
  * 这些端点前端已调用、但后端**尚未提供**。此处显式登记而非删除用例，
  * 保证：一旦后端补齐，本守卫会立刻失败并提示移除登记项。
+ *
+ * BUG-014（第二轮修复）：注册入口按决策下线（系统采用管理员创建用户模式），
+ * 前端已移除 /register 页与 apiRegister，故该登记项清空；下方新增用例确保
+ * 注册入口不会以"错误依赖"的形式重新出现。
  */
-const KNOWN_MISSING: { method: string; path: string; note: string }[] = [
-  {
-    method: 'POST',
-    path: '/auth/register',
-    note: '阶段十六发现：注册页（/register）无后端端点，仅管理员可通过 POST /users 建账号',
-  },
-];
+const KNOWN_MISSING: { method: string; path: string; note: string }[] = [];
 
 interface ApiCall {
   method: 'get' | 'post' | 'put' | 'patch' | 'delete';
@@ -237,6 +235,58 @@ describe('阶段十六：前后端 API 契约守卫', () => {
     for (const token of ['kgEvidence', 'evidenceGate', 'reflection', 'answer']) {
       assert.ok(chatStoreSrc.includes(token), `chatStore.ts 未处理 ${token}`);
     }
+  });
+
+  it('注册入口已下线：前端无 /auth/register 依赖，后端无该路由（BUG-014）', () => {
+    const authSrc = fs.readFileSync(path.join(FRONTEND_ROOT, 'src/services/auth.ts'), 'utf8');
+    const apiSrc = fs.readFileSync(path.join(FRONTEND_ROOT, 'src/services/api.ts'), 'utf8');
+    const userStoreSrc = fs.readFileSync(path.join(FRONTEND_ROOT, 'src/stores/userStore.ts'), 'utf8');
+    // 只看代码：去掉注释，避免说明性文字里的路径被误判为真实调用
+    const stripComments = (src: string) =>
+      src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+
+    assert.ok(
+      !stripComments(authSrc).includes('/auth/register'),
+      'services/auth.ts 仍调用了 /auth/register',
+    );
+    assert.ok(
+      !stripComments(apiSrc).includes('/auth/register'),
+      'services/api.ts 仍调用了 /auth/register',
+    );
+    assert.ok(
+      !stripComments(authSrc).includes('apiRegister'),
+      'services/auth.ts 仍导出 apiRegister',
+    );
+    assert.ok(
+      !stripComments(userStoreSrc).includes('register:'),
+      'userStore 仍保留注册 action',
+    );
+
+    // 后端不应提供开放注册端点（账号由管理员通过 POST /users 创建）
+    const backendAuth = fs.readFileSync(path.resolve(BACKEND_ROUTES_DIR, 'auth.py'), 'utf8');
+    assert.ok(
+      !/@router\.(post|get|put|delete)\(\s*["']\/register["']/.test(backendAuth),
+      '后端出现了 /auth/register 端点，与"不开放注册"的决策冲突',
+    );
+
+    // 注册页面目录不应存在
+    assert.ok(
+      !fs.existsSync(path.join(FRONTEND_ROOT, 'src/app/register')),
+      'frontend/src/app/register 目录仍存在（注册入口未彻底下线）',
+    );
+  });
+
+  it('登录页 redirect 仅允许站内路径（开放重定向防护，BUG-028）', () => {
+    const src = fs.readFileSync(path.join(FRONTEND_ROOT, 'src/app/login/page.tsx'), 'utf8');
+    assert.ok(src.includes('safeRedirect'), '登录页缺少 safeRedirect 白名单处理');
+    assert.ok(
+      src.includes("raw.startsWith('//')"),
+      'safeRedirect 未拦截协议相对地址 //evil.com',
+    );
+    assert.ok(
+      src.includes("raw.startsWith('/')"),
+      'safeRedirect 未要求跳转地址必须是站内绝对路径',
+    );
   });
 
   it('SSE 事件名与后端保持一致', () => {

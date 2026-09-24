@@ -268,6 +268,15 @@ class EvaluationRun(Base, TimestampMixin):
     evaluated_count: Mapped[int] = mapped_column(Integer, default=0)
     # 标准答案缺失/待人工确认、跳过 answer_correctness 的用例数
     skipped_count: Mapped[int] = mapped_column(Integer, default=0)
+    # BUG-011：因基础设施故障（检索/生成抛异常）而未产出结果的用例数。
+    # 这些用例不参与 context_relevancy / answer_correctness 均值，
+    # 否则「Milvus 宕机」会被记成「检索质量 0 分」而污染实验结论。
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    # BUG-023：幂等键（调用方提供，如同一实验的重复/并发提交使用同一 key）。
+    # NULL 表示未启用幂等保护；唯一索引保证同一 key 只会产生一条 run。
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True, unique=True
+    )
     context_relevancy: Mapped[float] = mapped_column(Float, default=0.0)
     # 无已评估用例时为 NULL（区别于「全部答错=0」）
     answer_correctness: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -325,11 +334,31 @@ class EvaluationResult(Base, TimestampMixin):
 
 
 class Feedback(Base, TimestampMixin):
+    """反馈（点赞/踩 + 纠错意见）。
+
+    BUG-038：补充归属维度与唯一性：
+    - user_id：反馈归属用户（可空，迁移前既有行无归属信息）；
+    - (user_id, message_id) 唯一：同一用户对同一条消息只能保留一条反馈，
+      由数据库兜底并发下的重复插入（应用层先查后写存在并发窗口）。
+      PostgreSQL 唯一约束中 NULL 互不相等，历史行（user_id IS NULL）不受影响。
+    """
+
     __tablename__ = "feedbacks"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "message_id", name="uq_feedbacks_user_message"
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
     message_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("messages.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
     )
     rating: Mapped[int] = mapped_column(Integer)  # 1 赞 / -1 踩
     comment: Mapped[str] = mapped_column(Text, default="")

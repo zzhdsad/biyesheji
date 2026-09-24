@@ -41,6 +41,7 @@ import {
 import { AppLayout } from '@/components/layout/AppLayout';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
 import { useUserStore } from '@/stores/userStore';
+import { useRequestSeq } from '@/hooks/useRequestSeq';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
@@ -91,12 +92,22 @@ interface TheoryFormValues {
 
 type ModalMode = 'create' | 'edit';
 
+/** 列表查询所需的全部状态（setState 后立即查询时闭包内仍是旧值，需显式传入）。 */
+interface QueryState {
+  keyword: string;
+  categoryId: string | undefined;
+  tagId: string | undefined;
+  current: number;
+  pageSize: number;
+}
+
 // ── 页面 ──────────────────────────────────────────────────────────────────────
 
 export default function TheoriesPage() {
   const { message } = App.useApp();
   const user = useUserStore((s) => s.user);
   const isAdmin = user?.role === 'admin';
+  const reqSeq = useRequestSeq(); // BUG-048：丢弃过期的列表响应
 
   // 列表数据
   const [theories, setTheories] = useState<Theory[]>([]);
@@ -126,23 +137,30 @@ export default function TheoriesPage() {
 
   // ── 数据加载 ──────────────────────────────────────────────────────────────
 
-  const loadTheories = async () => {
+  const loadTheories = async (opts?: QueryState) => {
+    const kw = opts ? opts.keyword : keyword;
+    const cat = opts ? opts.categoryId : categoryId;
+    const tg = opts ? opts.tagId : tagId;
+    const pg = opts ? opts.current : current;
+    const ps = opts ? opts.pageSize : pageSize;
+    // BUG-048：快速翻页/改条件时旧慢响应覆盖新数据与 total → 用序号丢弃过期响应
+    const reqId = reqSeq.begin();
     setLoading(true);
     try {
-      const offset = (current - 1) * pageSize;
       const resp = await fetchTheories({
-        keyword: keyword || undefined,
-        category_id: categoryId,
-        tag_id: tagId,
-        limit: pageSize,
-        offset,
+        keyword: kw || undefined,
+        category_id: cat,
+        tag_id: tg,
+        limit: ps,
+        offset: (pg - 1) * ps,
       });
+      if (!reqSeq.isLatest(reqId)) return;
       setTheories(resp.items);
       setTotal(resp.total);
     } catch (err) {
-      message.error(pickErrorMessage(err, '理论列表加载失败'));
+      if (reqSeq.isLatest(reqId)) message.error(pickErrorMessage(err, '理论列表加载失败'));
     } finally {
-      setLoading(false);
+      if (reqSeq.isLatest(reqId)) setLoading(false);
     }
   };
 
@@ -176,18 +194,32 @@ export default function TheoriesPage() {
 
   // ── 查询操作 ──────────────────────────────────────────────────────────────
 
+  // BUG-048：旧实现 setCurrent(1) 之后又立刻 loadTheories()——非第 1 页时
+  // 前者会触发 effect 再发一次请求，且后者用的还是旧页码与旧条件（双发 +
+  // 数据错配）。改为：已在第 1 页则显式带条件查询一次，否则只切页码由 effect 加载。
   const onSearch = () => {
-    setCurrent(1);
-    void loadTheories();
+    if (current === 1) {
+      void loadTheories({ keyword, categoryId, tagId, current: 1, pageSize });
+    } else {
+      setCurrent(1);
+    }
   };
 
   const onReset = () => {
     setKeyword('');
     setCategoryId(undefined);
     setTagId(undefined);
-    setCurrent(1);
-    // 重置后立即用新条件查询
-    setTimeout(() => void loadTheories(), 0);
+    if (current === 1) {
+      void loadTheories({
+        keyword: '',
+        categoryId: undefined,
+        tagId: undefined,
+        current: 1,
+        pageSize,
+      });
+    } else {
+      setCurrent(1);
+    }
   };
 
   // ── 新建 / 编辑 ────────────────────────────────────────────────────────────

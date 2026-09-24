@@ -52,6 +52,7 @@ import {
 import { AppLayout } from '@/components/layout/AppLayout';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
 import { useUserStore } from '@/stores/userStore';
+import { useRequestSeq } from '@/hooks/useRequestSeq';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
@@ -91,7 +92,8 @@ function TagList({ items }: { items: string[] }) {
 
 /** 组成摘要：最多列前 3 味，如“麻黄、桂枝、杏仁等 5 味”。 */
 function ingredientSummary(row: Prescription): string {
-  const list = [...row.ingredients].sort((a, b) => a.sort_order - b.sort_order);
+  // BUG-054：后端可能返回 null（历史数据/缺省字段）→ 展开前兜底，否则崩溃
+  const list = [...(row.ingredients ?? [])].sort((a, b) => a.sort_order - b.sort_order);
   if (list.length === 0) return '—';
   const top = list.slice(0, 3).map((i) => i.herb_name).filter(Boolean);
   if (list.length <= 3) return top.join('、');
@@ -382,6 +384,7 @@ export default function PrescriptionsPage() {
   const { message } = App.useApp();
   const user = useUserStore((s) => s.user);
   const isAdmin = user?.role === 'admin';
+  const reqSeq = useRequestSeq(); // BUG-048：丢弃过期的列表响应
 
   // 列表数据
   const [prescriptions, setPrescriptions] = useState<Prescription[]>([]);
@@ -418,6 +421,8 @@ export default function PrescriptionsPage() {
     const tg = opts ? opts.tagId : tagId;
     const pg = opts ? opts.current : current;
     const ps = opts ? opts.pageSize : pageSize;
+    // BUG-048：快速翻页/改条件时旧慢响应会覆盖新数据，用序号丢弃过期响应
+    const reqId = reqSeq.begin();
     setLoading(true);
     try {
       const resp = await fetchPrescriptions({
@@ -427,12 +432,17 @@ export default function PrescriptionsPage() {
         limit: ps,
         offset: (pg - 1) * ps,
       });
+      if (!reqSeq.isLatest(reqId)) return;
       setPrescriptions(resp.items);
       setTotal(resp.total);
+      // BUG-056：当前页已越界（删除/筛选后无数据）→ 回退一页重新加载
+      if (resp.items.length === 0 && pg > 1) {
+        setCurrent(pg - 1);
+      }
     } catch (err) {
-      message.error(pickErrorMessage(err, '方剂列表加载失败'));
+      if (reqSeq.isLatest(reqId)) message.error(pickErrorMessage(err, '方剂列表加载失败'));
     } finally {
-      setLoading(false);
+      if (reqSeq.isLatest(reqId)) setLoading(false);
     }
   };
 
@@ -541,9 +551,10 @@ export default function PrescriptionsPage() {
           usage_method: editTarget.usage_method,
           source: editTarget.source,
           description: editTarget.description,
-          tag_ids: editTarget.tags.map((t) => t.id),
+          // BUG-054：tags / ingredients 可能为 null（同 herbs 页已处理）
+          tag_ids: (editTarget.tags ?? []).map((t) => t.id),
           // 后端结构 → Form.List 本地结构（去掉 id/sort_order，按序排列）
-          ingredients: [...editTarget.ingredients]
+          ingredients: [...(editTarget.ingredients ?? [])]
             .sort((a, b) => a.sort_order - b.sort_order)
             .map((i) => ({
               herb_id: i.herb_id,
@@ -599,7 +610,13 @@ export default function PrescriptionsPage() {
       setModalOpen(false);
       form.resetFields();
       setEditTarget(null);
-      await loadPrescriptions();
+      // BUG-056：新建记录落在第一页——当前不在第一页时必须回第一页，
+      // 否则刷新后用户看不到刚创建的方剂（旧实现原地刷新当前页）。
+      if (modalMode === 'create' && current !== 1) {
+        setCurrent(1); // 由 effect 触发加载
+      } else {
+        await loadPrescriptions();
+      }
     } catch (err) {
       const detail = pickErrorMessage(err, '');
       if (detail) message.error(detail);
@@ -967,7 +984,7 @@ export default function PrescriptionsPage() {
               rowKey="id"
               size="small"
               columns={ingredientColumns}
-              dataSource={[...detail.ingredients].sort(
+              dataSource={[...(detail.ingredients ?? [])].sort(
                 (a, b) => a.sort_order - b.sort_order,
               )}
               pagination={false}

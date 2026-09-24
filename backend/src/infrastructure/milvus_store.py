@@ -70,6 +70,59 @@ class BaseVectorStore(ABC):
         """统计指定文档的向量条数（验证入库结果）。"""
 
     @abstractmethod
+    def ids_by_doc(self, doc_id: str) -> list[str]:
+        """列出指定文档现有向量的 id（幂等替换前识别"旧分片"用）。"""
+
+    @abstractmethod
+    def delete_by_ids(self, ids: list[str]) -> None:
+        """按主键批量删除向量（幂等；空列表直接返回）。"""
+
+    @abstractmethod
+    def delete_by_kb(self, kb_id: str) -> None:
+        """删除指定知识库的全部向量（Document + Resource，KB purge 用）。"""
+
+    def replace_doc(self, doc_id: str, rows: list[VectorRow]) -> int:
+        """整体替换某文档的向量：**先写新、再清旧**（BUG-046）。
+
+        旧实现是"先 delete_by_doc 再 insert"：两步之间任一失败都会让该文档
+        向量全灭，且没有自动重建入口。新顺序：
+
+        1. 记录旧向量 id（stale 候选）；
+        2. 写入新向量（同主键覆盖，尾部新增）；
+        3. 只删除「旧 id 中不在新 id 集合里」的多余分片；
+        4. 校验条数：若出现重复行（底层不支持同主键覆盖）则回退为
+           "清旧写新"，保证最终状态正确。
+
+        任一写入步骤失败时旧向量仍在，不会留下空窗。
+        """
+        if not rows:
+            return 0
+        self.ensure_collection()
+        keep = {r.id for r in rows}
+        stale = [i for i in self.ids_by_doc(doc_id) if i not in keep]
+
+        inserted = self.insert(rows)
+        if inserted != len(rows):
+            raise VectorStoreError(
+                f"向量入库不完整：期望 {len(rows)} 条，实际 {inserted} 条"
+            )
+        if stale:
+            self.delete_by_ids(stale)
+
+        if self.count_by_doc(doc_id) != len(rows):
+            # 极端情况：底层把同主键行当成新行插入（重复）→ 重建该文档向量
+            logger.warning(
+                f"向量替换后条数不一致 doc_id={doc_id}，回退为清旧写新"
+            )
+            self.delete_by_doc(doc_id)
+            inserted = self.insert(rows)
+            if inserted != len(rows):
+                raise VectorStoreError(
+                    f"向量入库不完整：期望 {len(rows)} 条，实际 {inserted} 条"
+                )
+        return inserted
+
+    @abstractmethod
     def search(
         self,
         query_vector: list[float],
@@ -315,6 +368,42 @@ class MilvusStore(BaseVectorStore):
         except Exception as exc:
             raise VectorStoreError(f"Milvus 查询失败 doc_id={doc_id}：{exc}") from exc
 
+    def ids_by_doc(self, doc_id: str) -> list[str]:
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION):
+            return []
+        try:
+            rows = client.query(
+                collection_name=self.COLLECTION,
+                filter=f'doc_id == "{doc_id}"',
+                output_fields=["id"],
+                limit=16384,
+            )
+            return [str(r["id"]) for r in rows if r.get("id") is not None]
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus 查询失败 doc_id={doc_id}：{exc}") from exc
+
+    def delete_by_ids(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION):
+            return
+        quoted = ", ".join(f'"{i}"' for i in ids)
+        try:
+            client.delete(collection_name=self.COLLECTION, filter=f"id in [{quoted}]")
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus 批量删除失败 ids={len(ids)}：{exc}") from exc
+
+    def delete_by_kb(self, kb_id: str) -> None:
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION):
+            return
+        try:
+            client.delete(collection_name=self.COLLECTION, filter=f'kb_id == "{kb_id}"')
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus 删除失败 kb_id={kb_id}：{exc}") from exc
+
     def _build_filter(
         self,
         kb_ids: list[str],
@@ -476,6 +565,18 @@ class InMemoryVectorStore(BaseVectorStore):
 
     def count_by_doc(self, doc_id: str) -> int:  # noqa: D102
         return sum(1 for v in self._rows.values() if v.doc_id == doc_id)
+
+    def ids_by_doc(self, doc_id: str) -> list[str]:  # noqa: D102
+        return [r.id for r in self._rows.values() if r.doc_id == doc_id]
+
+    def delete_by_ids(self, ids: list[str]) -> None:  # noqa: D102
+        if not ids:
+            return
+        drop = set(ids)
+        self._rows = {k: v for k, v in self._rows.items() if k not in drop}
+
+    def delete_by_kb(self, kb_id: str) -> None:  # noqa: D102
+        self._rows = {k: v for k, v in self._rows.items() if v.kb_id != kb_id}
 
     @staticmethod
     def _match_resource(

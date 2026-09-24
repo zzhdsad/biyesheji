@@ -91,6 +91,7 @@ from src.application.evidence import evidence_level as _evidence_level  # noqa: 
 from src.application.evidence import (  # noqa: E402
     SOURCE_KIND_KG,
     build_evidence,
+    displayable_hits,
     hit_to_evidence,
     package_evidence,
 )
@@ -392,8 +393,11 @@ class RagService:
                 self.rerank.rerank, question, fused, cfg["rerank_top_k"]
             )
         except RerankError as exc:
-            logger.error(f"RAG 重排失败: {exc}")
-            raise AppException(422, f"重排序失败：{exc}") from exc
+            # BUG-017：Reranker 是增强环节，不得成为问答的单点故障。
+            # 与 KG 检索一致的降级语义：模型/服务不可用时退回 RRF 融合顺序，
+            # 召回质量下降但仍可作答（此时拒绝式静默优于 422 中断）。
+            logger.warning(f"RAG 重排不可用，本次使用 RRF 融合顺序: {exc}")
+            hits = fused[: cfg["rerank_top_k"]]
 
         # 资源过滤（后置权威过滤）：向量库侧过滤生效时此处为 no-op；
         # 老集合不支持动态字段时由此保证策略语义一致。
@@ -963,19 +967,25 @@ class RagService:
         history, cache_hit = await self._load_history(conversation.id)
 
         # 先持久化用户消息（独立事务）：保证与助手消息 created_at 不同，
-        # 使历史查询 ORDER BY created_at 顺序确定；且生成失败时用户意图仍留存。
-        self.db.add(Message(
+        # 使历史查询 ORDER BY created_at 顺序确定。
+        # BUG-036：后续失败时由 _discard_user_message 补偿删除，不留孤儿提问。
+        user_msg = Message(
             conversation_id=conversation.id, role="user", content=question,
-        ))
+        )
+        self.db.add(user_msg)
         await self.db.commit()
 
         # 检索+生成核心（不持久化；阶段十二按路由选择的策略执行；
         # 阶段十三透传 QueryAnalysis，供 KG 策略做图遍历）
-        answer, hits = await self.retrieve_and_answer(
-            kb_ids, question, history,
-            strategy=strategy, resource_types=resource_types,
-            analysis=query_analysis, router_decision=router_decision,
-        )
+        try:
+            answer, hits = await self.retrieve_and_answer(
+                kb_ids, question, history,
+                strategy=strategy, resource_types=resource_types,
+                analysis=query_analysis, router_decision=router_decision,
+            )
+        except Exception:
+            await self._discard_user_message(user_msg)
+            raise
 
         # 引用后处理：解析答案中的 [citation: 编号, 页码] → 引用来源；无标记时兜底全部来源
         citations = await self._build_citations(answer, hits)
@@ -1027,7 +1037,8 @@ class RagService:
             NotFoundError: 会话不存在
             PermissionDeniedError: 会话归属不匹配（由调用方先校验，此处兜底）
             AppException: 检索失败（端点层异常处理器返回 422，不进入流）；
-                生成失败转 error 事件，已持久化的用户消息保留。
+                生成失败转 error 事件。BUG-036：以上失败路径均未落库助手消息，
+                先落库的用户消息会被补偿删除，不留下无回答的孤儿提问。
         """
         started_at = asyncio.get_event_loop().time()
         # 阶段十二：Query → Analyzer → Router → Strategy（两者均带兜底）
@@ -1045,26 +1056,33 @@ class RagService:
 
         history, cache_hit = await self._load_history(conversation.id)
 
-        # 先持久化用户消息（独立事务）：保证与助手消息 created_at 顺序确定；
-        # 生成失败时用户意图仍留存。
-        self.db.add(Message(
+        # 先持久化用户消息（独立事务）：保证与助手消息 created_at 顺序确定。
+        # BUG-036：后续失败时由 _discard_user_message 补偿删除，不留孤儿提问。
+        user_msg = Message(
             conversation_id=conversation.id, role="user", content=question,
-        ))
+        )
+        self.db.add(user_msg)
         await self.db.commit()
 
         # 检索+重排核心（不持久化；阶段十二按路由选择的策略执行；
         # 阶段十三透传 QueryAnalysis，供 KG 策略做图遍历）
         # 阶段十五：拒绝/保守分支不进入生成，不产出 Reflection
         self.last_reflection_decision = None
-        hits = await self._retrieve(
-            kb_ids, question, strategy=strategy, resource_types=resource_types,
-            analysis=query_analysis,
-        )
+        try:
+            hits = await self._retrieve(
+                kb_ids, question, strategy=strategy, resource_types=resource_types,
+                analysis=query_analysis,
+            )
 
-        # 阶段十四：Evidence Gate（含最多一次 retry）；Gate 关闭时返回 None
-        hits, gate_decision = await self._apply_evidence_gate(
-            kb_ids, question, hits, query_analysis, router_decision, strategy
-        )
+            # 阶段十四：Evidence Gate（含最多一次 retry）；Gate 关闭时返回 None
+            hits, gate_decision = await self._apply_evidence_gate(
+                kb_ids, question, hits, query_analysis, router_decision, strategy
+            )
+        except Exception:
+            # 检索/Gate 失败：尚未产出任何助手内容 → 删除用户消息后向上抛出
+            # （端点层转为 error 事件），避免会话里留下无回答的提问。
+            await self._discard_user_message(user_msg)
+            raise
         self.last_gate_decision = gate_decision
         gate_payload = gate_decision.to_dict() if gate_decision is not None else None
 
@@ -1110,6 +1128,9 @@ class RagService:
                     yield {"event": "delta", "data": {"content": chunk}}
             except LLMError as exc:
                 logger.error(f"RAG 流式生成失败: {exc}")
+                # BUG-036：生成失败不会落库助手消息 → 同步删除用户消息，
+                # 否则重试会在同一会话留下两条相同提问（且无回答）。
+                await self._discard_user_message(user_msg)
                 yield {"event": "error", "data": {"message": f"回答生成失败：{exc}"}}
                 return
             answer = "".join(answer_parts).strip() or "（模型未返回内容，请重试）"
@@ -1230,21 +1251,55 @@ class RagService:
         await self.cache.warm(conversation_id, history)  # 回填缓存
         return history, False
 
+    async def _discard_user_message(self, message: Message) -> None:
+        """删除已落库但本次问答未能产出助手回复的用户消息（BUG-036 补偿清理）。
+
+        用户消息先于检索/生成持久化（保证与助手消息 created_at 顺序确定），
+        一旦后续环节失败就会留下"有提问无回答"的孤儿消息：用户重试同一会话会
+        出现两条相同提问，且历史上下文被重复问题污染。故在失败路径上做补偿删除。
+
+        失败仅记日志：补偿失败最多留一条孤儿消息，不得掩盖原始异常。
+        """
+        try:
+            await self.db.delete(message)
+            await self.db.commit()
+        except Exception as exc:  # noqa: BLE001  补偿动作不得改变主流程的失败语义
+            logger.error(f"清理孤儿用户消息失败 message_id={message.id}: {exc}")
+            await self.db.rollback()  # 复位会话，避免污染后续错误处理
+
     async def _enrich_hits_with_doc_name(self, hits: list[dict]) -> None:
         """为检索命中注入文档名与来源可信度信息（就地修改）。
 
         Stage 4-4：区分 Document 命中与 Resource 命中：
-        - Document 命中（resource_type 为空）：以 documents 表为事实源，
+        - Document 命中：doc_id 为文档 UUID → 以 documents 表为事实源，
           PG 缺失时由 Milvus 动态字段兜底（老集合无动态字段时由此处兜底）。
-        - Resource 命中（resource_type 非空）：doc_id 为 SHA256（非 UUID），
-          不查 documents 表；resource_name / resource_type / era 由 Milvus
-          动态字段带回，直接填充，doc_name = resource_name。
+        - Resource 命中：doc_id 为 SHA256（非 UUID）→ 不查 documents 表；
+          resource_name / resource_type / era 由 Milvus 动态字段带回，
+          直接填充，doc_name = resource_name。
+
+        BUG-021：判定依据是 **doc_id 是否为 UUID**，而不是"resource_type 是否为空"。
+        老集合（未开启动态字段）取不到 resource_type，旧判定会把 SHA256 doc_id
+        送进 Document.id（UUID 列）查询 → PG `invalid input syntax for type uuid`
+        （500），且把资源证据误标成 source_kind='document'。按 doc_id 分类在
+        两种集合上结论一致：KG 行 doc_id = "kg:<edge_id>" 同样非 UUID，归入
+        Resource 分支且保留自带 source_kind=kg。
         """
         if not hits:
             return
-        # 分离 Document 命中与 Resource 命中（避免 SHA256 doc_id 查 UUID 列报错）
-        doc_hits = [h for h in hits if not h.get("resource_type")]
-        res_hits = [h for h in hits if h.get("resource_type")]
+
+        def _is_doc_row(hit: dict) -> bool:
+            """Document 行 doc_id 为 UUID；Resource 行为 SHA256，KG 行为 kg:<id>。"""
+            raw = hit.get("doc_id")
+            if not raw:
+                return False
+            try:
+                uuid.UUID(str(raw))
+            except (ValueError, TypeError):
+                return False
+            return True
+
+        doc_hits = [h for h in hits if _is_doc_row(h)]
+        res_hits = [h for h in hits if not _is_doc_row(h)]
 
         # Document 命中：按 doc_id（UUID）批量查 documents 表
         doc_ids = {h["doc_id"] for h in doc_hits if h.get("doc_id")}
@@ -1288,11 +1343,15 @@ class RagService:
         编号即引用标识，模型按 System Prompt 输出 [citation: 编号, 页码]。
         Stage 4-4：Resource 命中标注为"资源：{类型} {名称}"，
         Document 命中保持"文档：{file_name}"，二者可在同一上下文共存。
+
+        BUG-016：只对**可展示命中**（相关度 ≥ 阈值）编号 —— 编号空间与
+        Evidence / Citation 完全一致，模型不可能引用到没有卡片的编号。
         """
-        if not hits:
+        shown = displayable_hits(hits)
+        if not shown:
             return question  # 无资料：模型应按 System Prompt 回答不知道
         blocks = []
-        for i, h in enumerate(hits, start=1):
+        for i, h in enumerate(shown, start=1):
             source = h.get("title_path") or "未命名段落"
             page = h.get("page_num")
             page_label = f"页码：{page}" if page else "页码：0"
@@ -1351,21 +1410,20 @@ class RagService:
         """
         if not hits:
             return []
+        # BUG-016：编号空间统一为"可展示命中"，与 _build_user_prompt 一致
+        shown = displayable_hits(hits)
         # 按首次出现顺序去重提取编号
         idxs: list[int] = []
         for m in _CITATION_PATTERN.finditer(answer):
             n = int(m.group(1))
-            if 1 <= n <= len(hits) and n - 1 not in idxs:
+            if 1 <= n <= len(shown) and n - 1 not in idxs:
                 idxs.append(n - 1)
-        picked = idxs or list(range(len(hits)))
-
-        threshold = settings.RELEVANCE_THRESHOLD
+        picked = idxs or list(range(len(shown)))
 
         citations = []
         for i in picked:
-            # 统一 Evidence（Citation 超集）；阈值过滤规则不变
-            evidence = hit_to_evidence(hits[i], i + 1)
-            if evidence["score"] < threshold:
-                continue
-            citations.append(evidence)
+            # 统一 Evidence（Citation 超集）
+            # BUSINESS_RULES §6 的阈值过滤已由 displayable_hits 统一执行，
+            # 此处不再二次过滤，保证"编号 → 卡片"一一对应（BUG-016）
+            citations.append(hit_to_evidence(shown[i], i + 1))
         return citations

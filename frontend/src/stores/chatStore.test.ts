@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, it } from 'node:test';
 
 import type { ChatMessage } from '@/types';
 import { useChatStore } from '@/stores/chatStore';
+import { api } from '@/services/api';
 
 // ── 最小浏览器环境桩（localStorage / token 缓存依赖）──────────────────────
 
@@ -509,6 +510,110 @@ describe('阶段十六：错误、中断与状态恢复', () => {
       .messages.filter((m) => m.role === 'user')
       .map((m) => m.content);
     assert.deepEqual(questions, ['第一次']);
+  });
+});
+
+// ── BUG-013：会话视图竞态守卫 ────────────────────────────────────────────────
+
+/** 会话消息的后端出参形状（fetchMessages 会解包 citations.sources）。 */
+function messageOut(id: string, content: string, role: 'user' | 'assistant' = 'user') {
+  return { id, role, content, citations: null };
+}
+
+/**
+ * 替换 axios 传输层：按 URL 返回桩数据，并可指定延迟制造"慢响应"。
+ * 只替换 adapter，不动业务代码——验证的是 store 对过期响应的丢弃逻辑。
+ */
+function installApiStub(
+  routes: Record<string, { data: unknown; delayMs?: number }>,
+): () => void {
+  const original = api.defaults.adapter;
+  api.defaults.adapter = (async (config: { url?: string }) => {
+    const route = routes[String(config.url ?? '')] ?? { data: [] };
+    if (route.delayMs) await new Promise((r) => setTimeout(r, route.delayMs));
+    return {
+      data: route.data,
+      status: 200,
+      statusText: 'OK',
+      headers: {},
+      config,
+    } as never;
+  }) as unknown as typeof api.defaults.adapter;
+  return () => {
+    api.defaults.adapter = original;
+  };
+}
+
+describe('BUG-013：会话切换 / 删除的竞态守卫', () => {
+  it('切换会话后，旧会话的慢响应不得覆盖新会话消息', async () => {
+    const restore = installApiStub({
+      '/chat/conversations/conv-A/messages': {
+        data: [messageOut('a1', 'A 的历史消息')],
+        delayMs: 60, // 慢响应：晚于 conv-B 返回
+      },
+      '/chat/conversations/conv-B/messages': {
+        data: [messageOut('b1', 'B 的历史消息')],
+      },
+    });
+    try {
+      const pA = chatStore.getState().selectConversation('conv-A');
+      const pB = chatStore.getState().selectConversation('conv-B');
+      await Promise.all([pA, pB]);
+
+      const state = lastState();
+      assert.equal(state.currentConversationId, 'conv-B');
+      assert.deepEqual(
+        state.messages.map((m) => m.content),
+        ['B 的历史消息'],
+        'A 的过期响应必须被丢弃',
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  it('删除会话后，在飞的消息加载不得让已删会话的消息复活', async () => {
+    const restore = installApiStub({
+      '/chat/conversations/conv-A/messages': {
+        data: [messageOut('a1', '已删会话的历史')],
+        delayMs: 60,
+      },
+      '/chat/conversations/conv-A': { data: { deleted: true } },
+    });
+    try {
+      const pending = chatStore.getState().selectConversation('conv-A');
+      await chatStore.getState().deleteConversation('conv-A');
+      await pending;
+
+      const state = lastState();
+      assert.deepEqual(state.messages, [], '已删会话的消息不得复活');
+      assert.equal(state.currentConversationId, null);
+    } finally {
+      restore();
+    }
+  });
+
+  it('流式期间切走会话：start/done 不得把 currentConversationId 拉回旧流会话', async () => {
+    // 用闸门控制 SSE 的首个响应时机，制造"流开始后才切走"的时序
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    (globalThis as unknown as { fetch: unknown }).fetch = async () => {
+      await gate;
+      return { ok: true, status: 200, body: sseStream(standardFlow()) };
+    };
+
+    const sending = chatStore.getState().sendMessage('流式问题');
+    chatStore.getState().selectConversation('conv-other');
+    release();
+    await sending;
+
+    assert.equal(
+      lastState().currentConversationId,
+      'conv-other',
+      '用户已切走的会话不得被旧流回调写回',
+    );
   });
 });
 

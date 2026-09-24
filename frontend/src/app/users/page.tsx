@@ -174,9 +174,11 @@ export default function UsersPage() {
         department: values.department,
         role: values.role,
       });
+      // BUG-050：旧实现创建成功立即关闭弹窗——初始密码既没机会展示，
+      // createdPwd 又一直留着 → 下次打开弹窗会显示上一个用户的随机密码
+      // （凭证错配 + 泄露）。改为：保留弹窗展示本次初始密码，由用户点"关闭"。
       setCreatedPwd(res.initial_password);
       message.success(`用户「${res.user.username}」创建成功`);
-      setCreateOpen(false);
       createForm.resetFields();
       await loadActive();
     } catch (e) {
@@ -453,7 +455,17 @@ export default function UsersPage() {
               </Button>
             </Popconfirm>
           )}
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>添加用户</Button>
+          {/* BUG-050：打开弹窗前清掉上一次的初始密码，杜绝凭证错配/泄露 */}
+          <Button
+            type="primary"
+            icon={<PlusOutlined />}
+            onClick={() => {
+              setCreatedPwd(null);
+              setCreateOpen(true);
+            }}
+          >
+            添加用户
+          </Button>
         </>
       )}
       <AdminHeaderRight />
@@ -541,9 +553,15 @@ export default function UsersPage() {
       <Modal
         title="添加用户"
         open={createOpen}
-        onOk={onCreate}
+        // BUG-050：创建成功后弹窗转为"展示初始密码"，此时 OK 按钮=关闭，
+        // 关闭/取消一律清掉 createdPwd（避免下次带入上一个用户的凭证）。
+        onOk={createdPwd ? () => { setCreateOpen(false); setCreatedPwd(null); } : onCreate}
         onCancel={() => { setCreateOpen(false); createForm.resetFields(); setCreatedPwd(null); }}
-        okText="创建" cancelText="取消" confirmLoading={createSubmitting} destroyOnClose
+        okText={createdPwd ? '关闭' : '创建'}
+        cancelText="取消"
+        cancelButtonProps={{ style: createdPwd ? { display: 'none' } : undefined }}
+        confirmLoading={createSubmitting}
+        destroyOnClose
       >
         {createdPwd && (
           <Alert

@@ -43,6 +43,7 @@ import {
 import { AppLayout } from '@/components/layout/AppLayout';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
 import { useUserStore } from '@/stores/userStore';
+import { useRequestSeq } from '@/hooks/useRequestSeq';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
@@ -109,6 +110,7 @@ export default function LiteraturesPage() {
   const { message } = App.useApp();
   const user = useUserStore((s) => s.user);
   const isAdmin = user?.role === 'admin';
+  const reqSeq = useRequestSeq(); // BUG-048：丢弃过期的列表响应
 
   // 列表数据
   const [literatures, setLiteratures] = useState<Literature[]>([]);
@@ -153,6 +155,8 @@ export default function LiteraturesPage() {
     const useTagId = overrides && 'tagId' in overrides ? overrides.tagId : tagId;
     const useCurrent = overrides?.current ?? current;
     const usePageSize = overrides?.pageSize ?? pageSize;
+    // BUG-048：快速翻页/改条件时旧慢响应覆盖新数据与 total → 丢弃过期响应
+    const reqId = reqSeq.begin();
     setLoading(true);
     try {
       const offset = (useCurrent - 1) * usePageSize;
@@ -163,12 +167,13 @@ export default function LiteraturesPage() {
         limit: usePageSize,
         offset,
       });
+      if (!reqSeq.isLatest(reqId)) return;
       setLiteratures(resp.items);
       setTotal(resp.total);
     } catch (err) {
-      message.error(pickErrorMessage(err, '文献列表加载失败'));
+      if (reqSeq.isLatest(reqId)) message.error(pickErrorMessage(err, '文献列表加载失败'));
     } finally {
-      setLoading(false);
+      if (reqSeq.isLatest(reqId)) setLoading(false);
     }
   };
 
@@ -203,23 +208,31 @@ export default function LiteraturesPage() {
 
   // ── 查询操作 ──────────────────────────────────────────────────────────────
 
+  // BUG-048：旧实现 setCurrent(1) 之后又立刻查询——非第 1 页时 effect 会再发
+  // 一次请求（双发）。改为：已在第 1 页则显式带条件查询，否则只切页码由 effect 加载。
   const onSearch = () => {
-    setCurrent(1);
-    void loadLiteratures({ current: 1 });
+    if (current === 1) {
+      void loadLiteratures({ keyword, categoryId, tagId, current: 1, pageSize });
+    } else {
+      setCurrent(1);
+    }
   };
 
   const onReset = () => {
     setKeyword('');
     setCategoryId(undefined);
     setTagId(undefined);
-    setCurrent(1);
-    // 显式传入空条件，避免 setState 后闭包内仍是旧筛选值
-    void loadLiteratures({
-      keyword: '',
-      categoryId: undefined,
-      tagId: undefined,
-      current: 1,
-    });
+    if (current === 1) {
+      // 显式传入空条件，避免 setState 后闭包内仍是旧筛选值
+      void loadLiteratures({
+        keyword: '',
+        categoryId: undefined,
+        tagId: undefined,
+        current: 1,
+      });
+    } else {
+      setCurrent(1);
+    }
   };
 
   // ── 详情 ──────────────────────────────────────────────────────────────────

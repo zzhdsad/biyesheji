@@ -7,8 +7,10 @@
 - 新建会话用当前登录用户（不再硬编码 DEFAULT_ADMIN_EMAIL）
 """
 
+import asyncio
 import json
 import uuid
+from collections.abc import AsyncIterator
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
@@ -19,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.evidence import SOURCE_KIND_KG, package_evidence
 from src.application.rag_service import RagService
+from src.core.config import settings
 from src.core.deps import get_accessible_kb_ids
 from src.core.exceptions import PermissionDeniedError
 from src.domain.models import Conversation, Message, User
@@ -278,8 +281,10 @@ async def _check_model_configured(db: AsyncSession) -> None:
     base_url = config.get("llm_base_url", "")
     model = config.get("llm_model", "")
     if not base_url or not model:
+        # BUG-034：412 Precondition Failed 语义为"请求头前置条件不满足"
+        # （ETag/If-Match），此处是服务端缺少必要配置 → 503 Service Unavailable。
         raise AppException(
-            412,
+            503,
             "模型尚未配置，请先在管理中心-系统设置中配置模型参数",
         )
 
@@ -315,6 +320,68 @@ async def _validate_conversation_owner(
     if conv.user_id != user.id:
         raise PermissionDeniedError("无权访问该会话")
     return conv
+
+
+async def _with_heartbeat(source: AsyncIterator[str]) -> AsyncIterator[str]:
+    """为 SSE 业务事件流补心跳与总超时保护（BUG-035）。
+
+    反向代理（nginx proxy_read_timeout 默认 60s）会掐断检索阶段长时间无数据的
+    连接——此时后端仍在工作，客户端却只看到连接被断。本函数在等待业务事件的
+    间隙发送 SSE 注释帧（``: ping``）：注释帧对事件解析无副作用（SSE 规范以
+    冒号开头的行是注释，前端 useSSE 与测试解析器均按 event:/data: 解析），
+    但足以让代理与客户端认定连接存活。
+
+    总超时（默认 900s）到期时先发 error 事件再关闭流，避免"卡住不返回"的
+    请求无限占用连接。单次请求内的等待用 shield 包裹：超时只取消外层等待，
+    不会打断尚未完成的业务协程（直接 await __anext__ 被取消会连带终止生成器）。
+    """
+    interval = max(settings.SSE_HEARTBEAT_INTERVAL_SECONDS, 1)
+    total = settings.SSE_TOTAL_TIMEOUT_SECONDS
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + total if total > 0 else None
+    pending: asyncio.Task | None = None
+    try:
+        while True:
+            if pending is None:
+                pending = asyncio.ensure_future(source.__anext__())
+            remaining = None if deadline is None else deadline - loop.time()
+            if remaining is not None and remaining <= 0:
+                err = json.dumps(
+                    {"message": f"问答超时（超过 {total} 秒），请重试"}, ensure_ascii=False
+                )
+                yield f"event: error\ndata: {err}\n\n"
+                return
+            try:
+                event = await asyncio.wait_for(
+                    asyncio.shield(pending),
+                    timeout=interval if remaining is None else min(interval, remaining),
+                )
+            except asyncio.TimeoutError:
+                if deadline is not None and loop.time() >= deadline:
+                    err = json.dumps(
+                        {"message": f"问答超时（超过 {total} 秒），请重试"},
+                        ensure_ascii=False,
+                    )
+                    yield f"event: error\ndata: {err}\n\n"
+                    return
+                yield ": ping\n\n"
+                continue
+            except StopAsyncIteration:
+                return
+            except Exception as exc:  # 生成器逃逸的异常也要转成 error 事件，不留半截流
+                logger.exception(f"流式问答异常: {exc}")
+                err = json.dumps({"message": str(exc)}, ensure_ascii=False)
+                yield f"event: error\ndata: {err}\n\n"
+                return
+            pending = None
+            yield event
+    finally:
+        if pending is not None:
+            pending.cancel()
+        try:
+            await source.aclose()
+        except Exception:  # noqa: BLE001  关闭阶段不影响已发出的响应
+            pass
 
 
 # ── 端点实现 ────────────────────────────────────────────────────────────────
@@ -393,6 +460,8 @@ async def ask_stream(
     事件协议见原注释，不变（start → citations → delta×N → done）。
     阶段十一：start 事件 data 增加 query_analysis（事件名与顺序不变）。
     阶段十二：start 事件 data 增加 router_decision（事件名与顺序不变）。
+    BUG-035：事件流外层包 _with_heartbeat（注释帧心跳 + 总超时），
+    事件名与顺序不变，旧客户端解析不受影响。
     """
     from src.core.exceptions import AppException
 
@@ -424,7 +493,7 @@ async def ask_stream(
             yield f"event: error\ndata: {err}\n\n"
 
     return StreamingResponse(
-        event_stream(),
+        _with_heartbeat(event_stream()),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -538,13 +607,27 @@ async def delete_all_conversations(
     )
     await db.commit()
 
-    # 清理 Redis 对话缓存（逐个删除，失败仅告警）
+    # 清理 Redis 对话缓存（BUG-037）：逐条独立容错——单条失败不得中断其余会话的
+    # 清理（旧实现的 try 包住整个循环，第一条失败即放弃剩余）；失败清单随响应
+    # 返回，调用方可见"哪些缓存没清掉"，而不是以为全部成功。
+    failed: list[str] = []
     try:
         cache = get_conversation_cache()
-        for cid in conv_ids:
-            await cache.delete(cid)
     except Exception as exc:
-        logger.warning(f"批量清理会话缓存失败（不影响删除）: {exc}")
+        logger.warning(f"会话缓存不可用，跳过缓存清理（会话已删除）: {exc}")
+        cache = None
+        failed = [str(cid) for cid in conv_ids]
 
-    logger.info(f"用户 {user.id} 删除全部会话，共 {len(conv_ids)} 条")
-    return {"deleted_count": len(conv_ids)}
+    if cache is not None:
+        for cid in conv_ids:
+            try:
+                await cache.delete(cid)
+            except Exception as exc:
+                failed.append(str(cid))
+                logger.warning(f"清理会话缓存失败 cid={cid}: {exc}")
+
+    logger.info(
+        f"用户 {user.id} 删除全部会话，共 {len(conv_ids)} 条，"
+        f"缓存清理失败 {len(failed)} 条"
+    )
+    return {"deleted_count": len(conv_ids), "cache_cleanup_failed": failed}

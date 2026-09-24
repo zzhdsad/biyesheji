@@ -194,6 +194,27 @@ export function buildEvidenceGroups(citations: Citation[]): EvidenceGroup[] {
   return orderedGroups;
 }
 
+/**
+ * 把答案内联引用标记 `[citation: n]` 的编号 n 映射到 Collapse 面板 key（BUG-058）。
+ *
+ * 面板 key 是证据的 `source_index`（后端下发，即展示位次），而内联编号由 LLM
+ * 生成——模型可能引用越界编号（只有 3 条来源却写 `[citation: 5]`）。旧实现直接
+ * 把 n 当 key：越界编号点不出任何面板（且再点也不会收起已展开项）。
+ *
+ * 映射规则：
+ * - 命中现有 `source_index` → 返回 key = String(n)；
+ * - 越界（无对应来源）→ 返回 null，调用方应忽略本次点击（不展开、不报错）；
+ * - 编号重复/缺失时按现有集合精确匹配，绝不臆造来源。
+ */
+export function resolveCitationKey(
+  chipIndex: number,
+  availableSourceIndexes: number[],
+): string | null {
+  if (!Number.isFinite(chipIndex)) return null;
+  const wanted = Math.trunc(chipIndex);
+  return availableSourceIndexes.includes(wanted) ? String(wanted) : null;
+}
+
 /** 证据汇总：证据数 / 来源数 / 分组数 / 各等级数量。 */
 export function summarizeEvidence(
   citations: Citation[],

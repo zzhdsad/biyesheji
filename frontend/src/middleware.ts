@@ -12,8 +12,8 @@ import { NextResponse, type NextRequest } from 'next/server';
 
 const TOKEN_COOKIE_KEY = 'kp_token';
 
-/** 公开页面（无需登录即可访问）。 */
-const PUBLIC_PAGES = ['/login', '/register'];
+/** 公开页面（无需登录即可访问）。无开放注册，/register 已下线。 */
+const PUBLIC_PAGES = ['/login'];
 
 function isPublic(pathname: string): boolean {
   return PUBLIC_PAGES.some((p) => pathname === p || pathname.startsWith(p + '/'));

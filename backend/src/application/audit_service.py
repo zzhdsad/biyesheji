@@ -32,7 +32,14 @@ class AuditService:
         detail: dict | None = None,
         ip: str = "",
     ) -> None:
-        """记录一条审计日志（非阻塞：失败仅记日志，不影响主业务）。
+        """记录一条审计日志（非阻塞：审计写入失败不影响业务提交）。
+
+        BUG-012：资源类 CRUD 只有 flush，log() 是唯一提交点。旧实现把审计写入
+        和业务提交放在同一个 try 里，审计失败时 rollback 会连带回滚已 flush
+        的业务变更（数据静默丢失，且调用方仍按成功返回）。现改为：
+        1) 审计写入包在 SAVEPOINT 内——审计失败只回滚该 savepoint；
+        2) 随后照常提交业务——DB 健康时业务与审计在同一事务内原子落盘；
+        3) 业务提交失败必须抛出（调用方转为错误响应），不允许静默丢失。
 
         Args:
             operator_id: 操作人 ID（匿名操作为 None）
@@ -43,21 +50,27 @@ class AuditService:
             detail: 变更详情
             ip: 操作来源 IP
         """
+        entry = AuditLog(
+            operator_id=operator_id,
+            operator_name=operator_name,
+            operation=operation,
+            target_type=target_type,
+            target_id=str(target_id),
+            detail=detail or {},
+            ip=ip,
+        )
+        # 1) 审计写入：SAVEPOINT 隔离，失败不影响同事务内的业务变更
         try:
-            entry = AuditLog(
-                operator_id=operator_id,
-                operator_name=operator_name,
-                operation=operation,
-                target_type=target_type,
-                target_id=str(target_id),
-                detail=detail or {},
-                ip=ip,
-            )
-            self.db.add(entry)
-            await self.db.commit()
+            async with self.db.begin_nested():
+                self.db.add(entry)
         except Exception as exc:
-            logger.warning(f"审计日志写入失败（不影响主业务）: {exc}")
-            await self.db.rollback()
+            # 审计缺失是合规事件（error 级），但不得回滚业务、不得中断请求
+            logger.error(
+                f"审计日志写入失败（业务已提交，审计缺失需人工补录）: "
+                f"operation={operation} target={target_type}:{target_id} 原因={exc}"
+            )
+        # 2) 业务提交：唯一提交点，失败必须向上抛出（不允许静默丢失）
+        await self.db.commit()
 
     async def list_logs(
         self,
