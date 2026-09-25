@@ -463,10 +463,34 @@ export interface BatchDeleteError {
   errors: string[];
 }
 
-/** 用户列表。 */
+/** 用户列表（全量，兼容既有调用方）。 */
 export async function fetchUsers(): Promise<UserOut[]> {
   const { data } = await api.get<UserOut[]>('/users');
   return data;
+}
+
+/**
+ * 服务端分页的用户列表（卡顿修复）。
+ *
+ * 后端 `/users` 支持可选 `limit`/`offset`，并在响应头 `X-Total-Count` 返回活跃用户总数：
+ * 用户管理页改用它后，一次只拉当前页（默认 20 条），不再拉回全部 846 条后由
+ * AntD 做客户端分页。
+ *
+ * `total` 为 null 表示响应头缺失（例如被代理剥离），调用方应回退为客户端分页。
+ */
+export interface UserPage {
+  users: UserOut[];
+  total: number | null;
+}
+
+export async function fetchUsersPage(params: {
+  limit: number;
+  offset: number;
+}): Promise<UserPage> {
+  const res = await api.get<UserOut[]>('/users', { params });
+  const raw = res.headers?.['x-total-count'];
+  const parsed = raw === undefined || raw === null ? Number.NaN : Number(raw);
+  return { users: res.data, total: Number.isFinite(parsed) ? parsed : null };
 }
 
 /** 创建用户（系统自动生成初始密码）。 */

@@ -181,18 +181,29 @@ async def create_kb(
 @router.get("", response_model=list[KnowledgeBaseOut])
 async def list_kbs(
     request: Request,
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int | None = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
 ) -> list[KnowledgeBase]:
-    """知识库列表（按权限过滤，排除回收站）。"""
+    """知识库列表（按权限过滤，排除回收站）。
+
+    性能修复（卡顿排查）：此前该接口一次返回全部可见知识库（管理员实测
+    4290 条 / 791KB），前端需整体解析后再渲染。这里增加**可选**分页：
+
+    - 不传 limit：返回全部，行为与改动前完全一致
+      （侧边栏、资源挂载下拉、文档页筛选等既有消费方不受影响）
+    - 传 limit/offset：服务端分页，单次最多 500 条
+    """
     user: User = request.state.user
     accessible_ids = await get_accessible_kb_ids(db, user)
-    rows = (
-        await db.scalars(
-            select(KnowledgeBase)
-            .where(KnowledgeBase.id.in_(accessible_ids), KnowledgeBase.deleted_at.is_(None))
-            .order_by(KnowledgeBase.created_at.desc())
-        )
-    ).all()
+    stmt = (
+        select(KnowledgeBase)
+        .where(KnowledgeBase.id.in_(accessible_ids), KnowledgeBase.deleted_at.is_(None))
+        .order_by(KnowledgeBase.created_at.desc())
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit).offset(offset or 0)
+    rows = (await db.scalars(stmt)).all()
     return list(rows)
 
 

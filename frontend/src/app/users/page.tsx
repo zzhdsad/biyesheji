@@ -45,7 +45,7 @@ import {
   downloadUserTemplate,
   enableUser,
   fetchTrashUsers,
-  fetchUsers,
+  fetchUsersPage,
   purgeUser,
   resetUserPassword,
   restoreUser,
@@ -82,6 +82,12 @@ export default function UsersPage() {
   const [users, setUsers] = useState<UserOut[]>([]);
   const [trashUsers, setTrashUsers] = useState<UserOut[]>([]);
   const [loading, setLoading] = useState(false);
+
+  // 卡顿修复：活跃用户改为服务端分页，一次只拉当前页（此前一次拉回全部 846 条）。
+  // totalUsers 为 null 表示后端未返回总数（如响应头被代理剥离）→ 回退客户端分页。
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [totalUsers, setTotalUsers] = useState<number | null>(null);
 
   // 创建弹窗
   const [createForm] = Form.useForm<UserFormValues>();
@@ -137,13 +143,20 @@ export default function UsersPage() {
   const loadActive = useCallback(async () => {
     setLoading(true);
     try {
-      setUsers(await fetchUsers());
+      const { users: rows, total } = await fetchUsersPage({
+        limit: pageSize,
+        offset: (page - 1) * pageSize,
+      });
+      setUsers(rows);
+      setTotalUsers(total);
+      // 末页数据被全部删除后本页为空 → 回退到上一页，避免出现"空列表但页码还在末尾"
+      if (rows.length === 0 && page > 1) setPage((p) => p - 1);
     } catch {
       message.error('活跃用户列表加载失败');
     } finally {
       setLoading(false);
     }
-  }, [message]);
+  }, [message, page, pageSize]);
   const loadTrash = async () => {
     setLoading(true);
     try {
@@ -496,7 +509,21 @@ export default function UsersPage() {
                 columns={activeColumns}
                 dataSource={users}
                 loading={loading}
-                pagination={{ pageSize: 10, showSizeChanger: true }}
+                pagination={{
+                  current: page,
+                  pageSize,
+                  total: totalUsers ?? users.length,
+                  showSizeChanger: true,
+                  onChange: (nextPage, nextSize) => {
+                    // 每页条数变化时回到第一页，避免停留在越界页码
+                    if (nextSize !== pageSize) {
+                      setPageSize(nextSize);
+                      setPage(1);
+                    } else {
+                      setPage(nextPage);
+                    }
+                  },
+                }}
                 locale={{ emptyText: '暂无用户' }}
                 rowSelection={{ selectedRowKeys, onChange: (keys) => setSelectedRowKeys(keys) }}
               />

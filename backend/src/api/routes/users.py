@@ -22,7 +22,7 @@ import re
 import uuid
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from sqlalchemy import func, select, update
@@ -208,17 +208,31 @@ async def _purge_expired_trash(db: AsyncSession) -> None:
 @router.get("", response_model=list[UserOut])
 async def list_users(
     request: Request,
+    response: Response,
+    limit: int | None = Query(default=None, ge=1, le=500),
+    offset: int | None = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
 ) -> list[User]:
-    """活跃用户列表（不含已软删除）。"""
+    """活跃用户列表（不含已软删除）。
+
+    性能修复（卡顿排查）：该接口此前无分页，管理员打开用户管理页会一次拉回
+    全部用户（实测 846 条 / 244KB）由前端 AntD 做客户端分页，浏览器端解析与
+    渲染压力大。这里增加**可选**分页：
+
+    - 不传 limit：返回全部，行为与改动前完全一致（不破坏既有调用方）
+    - 传 limit/offset：服务端分页，单次最多 500 条
+
+    总数通过响应头 `X-Total-Count` 暴露（不改动返回体结构），前端据此做真分页。
+    """
     _require_admin(request)
-    rows = (
-        await db.scalars(
-            select(User)
-            .where(User.deleted_at.is_(None))
-            .order_by(User.created_at.desc())
-        )
-    ).all()
+    active_filter = User.deleted_at.is_(None)
+    total = await db.scalar(select(func.count()).select_from(User).where(active_filter))
+    response.headers["X-Total-Count"] = str(total or 0)
+
+    stmt = select(User).where(active_filter).order_by(User.created_at.desc())
+    if limit is not None:
+        stmt = stmt.limit(limit).offset(offset or 0)
+    rows = (await db.scalars(stmt)).all()
     return list(rows)
 
 
