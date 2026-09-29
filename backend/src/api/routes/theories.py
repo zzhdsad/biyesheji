@@ -20,6 +20,7 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.routes.resource_trash import register_resource_trash_routes
 from src.application.audit_service import AuditService
 from src.core.deps import get_client_ip
 from src.core.exceptions import AppException
@@ -210,12 +211,20 @@ def _array_ilike(column, pattern: str):
     return exists().where(item.ilike(pattern))
 
 
+# 「未填写分类」哨兵值：前端 TreeSelect 虚拟节点值 __none__（与中药模块同口径）
+UNCATEGORIZED_VALUE = "__none__"
+UNCATEGORIZED_VALUES = frozenset({"__none__", "none", "null", "uncategorized"})
+
+
 def _build_conditions(
     keyword: str | None,
     category_id: uuid.UUID | None,
     tag_id: uuid.UUID | None,
+    uncategorized: bool = False,
 ) -> list:
-    conditions: list = []
+    conditions: list = [Theory.deleted_at.is_(None)]
+    if uncategorized:
+        conditions.append(Theory.category_id.is_(None))
     if keyword:
         pattern = f"%{keyword.strip()}%"
         conditions.append(
@@ -238,14 +247,29 @@ def _build_conditions(
 @router.get("", response_model=TheoryListResponse)
 async def list_theories(
     keyword: str | None = None,
-    category_id: uuid.UUID | None = None,
+    category_id: str | None = None,
     tag_id: uuid.UUID | None = None,
+    uncategorized: bool = False,
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
-    """理论列表：关键词搜索 + 分类/标签筛选 + 分页（created_at DESC, id DESC）。"""
-    conditions = _build_conditions(keyword, category_id, tag_id)
+    """理论列表：关键词搜索 + 分类/标签筛选 + 分页（created_at DESC, id DESC）。
+
+    ``uncategorized=true`` 或 ``category_id=__none__``（前端「未填写分类」
+    哨兵值）→ 只返回 category_id IS NULL。
+    """
+    cat_uuid: uuid.UUID | None = None
+    if category_id:
+        raw = category_id.strip()
+        if raw.lower() in UNCATEGORIZED_VALUES:
+            uncategorized = True
+        else:
+            try:
+                cat_uuid = uuid.UUID(raw)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="category_id 不是合法 UUID") from exc
+    conditions = _build_conditions(keyword, cat_uuid, tag_id, uncategorized)
 
     total = await db.scalar(
         select(func.count()).select_from(Theory).where(*conditions)
@@ -271,9 +295,9 @@ async def get_theory(
     theory_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ):
-    """理论详情；不存在 404。"""
+    """理论详情；不存在 404（回收站中的理论视为不存在）。"""
     theory = await db.get(Theory, theory_id)
-    if theory is None:
+    if theory is None or theory.deleted_at is not None:
         raise HTTPException(status_code=404, detail="理论不存在")
     return _theory_to_out(theory)
 
@@ -422,46 +446,30 @@ async def update_theory(
     return _theory_to_out(stored)
 
 
-@router.delete("/{theory_id}", status_code=204)
+@router.delete("/{theory_id}")
 async def delete_theory(
     theory_id: uuid.UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """删除理论（仅 admin）；theory_tags 关联随 DB CASCADE 自动清理。
+    """删除理论 → 移入回收站（软删除，仅 admin）。
 
-    Stage 4-6：删除前清理所有 KBR 关联及 Milvus vectors。
+    彻底删除（清理 KB 挂载 + Milvus 向量 + KG 节点）只在回收站 purge 时执行。
     """
+    from src.application import trash_service
+
     user = request.state.user
     if user.role != "admin":
         raise AppException(403, "仅管理员可管理理论")
 
     theory = await db.get(Theory, theory_id)
-    if theory is None:
+    if theory is None or theory.deleted_at is not None:
         raise HTTPException(status_code=404, detail="理论不存在")
 
-    # Stage 4-6：删除资源前清理 KBR + 向量（失败则阻止删除）
-    try:
-        from src.application.resource_vector_service import ResourceVectorService
-        svc = ResourceVectorService()
-        await svc.cleanup_resource_mounts(db, "theory", theory.id)
-    except Exception as exc:
-        raise AppException(
-            422, f"资源向量清理失败，无法删除：{exc}"
-        ) from exc
-
-    # BUG-009：同步清理该资源的知识图谱节点（边随 FK CASCADE 删除）
-    try:
-        from src.application.kg_service import KgService
-        await KgService(db).delete_resource_nodes("theory", theory.id)
-    except Exception as exc:
-        import logging
-        logging.getLogger(__name__).error(
-            f"theory KG 节点清理失败 id={theory.id}: {exc}", exc_info=True
-        )
-
-    await db.delete(theory)
-    await db.flush()
+    moved = await trash_service.soft_delete_many(db, Theory, [theory_id])
+    if not moved:
+        raise HTTPException(status_code=404, detail="理论不存在")
+    await db.commit()
 
     audit = AuditService(db)
     await audit.log(
@@ -470,6 +478,19 @@ async def delete_theory(
         operation="delete",
         target_type="theory",
         target_id=str(theory.id),
-        detail={"name": theory.name},
+        detail={"name": theory.name, "retention_days": trash_service.retention_days()},
         ip=_get_client_ip(request),
     )
+    days = trash_service.retention_days()
+    return {"id": str(theory_id), "deleted": True, "message": f"已移入回收站，{days} 天内可恢复"}
+
+
+# ── 回收站生命周期（批量删除 / 恢复 / 彻底删除 / 一键清空）─────────────────
+
+register_resource_trash_routes(
+    router,
+    model=Theory,
+    resource_type="theory",
+    label="中医理论",
+    serialize=_theory_to_out,
+)

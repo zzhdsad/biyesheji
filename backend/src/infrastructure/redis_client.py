@@ -21,8 +21,17 @@ from dataclasses import dataclass
 from loguru import logger
 
 from src.core.config import settings
+from src.core.runtime_config import get_system_value
 
 _CACHE_KEY = "conversation:{conv_id}:history"
+
+
+def _history_window() -> int:
+    """多轮历史轮数：运行时配置（DB 覆盖 .env），同步读取不查库。"""
+    try:
+        return max(int(get_system_value("history_window")), 0)
+    except (TypeError, ValueError):
+        return max(settings.HISTORY_WINDOW, 0)
 
 
 def _key(conv_id: uuid.UUID | str) -> str:
@@ -92,7 +101,7 @@ class RedisConversationCache(BaseConversationCache):
         self, conv_id: uuid.UUID | str, role: str, content: str
     ) -> None:
         key = _key(conv_id)
-        keep = max(settings.HISTORY_WINDOW * 2, 0)
+        keep = max(_history_window() * 2, 0)
         try:
             pipe = self._client.pipeline()
             pipe.rpush(key, json.dumps({"role": role, "content": content}, ensure_ascii=False))
@@ -109,7 +118,7 @@ class RedisConversationCache(BaseConversationCache):
         if not messages:  # 空历史不回填，避免每轮新会话重复回源
             return
         key = _key(conv_id)
-        keep = max(settings.HISTORY_WINDOW * 2, 0)
+        keep = max(_history_window() * 2, 0)
         try:
             pipe = self._client.pipeline()
             pipe.delete(key)
@@ -146,7 +155,7 @@ class InMemoryConversationCache(BaseConversationCache):
         key = _key(conv_id)
         dq = self._store.setdefault(key, deque())
         dq.append({"role": role, "content": content})
-        keep = max(settings.HISTORY_WINDOW * 2, 0)
+        keep = max(_history_window() * 2, 0)
         while keep > 0 and len(dq) > keep:
             dq.popleft()
 
@@ -157,7 +166,7 @@ class InMemoryConversationCache(BaseConversationCache):
             return
         key = _key(conv_id)
         self._store[key] = deque(messages)
-        keep = max(settings.HISTORY_WINDOW * 2, 0)
+        keep = max(_history_window() * 2, 0)
         while keep > 0 and len(self._store[key]) > keep:
             self._store[key].popleft()
 

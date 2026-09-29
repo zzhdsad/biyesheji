@@ -40,6 +40,7 @@ import {
 } from '@/services/api';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
+import ResourceRecycleBin from '@/components/admin/ResourceRecycleBin';
 
 // ── 常量 ────────────────────────────────────────────────────────────────────
 
@@ -152,6 +153,11 @@ export default function TaxonomyPage() {
     } finally {
       setTagLoading(false);
     }
+  };
+
+  /** 回收站操作后刷新分类与标签。 */
+  const loadAll = async () => {
+    await Promise.all([loadCategories(resourceType), loadTags()]);
   };
 
   useEffect(() => {
@@ -354,7 +360,18 @@ export default function TaxonomyPage() {
   // ── 头部 ──────────────────────────────────────────────────────────────────
 
   const headerLeft = <h2 style={{ margin: 0 }}>分类与标签</h2>;
-  const headerRight = <AdminHeaderRight />;
+  // 分类 / 标签各自的回收站（恢复 / 彻底删除 / 一键清空），权限由后端二次校验
+const headerRight = (
+  <Space size="middle" align="center">
+    <ResourceRecycleBin
+      resourceType="category"
+      label="分类"
+      onChanged={() => void loadAll()}
+    />
+    <ResourceRecycleBin resourceType="tag" label="标签" onChanged={() => void loadAll()} />
+    <AdminHeaderRight />
+  </Space>
+);
 
   // 父节点选择仅"新建根分类"时可改；子分类/编辑时固定
   const parentSelectDisabled = categoryModal?.mode !== 'create-root';

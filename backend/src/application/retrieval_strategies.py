@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from loguru import logger
 
 from src.core.config import settings
+from src.core.runtime_config import get_system_value
 
 # Baseline 策略名（默认 / fallback / 对照实验组）
 BASELINE_STRATEGY = "baseline_hybrid"
@@ -248,15 +249,16 @@ def resolve_retrieval_config(
         "strategy_name": strategy.name,
         "resource_types": list(resource_types) if resource_types else [],
         "include_document": strategy.include_document,
+        # None 覆盖项回落到全局配置（运行时配置：DB 覆盖 .env）
         "recall_top_k": (
             strategy.recall_top_k
             if strategy.recall_top_k is not None
-            else settings.RECALL_TOP_K
+            else int(get_system_value("recall_top_k"))
         ),
         "rerank_top_k": (
             strategy.rerank_top_k
             if strategy.rerank_top_k is not None
-            else settings.RERANK_TOP_N
+            else int(get_system_value("rerank_top_n"))
         ),
         "rrf_k": strategy.rrf_k if strategy.rrf_k is not None else settings.RRF_K,
         "hyde_enabled": strategy.hyde_enabled,

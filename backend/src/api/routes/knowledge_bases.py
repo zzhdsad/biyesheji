@@ -23,11 +23,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.routes.resource_trash import IdsRequest
 from src.application.audit_service import AuditService
-from src.core.config import settings
+from src.core.runtime_config import get_system_value
 from src.core.deps import get_accessible_kb_ids, get_client_ip
 from src.core.exceptions import AppException, NotFoundError, PermissionDeniedError
 from src.domain.models import (
+    Document,
     Herb,
     KBMember,
     KnowledgeBase,
@@ -71,6 +73,8 @@ class KnowledgeBaseOut(BaseModel):
     visibility: str
     owner_id: uuid.UUID
     deleted_at: datetime | None = None
+    # 文档数（仅统计未软删除的文档；由列表/回收站接口实时统计后挂载）
+    document_count: int = 0
 
 
 class KnowledgeBaseUpdate(BaseModel):
@@ -123,6 +127,28 @@ class TransferOwnershipRequest(BaseModel):
 def _get_client_ip(request: Request) -> str:
     """审计用客户端 IP（实现统一到 src.core.deps.get_client_ip，BUG-072）。"""
     return get_client_ip(request)
+
+async def _attach_document_counts(db: AsyncSession, kbs: list[KnowledgeBase]) -> None:
+    """为知识库对象挂载 document_count（**只统计未软删除的文档**）。
+
+    BUG 修复（知识库列表文档数始终为 0）：原先 KnowledgeBaseOut 根本没有
+    document_count 字段，后端也从未统计，前端只能显示 0。这里用一条 GROUP BY
+    查询批量统计后挂到实例属性上（不影响数据库列），N+1 与全量加载都避免了。
+    """
+    if not kbs:
+        return
+    ids = [kb.id for kb in kbs]
+    rows = (
+        await db.execute(
+            select(Document.kb_id, func.count())
+            .where(Document.kb_id.in_(ids), Document.deleted_at.is_(None))
+            .group_by(Document.kb_id)
+        )
+    ).all()
+    counts = {kb_id: int(count) for kb_id, count in rows}
+    for kb in kbs:
+        kb.document_count = counts.get(kb.id, 0)
+
 
 async def _require_kb_owner_or_admin(db: AsyncSession, request: Request, kb_id: uuid.UUID) -> KnowledgeBase:
     """校验当前用户是 KB owner 或系统 admin。返回知识库。"""
@@ -203,8 +229,9 @@ async def list_kbs(
     )
     if limit is not None:
         stmt = stmt.limit(limit).offset(offset or 0)
-    rows = (await db.scalars(stmt)).all()
-    return list(rows)
+    rows = list((await db.scalars(stmt)).all())
+    await _attach_document_counts(db, rows)
+    return rows
 
 
 @router.put("/{kb_id}", response_model=KnowledgeBaseOut)
@@ -255,10 +282,10 @@ async def delete_kb(
     await audit.log(
         operator_id=user.id, operator_name=user.username,
         operation="delete", target_type="kb", target_id=str(kb.id),
-        detail={"name": kb.name, "retention_days": settings.TRASH_RETENTION_DAYS},
+        detail={"name": kb.name, "retention_days": get_system_value("trash_retention_days")},
         ip=_get_client_ip(request),
     )
-    days = settings.TRASH_RETENTION_DAYS
+    days = int(get_system_value("trash_retention_days"))
     return {"id": str(kb_id), "deleted": True, "message": f"已移入回收站，{days} 天内可恢复"}
 
 
@@ -276,21 +303,24 @@ async def list_trash_kbs(
         raise PermissionDeniedError("仅管理员可查看回收站")
 
     # 清理过期项
-    cutoff = utcnow() - timedelta(days=settings.TRASH_RETENTION_DAYS)
+    cutoff = utcnow() - timedelta(days=int(get_system_value("trash_retention_days")))
     expired = (await db.scalars(select(KnowledgeBase).where(KnowledgeBase.deleted_at < cutoff))).all()
     for kb in expired:
         await db.delete(kb)
     if expired:
         await db.commit()
 
-    rows = (
-        await db.scalars(
-            select(KnowledgeBase)
-            .where(KnowledgeBase.deleted_at.is_not(None))
-            .order_by(KnowledgeBase.deleted_at.desc())
-        )
-    ).all()
-    return list(rows)
+    rows = list(
+        (
+            await db.scalars(
+                select(KnowledgeBase)
+                .where(KnowledgeBase.deleted_at.is_not(None))
+                .order_by(KnowledgeBase.deleted_at.desc())
+            )
+        ).all()
+    )
+    await _attach_document_counts(db, rows)
+    return rows
 
 
 @router.post("/{kb_id}/restore", response_model=KnowledgeBaseOut)
@@ -375,6 +405,145 @@ async def purge_kb(
         detail={"name": kb_name}, ip=_get_client_ip(request),
     )
     return {"id": str(kb_id), "purged": True}
+
+
+# ── 批量删除 / 批量恢复 / 一键清空回收站 ─────────────────────────────────────
+
+
+@router.post("/batch-delete")
+async def batch_delete_kbs(
+    payload: IdsRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """批量删除知识库 → 移入回收站（软删除）。
+
+    权限：admin 可删除任意知识库；普通用户仅可删除自己拥有的（与单条删除一致，
+    后端二次校验，不依赖前端）。单条失败只记录原因并继续其余记录。
+    """
+    user: User = request.state.user
+    deleted: list[str] = []
+    failed: list[dict[str, str]] = []
+    for kb_id in payload.ids:
+        try:
+            kb = await db.get(KnowledgeBase, kb_id)
+            if kb is None or kb.deleted_at is not None:
+                failed.append({"id": str(kb_id), "reason": "知识库不存在或已在回收站"})
+                continue
+            if user.role != "admin" and kb.owner_id != user.id:
+                failed.append({"id": str(kb_id), "reason": "仅 Owner 或管理员可删除"})
+                continue
+            kb.deleted_at = utcnow()
+            deleted.append(str(kb_id))
+        except Exception as exc:  # noqa: BLE001
+            failed.append({"id": str(kb_id), "reason": str(exc)[:200]})
+
+    if deleted:
+        await db.commit()
+
+    audit = AuditService(db)
+    await audit.log(
+        operator_id=user.id, operator_name=user.username,
+        operation="batch_delete", target_type="kb",
+        target_id=",".join(deleted[:20]),
+        detail={"deleted": len(deleted), "failed": len(failed)},
+        ip=_get_client_ip(request),
+    )
+    days = int(get_system_value("trash_retention_days"))
+    return {
+        "total": len(payload.ids),
+        "success": len(deleted),
+        "failed": failed,
+        "message": f"已移入回收站 {len(deleted)} 个知识库，{days} 天内可恢复",
+    }
+
+
+@router.post("/batch-restore")
+async def batch_restore_kbs(
+    payload: IdsRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """批量从回收站恢复知识库（仅 admin）。"""
+    user: User = request.state.user
+    if user.role != "admin":
+        raise PermissionDeniedError("仅管理员可恢复")
+
+    restored = 0
+    failed: list[dict[str, str]] = []
+    for kb_id in payload.ids:
+        kb = await db.get(KnowledgeBase, kb_id)
+        if kb is None or kb.deleted_at is None:
+            failed.append({"id": str(kb_id), "reason": "不在回收站中"})
+            continue
+        kb.deleted_at = None
+        restored += 1
+    if restored:
+        await db.commit()
+
+    audit = AuditService(db)
+    await audit.log(
+        operator_id=user.id, operator_name=user.username,
+        operation="batch_restore", target_type="kb",
+        target_id=",".join(str(i) for i in payload.ids[:20]),
+        detail={"restored": restored, "failed": len(failed)},
+        ip=_get_client_ip(request),
+    )
+    return {"total": len(payload.ids), "success": restored, "failed": failed}
+
+
+@router.delete("/trash/purge-all")
+async def purge_all_trash_kbs(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """一键清空知识库回收站（仅 admin）：彻底删除回收站中的全部知识库。
+
+    与单条 purge 完全同口径：逐库先清理 Resource 向量 + 该库全部文档向量，
+    再删除记录；单条清理失败即跳过该条（记录原因），不会留下孤儿向量。
+    """
+    user: User = request.state.user
+    if user.role != "admin":
+        raise PermissionDeniedError("仅管理员可彻底删除")
+
+    rows = list(
+        (
+            await db.scalars(
+                select(KnowledgeBase).where(KnowledgeBase.deleted_at.is_not(None))
+            )
+        ).all()
+    )
+    purged: list[str] = []
+    failed: list[dict[str, str]] = []
+    for kb in rows:
+        kb_id = kb.id
+        try:
+            async with db.begin_nested():
+                from src.application.resource_vector_service import ResourceVectorService
+                await ResourceVectorService().cleanup_kb_resource_vectors(db, kb_id)
+                from src.infrastructure.milvus_store import get_vector_store
+                get_vector_store().delete_by_kb(str(kb_id))
+                await db.delete(kb)
+                await db.flush()
+            purged.append(str(kb_id))
+        except Exception as exc:  # noqa: BLE001
+            logger.error(f"清空回收站：知识库 {kb_id} 彻底删除失败: {exc}")
+            failed.append({"id": str(kb_id), "reason": str(exc)[:200]})
+    if purged:
+        await db.commit()
+
+    audit = AuditService(db)
+    await audit.log(
+        operator_id=user.id, operator_name=user.username,
+        operation="purge_all_trash", target_type="kb", target_id="",
+        detail={"purged": len(purged), "failed": len(failed)},
+        ip=_get_client_ip(request),
+    )
+    return {
+        "purged": len(purged),
+        "failed": failed,
+        "message": f"已彻底删除 {len(purged)} 个知识库，失败 {len(failed)} 个",
+    }
 
 
 # ── 成员管理 ────────────────────────────────────────────────────────────────

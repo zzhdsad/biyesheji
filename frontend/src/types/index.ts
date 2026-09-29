@@ -308,14 +308,22 @@ export interface AuditLog {
   created_at: string;
 }
 
-/** 系统级配置（BUSINESS_RULES §8）。 */
-export interface SystemConfig {
+/** 系统级配置取值（BUSINESS_RULES §8）。 */
+export interface SystemConfigValues {
   trash_retention_days: number;
   max_file_size_mb: number;
   recall_top_k: number;
   rerank_top_n: number;
   relevance_threshold: number;
   history_window: number;
+}
+
+/**
+ * 系统级配置响应：在取值之外附带 `defaults`（后端 Settings 默认值），
+ * 供界面展示默认值提示与"恢复默认值"。
+ */
+export interface SystemConfig extends SystemConfigValues {
+  defaults?: SystemConfigValues;
 }
 
 /** pending=待解析 / parsing=解析中 / success=切片就绪 / completed=已向量化 / failed=失败。 */

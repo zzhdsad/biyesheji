@@ -47,3 +47,8 @@ models/
 *.bin
 backend/models/
 backend/.modelscope/
+
+# Docker 构建用：本机预置模型权重（4.3GB，由脚本从 HF 缓存整理）
+backend/prebuilt-models/
+# 构建日志
+*.log

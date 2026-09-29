@@ -1,7 +1,7 @@
 技术设计文档（TECH_DESIGN）
 
 项目：中医药知识资源管理与智能问答系统
-更新时间：2026-09-18
+更新时间：2026-09-26
 作用：说明系统整体技术架构与核心实现方式。
 产品需求以 PRD.md 为准，AI 开发规则以 AGENTS.md 为准。
 
@@ -25,9 +25,10 @@ Embedding / Reranker / LLM
 缓存与会话：Redis
 向量数据库：Milvus
 部署：Docker Compose
-Embedding：BGE-M3
-Reranker：BGE-Reranker
-大语言模型：LLM
+Embedding：BGE-M3（权重随镜像内置）
+Reranker：BGE-Reranker（权重随镜像内置）
+大语言模型：LLM（OpenAI 兼容接口）
+HyDE：默认开启，复用主 LLM；不提供 mock 实现
 不使用 LangChain
 2. 系统分层
 2.1 传统业务层
@@ -109,8 +110,30 @@ Chunk 标识
 
 PostgreSQL 是业务数据的主要来源，Milvus 是 AI 检索索引。
 
+### 3.4 可配置参数的运行时取值
+
+六个系统级参数（回收站保留期、文件大小限制、多轮历史轮数、
+检索 Top-K、精排 Top-N、相似度拒答阈值）统一由
+`src/core/runtime_config.py` 提供取值入口：
+
+    读预置默认值（core/config.py Settings）
+        ↑ 回落
+    运行时配置（DB system_configs 单行表，id=1）
+        ↓
+    进程内快照（TTL 30s 异步刷新 + 写入后即时失效）
+        ↓
+    业务代码同步取值 get_system_value(name)
+
+设计要点：
+- 消费点中存在同步上下文（`resolve_retrieval_config`、
+  `displayable_hits`、`_is_relevant`）与拿不到 DB session 的
+  `redis_client`，因此采用"异步刷新快照 + 同步 O(1) 取值"，不在业务代码里查库。
+- 后台保存配置（`PUT /settings/system`）立即调用 `invalidate_system_config()`；
+  另有 HTTP 中间件按 TTL 刷新，覆盖多副本 / 外部直接改库的场景。
+- DB 不可用时沿用上一份快照（首次则回落 .env 默认值），不阻断服务。
+
 4. 文档处理流程
-上传文档
+上传文档（大小受运行时配置 max_file_size_mb 限制，默认 50MB）
  ↓
 文件解析
  ↓
@@ -118,7 +141,7 @@ PostgreSQL 是业务数据的主要来源，Milvus 是 AI 检索索引。
  ↓
 保存 Chunk
  ↓
-BGE-M3 向量化
+BGE-M3 向量化（本地模型路径 EMBEDDING_MODEL_PATH）
  ↓
 Dense + Sparse
  ↓
@@ -186,6 +209,9 @@ SSE 流式回答
 
 Baseline 应保持稳定，后续研究功能在其基础上扩展。
 
+关键参数默认值（后台可覆盖）：Top-K=10、Top-N=3、相似度拒答阈值=0.35、
+多轮历史=5 轮；HyDE 默认开启并复用主 LLM。
+
 7. AI 问答接口
 
 主要接口：
@@ -201,7 +227,7 @@ citation
 delta
 done
 
-多轮对话保留最近若干轮历史，具体实现以当前代码为准。
+多轮对话保留最近若干轮历史（默认 5 轮，可在后台「系统配置」调整后立即生效）。
 
 8. 未来研究架构
 
@@ -296,6 +322,8 @@ Hybrid Retrieval
 AI 功能作为传统系统的增强模块。
 不为了技术先进而随意增加框架、服务和依赖。
 数据库结构修改必须考虑已有数据。
+配置类数据统一以 DB 为准、.env 为回落；运行时不得绕过统一取值入口。
+禁止在生产链路保留 mock / 假数据实现（测试替身仅限测试使用）。
 API 修改需要考虑前端兼容性。
 RAG 核心链路修改后必须进行完整问答测试。
 新研究功能应尽量模块化，并支持实验开关。

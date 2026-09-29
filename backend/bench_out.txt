@@ -1,0 +1,5 @@
+torch=2.14.0+cpu default_threads=4 cpu_count=8
+sample_chunks=32 avg_len=315
+model loaded
+threads=4 chunks=32 elapsed=97.3s chunk_per_s=0.329 dense_dim=1024 sparse_keys=11
+threads=2 chunks=32 elapsed=66.5s chunk_per_s=0.481 dense_dim=1024 sparse_keys=11

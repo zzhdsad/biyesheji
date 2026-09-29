@@ -1,25 +1,40 @@
-# Python 虚拟环境（容器内重新安装依赖，不拷入镜像）
-.venv/
+# 缩小构建上下文：Dockerfile 只 COPY requirements*.txt 与 src，
+# 本地虚拟环境、上传文件、测试与日志都不需要进镜像（不加会让上下文达数 GB）。
 venv/
+.venv/
 __pycache__/
 *.py[cod]
+*.pyo
+*.egg-info/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
 
-# 敏感配置：通过 docker compose env_file 注入，不进镜像
+tests/
+uploads/
+logs/
+data/
+models/
+
+# 本地调试产物与临时脚本（注意：不要写 *.json，prebuilt-models 下的模型配置会被误伤）
+*.log
+pytest_out.txt
+_pytest_full*.log
+_tmp_audit_schema.py
+smoke_embed.py
+download_models*.py
+eval_run.py
+import_testset.py
+handbook.txt
+员工手册.md
+create_kb.json
+deepseek_test.json
+sample_*.json
+*.png
+
+# 密钥不进镜像（运行时由 compose 的 env_file 注入）
 .env
 .env.*
-
-# 运行时数据与大文件（volume 挂载 / 运行时下载）
-uploads/
-models/
-*.log
-
-# 测试与文档（生产镜像不需要）
-tests/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# 版本控制
-.git/
-.gitignore
+!.env.example

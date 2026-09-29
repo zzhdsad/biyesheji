@@ -26,7 +26,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
 from src.core.exceptions import NotFoundError, PermissionDeniedError
-from src.domain.models import Conversation, Document, Message, User
+from src.core.runtime_config import get_system_value
+from src.domain.models import (  # noqa: E402
+    Conversation,
+    Document,
+    Herb,
+    KnowledgeBaseResource,
+    Literature,
+    Message,
+    Prescription,
+    Theory,
+    User,
+)
 from src.infrastructure.embedding import BaseEmbedding, EmbeddingError, get_embedding
 from src.infrastructure.hyde import BaseHyDE, HyDEError, get_hyde
 from src.infrastructure.llm import BaseLLM, LLMError, get_llm
@@ -119,9 +130,11 @@ from src.application.self_reflection import (  # noqa: E402
     with_revision,
 )
 from src.application.kg_retrieval import KgRetriever  # noqa: E402
+from src.application.entity_resolver import resolve_resource_name  # noqa: E402
 from src.application.query_analyzer import (  # noqa: E402
     QueryAnalysis,
     QueryAnalyzer,
+    apply_entity_resolution,
     fallback_analysis,
 )
 from src.application.dynamic_router import (  # noqa: E402
@@ -135,6 +148,16 @@ from src.application.retrieval_strategies import (  # noqa: E402
     get_strategy,
     resolve_retrieval_config,
 )
+from src.application.resource_vector_service import make_doc_id  # noqa: E402
+
+
+# 资源类型 → 模型（用于按 doc_id 还原资源元数据；与 resource_vector_service 词表一致）
+_RESOURCE_MODEL_BY_TYPE: dict[str, type] = {
+    "herb": Herb,
+    "prescription": Prescription,
+    "theory": Theory,
+    "literature": Literature,
+}
 
 
 class RagService:
@@ -178,6 +201,10 @@ class RagService:
         self.reflector = reflector or SelfReflection()
         # 本次问答的 Reflection 决策（供 /chat/ask 输出；默认 None）
         self.last_reflection_decision: ReflectionDecision | None = None
+        # 资源元数据缓存（kb_id → {doc_id: (resource_type, resource_name)}）：
+        # 老集合 enable_dynamic_field=False 时 Milvus 不带回资源字段，
+        # 需按 doc_id 从 PG 事实源补齐（每实例只查一次，避免每次检索重复查询）。
+        self._resource_meta_cache: dict[str, dict[str, tuple[str, str]]] = {}
 
     async def _ensure_components(self) -> None:
         """惰性加载运行时配置并初始化 embedding/llm/rerank/hyde。
@@ -256,10 +283,17 @@ class RagService:
         # - accept：继续生成（行为与阶段十三完全一致）
         # - retry：换一个已注册的检索策略重试一次（最多一次）
         # - insufficient：返回拒答文案 + 保留 hits（证据/引用仍展示），不调用 LLM
+        gate_before = len(hits)
         hits, gate_decision = await self._apply_evidence_gate(
             kb_ids, question, hits, analysis, router_decision, strategy
         )
         self.last_gate_decision = gate_decision
+        if gate_decision is not None:
+            logger.info(
+                f"[RAG] Gate 前命中={gate_before} 证据={gate_decision.evidence_count} "
+                f"采纳={gate_decision.accepted_count} 判定={gate_decision.decision}"
+                f"（{gate_decision.reason}）q={question[:30]!r}"
+            )
         if gate_decision is not None and gate_decision.decision != DECISION_ACCEPT:
             logger.info(
                 f"Evidence Gate 判定 {gate_decision.decision}（{gate_decision.reason}）"
@@ -272,6 +306,11 @@ class RagService:
         # 仅词语重叠、答非所问（如问"你觉得产品如何"仅命中含"产品"的 PRD），
         # 直接拒答且不调用 LLM，杜绝模型用通用知识补答
         if not self._is_relevant(hits):
+            logger.info(
+                f"[RAG] 相关性门槛拒答：hits={len(hits)} "
+                f"best_dense={max((float(h.get('dense_score', 0.0)) for h in hits), default=0.0):.4f} "
+                f"threshold={get_system_value('relevance_threshold')} q={question[:30]!r}"
+            )
             return REFUSAL_ANSWER, []
 
         # 生成
@@ -302,6 +341,21 @@ class RagService:
             allow_retry=True,
         )
         return answer, hits
+
+    async def _stale_doc_ids(self) -> set[str]:
+        """返回"向量由其它 embedding 模型生成"的文档 id（用于混检隔离）。
+
+        失败时返回空集合：一致性校验是**增强**环节，不得成为检索的单点故障
+        （与 Reranker 降级语义一致）。
+        """
+        try:
+            from src.application.vector_model import key_from_config, stale_doc_ids
+
+            ids = await stale_doc_ids(self.db, key_from_config(self._config))
+            return {str(i) for i in ids}
+        except Exception as exc:  # noqa: BLE001 - 识别失败不阻断检索
+            logger.warning(f"旧模型向量识别失败，本次不做隔离: {exc}")
+            return set()
 
     async def _retrieve(
         self,
@@ -384,8 +438,37 @@ class RagService:
             logger.error(f"RAG 检索失败: {exc}")
             raise AppException(422, f"知识检索失败：{exc}") from exc
 
+        # 资源元数据回填（老集合兜底）：Milvus 未开启动态字段时命中不带
+        # resource_type/resource_name，导致 Dynamic Router 的资源类型过滤在后置
+        # filter_hits 处失效、引用卡片把资源显示成"资源"。这里按 doc_id 从 PG
+        # 事实源补齐，使 resource_types 真正作用到检索层（不改变排序与打分）。
+        await self._attach_resource_meta(kb_ids, dense_hits + sparse_hits)
+
+        # 新旧 embedding 模型隔离：剔除由**其它模型**生成的向量。
+        # 不同模型的向量不在同一向量空间，混检会产生无意义相似度（错误结果）。
+        # 未标注（legacy，vector_model IS NULL）的文档不受影响，保持既有行为。
+        stale_docs = await self._stale_doc_ids()
+        if stale_docs:
+            dense_hits = [h for h in dense_hits if str(h.get("doc_id")) not in stale_docs]
+            sparse_hits = [h for h in sparse_hits if str(h.get("doc_id")) not in stale_docs]
+            logger.info(f"已排除旧模型向量文档 {len(stale_docs)} 篇（避免新旧模型混检）")
+
         # RRF 融合 → Top-recall 候选
         fused = rrf_fusion([dense_hits, sparse_hits], k=cfg["rrf_k"], top_n=recall)
+
+        # 统一命中数据结构：dense_score（BGE-M3 COSINE）只存在于稠密路命中，
+        # 稀疏路命中没有该字段。RRF 之后若 Top-N 恰好全是纯稀疏命中，
+        # Similarity Gate（只看 dense_score）会读到 0，导致"稠密路明明召回了
+        # 0.5+ 的相关段落，却被判相关性不足而拒答"。
+        # 这里对**同一条记录**（同一向量 id）回填稠密分数：不改变排序、
+        # 不新增/丢弃命中、不绕过任何 Gate；真正未被稠密路召回的稀疏命中
+        # 仍然没有 dense_score，保持"纯稀疏命中不参与相关性豁免"的既有语义。
+        dense_scores = {str(h.get("id")): float(h.get("dense_score") or 0.0) for h in dense_hits}
+        for h in fused:
+            if h.get("dense_score") is None:
+                ds = dense_scores.get(str(h.get("id")))
+                if ds is not None:
+                    h["dense_score"] = ds
 
         # Rerank 精排 → Top-N 送 LLM
         try:
@@ -427,15 +510,95 @@ class RagService:
                 logger.warning(f"KG 检索不可用，本次仅用向量检索: {exc}")
                 kg_hits = []
 
+        # 排障日志（不含密钥等敏感信息）：问题 → 模型 → 各层命中数 → 分数区间
+        best_dense = max((float(h.get("dense_score", 0.0)) for h in dense_hits), default=0.0)
+        best_rerank = max((float(h.get("rerank_score", 0.0)) for h in hits), default=0.0)
+        from src.application.vector_model import key_from_config
+
+        model_key = key_from_config(self._config)
         logger.info(
-            f"混合检索 strategy={cfg['strategy_name']} dense={len(dense_hits)} "
+            f"[RAG] q={question[:40]!r} model={model_key} strategy={cfg['strategy_name']} "
+            f"kb={len(kb_ids)} dense={len(dense_hits)}(best={best_dense:.4f}) "
             f"sparse={len(sparse_hits)} fused={len(fused)} "
-            f"reranked={len(hits) - len(kg_hits)} kg={len(kg_hits)}"
+            f"reranked={len(hits) - len(kg_hits)}(best={best_rerank:.4f}) kg={len(kg_hits)}"
         )
 
         # 为精排后的命中注入 doc_name（Prompt 与引用卡片均需展示文档名）
         await self._enrich_hits_with_doc_name(hits)
         return hits
+
+    @staticmethod
+    def _is_document_doc_id(doc_id: object) -> bool:
+        """doc_id 是否为文档 UUID（与 BUG-021 判定一致：资源 doc_id 是哈希串）。"""
+        try:
+            uuid.UUID(str(doc_id))
+            return True
+        except (ValueError, TypeError, AttributeError):
+            return False
+
+    async def _resource_meta(self, kb_id: str) -> dict[str, tuple[str, str]]:
+        """知识库内「资源向量 doc_id → (resource_type, resource_name)」映射。
+
+        以 PG（KnowledgeBaseResource + 各资源表）为事实源重算 doc_id：
+        老集合（enable_dynamic_field=False）未把资源元数据写入 Milvus，
+        只能据此还原，供资源类型过滤与引用展示使用。
+        """
+        cached = self._resource_meta_cache.get(kb_id)
+        if cached is not None:
+            return cached
+        out: dict[str, tuple[str, str]] = {}
+        try:
+            mounts = (
+                await self.db.scalars(
+                    select(KnowledgeBaseResource).where(
+                        KnowledgeBaseResource.knowledge_base_id == uuid.UUID(kb_id)
+                    )
+                )
+            ).all()
+            by_type: dict[str, list] = {}
+            for m in mounts:
+                by_type.setdefault(m.resource_type, []).append(m.resource_id)
+            for rtype, ids in by_type.items():
+                model = _RESOURCE_MODEL_BY_TYPE.get(rtype)
+                if model is None or not ids:
+                    continue
+                rows = (
+                    await self.db.scalars(select(model).where(model.id.in_(ids)))
+                ).all()
+                for r in rows:
+                    out[make_doc_id(rtype, r.id, uuid.UUID(kb_id))] = (
+                        rtype,
+                        (r.name or "").strip(),
+                    )
+        except Exception as exc:  # noqa: BLE001  元数据缺失不得影响检索主流程
+            logger.warning(f"资源元数据加载失败（按无资源元数据处理）: {exc}")
+            return {}
+        self._resource_meta_cache[kb_id] = out
+        return out
+
+    async def _attach_resource_meta(self, kb_ids: list[uuid.UUID], hits: list[dict]) -> None:
+        """为资源类命中补齐 resource_type / resource_name（就地修改）。
+
+        仅处理 Milvus 未带回资源字段的命中：doc_id 非 UUID 即资源（或 KG）行。
+        补齐后：后置 filter_hits 能按策略的 resource_types 真正过滤；
+        Evidence / Citation 能展示真实资源名（如"丹参"）而非占位名"资源"。
+        """
+        need = [
+            h
+            for h in hits
+            if not h.get("resource_type") and not self._is_document_doc_id(h.get("doc_id"))
+        ]
+        if not need:
+            return
+        meta: dict[str, tuple[str, str]] = {}
+        for kb in kb_ids:
+            meta.update(await self._resource_meta(str(kb)))
+        if not meta:
+            return
+        for h in need:
+            found = meta.get(str(h.get("doc_id")))
+            if found:
+                h["resource_type"], h["resource_name"] = found[0], found[1]
 
     def _is_relevant(self, hits: list[dict]) -> bool:
         """相关性门槛（PRD §8.3 幻觉兜底）：Top 候选的稠密语义相似度均低于
@@ -443,16 +606,16 @@ class RagService:
 
         - 稠密 COSINE 相似度反映语义相关性；纯稀疏/关键词命中不参与豁免
           （无 dense_score 按 0 计）——词语重叠不代表能回答，正是本门槛要拦的场景。
-        - 阈值经 .env RELEVANCE_THRESHOLD 调整：真实 BGE-M3 下无关文本通常
-          0.3~0.5、相关文本 0.6+；mock 向量化得分普遍 ~0.75（不拦截，仅开发用）。
+        - 阈值可在后台「系统配置」调整（DB 覆盖 .env）：真实 BGE-M3 下无关文本
+          通常 0.3~0.5、相关文本 0.6+。
         """
         if not hits:
             return False
+        threshold = float(get_system_value("relevance_threshold"))
         best = max(h.get("dense_score", 0.0) for h in hits)
-        if best < settings.RELEVANCE_THRESHOLD:
+        if best < threshold:
             logger.info(
-                f"相关性不足（best_dense_score={best:.4f} < "
-                f"{settings.RELEVANCE_THRESHOLD}）"
+                f"相关性不足（best_dense_score={best:.4f} < {threshold}）"
             )
             return False
         return True
@@ -930,6 +1093,39 @@ class RagService:
         decision = self.route_query(analysis)
         return analysis, decision
 
+    async def plan_retrieval_with_entities(
+        self, question: str
+    ) -> tuple[QueryAnalysis, RouterDecision]:
+        """阶段十六：Analyzer → **资源名称消歧** → Router。
+
+        在既有链路中间插入一步「事实依据」：用 PostgreSQL 中真实存在的资源
+        名称（含别名）判断问题里是否出现了确定实体（如"沉香曲"实为方剂）。
+        消歧结果由 query_analyzer.apply_entity_resolution 决定是否覆盖
+        question_type / resource_types，**Domain Router 的规则与策略表不变**，
+        仅在分析结论变化时重跑一次路由。
+
+        消歧失败（DB 不可用 / 索引加载异常）时静默沿用原 Analyzer 结果，
+        不影响检索；此处不修改任何检索参数与 Gate 判据。
+        """
+        analysis, decision = self.plan_retrieval(question)
+        try:
+            result = await resolve_resource_name(self.db, question)
+            corrected = apply_entity_resolution(analysis, result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 消歧不是单点，失败即降级
+            logger.warning(f"资源名称消歧链路异常，沿用 Analyzer 结果: {exc}")
+            return analysis, decision
+        # 仅在「已应用到分析结论」时重跑路由：未命中/歧义/多实体等场景只是附加
+        # 调试信息，路由结论不变，避免多一次无效路由（保持 analyze→route→retrieve 顺序）
+        applied = (corrected.features or {}).get("entity_match", {}).get("applied")
+        if not applied or (
+            corrected.question_type == analysis.question_type
+            and list(corrected.resource_types or []) == list(analysis.resource_types or [])
+        ):
+            return corrected, decision
+        return corrected, self.route_query(corrected)
+
     @staticmethod
     def _strategy_of(decision: RouterDecision) -> tuple[RetrievalStrategy | None, list[str]]:
         """从 RouterDecision 取策略对象与已解析的资源类型（未知策略返回 None）。"""
@@ -967,8 +1163,8 @@ class RagService:
             AppException: 422 检索/生成失败
         """
         started_at = asyncio.get_event_loop().time()
-        # 阶段十二：Query → Analyzer → Router → Strategy（两者均带兜底）
-        query_analysis, router_decision = self.plan_retrieval(question)
+        # 阶段十二+十六：Analyzer → 资源名称消歧 → Router → Strategy（全链路带兜底）
+        query_analysis, router_decision = await self.plan_retrieval_with_entities(question)
         strategy, resource_types = self._strategy_of(router_decision)
         conversation = await self._ensure_conversation(user, kb_ids, question, conversation_id)
         history, cache_hit = await self._load_history(conversation.id)
@@ -1048,8 +1244,8 @@ class RagService:
                 先落库的用户消息会被补偿删除，不留下无回答的孤儿提问。
         """
         started_at = asyncio.get_event_loop().time()
-        # 阶段十二：Query → Analyzer → Router → Strategy（两者均带兜底）
-        query_analysis, router_decision = self.plan_retrieval(question)
+        # 阶段十二+十六：Analyzer → 资源名称消歧 → Router → Strategy（全链路带兜底）
+        query_analysis, router_decision = await self.plan_retrieval_with_entities(question)
         strategy, resource_types = self._strategy_of(router_decision)
         conversation = await self._ensure_conversation(user, kb_ids, question, conversation_id)
         yield {
@@ -1249,7 +1445,8 @@ class RagService:
         cached = await self.cache.get_history(conversation_id)
         if cached:
             return cached, True
-        limit = max(settings.HISTORY_WINDOW, 0) * 2
+        # 历史轮数取自运行时配置（后台「系统配置」改完立即生效）
+        limit = max(int(get_system_value("history_window")), 0) * 2
         if limit == 0:
             return [], False
         stmt = (

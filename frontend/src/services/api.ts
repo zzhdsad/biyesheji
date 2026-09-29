@@ -36,6 +36,7 @@ import type {
   SourceEra,
   SourceType,
   SystemConfig,
+  SystemConfigValues,
   Tag,
   TaxonomyResourceType,
   Theory,
@@ -369,18 +370,23 @@ export async function fetchAdminStats(): Promise<AdminStats> {
 // ─────────────────────────── 模型配置 ───────────────────────────
 
 export interface ModelConfig {
-  llm_provider: 'mock' | 'deepseek' | 'openai' | 'qwen' | 'ollama' | 'custom';
+  llm_provider: 'deepseek' | 'openai' | 'qwen' | 'ollama' | 'custom';
   llm_base_url: string;
   llm_model: string;
   llm_api_key: string; // 脱敏值：sk-****xxxx
-  embedding_backend: 'mock' | 'flagembedding';
+  /** 后端是否已保存过 API Key（用于前端显示"已配置 / 未配置"）。 */
+  llm_api_key_configured?: boolean;
+  /** 与 llm_api_key 相同的脱敏展示值（后端新增，避免前端自行解析）。 */
+  llm_api_key_masked?: string;
+  // Embedding / Rerank / HyDE 均为真实实现（模型随镜像内置），无 mock 选项
+  embedding_backend: 'flagembedding';
   embedding_model: string;
   embedding_device: 'cpu' | 'cuda';
-  rerank_backend: 'mock' | 'flagreranker';
+  rerank_backend: 'flagreranker';
   rerank_model: string;
   rerank_device: 'cpu' | 'cuda';
   hyde_enabled: boolean;
-  hyde_backend: 'mock' | 'openai';
+  hyde_backend: 'openai';
   hyde_model: string;
   hyde_base_url: string;
 }
@@ -408,6 +414,342 @@ export async function testModelConnection(
   payload: Partial<ModelConfig>,
 ): Promise<TestConnectionResult> {
   const { data } = await api.post<TestConnectionResult>('/settings/model/test', payload);
+  return data;
+}
+
+// ── Embedding 状态 / 批量重新向量化 ──────────────────────────────────────────
+
+/**
+ * Embedding 运行状态：ready（可用）/ revectorizing（正在重建存量向量）。
+ * 模型权重与依赖随镜像内置，不存在"待安装 / 初始化"状态。
+ */
+export type EmbeddingDependencyState = 'ready' | 'revectorizing';
+
+export interface RevectorizeJobStatus {
+  job_id: string;
+  status: 'pending' | 'running' | 'succeeded' | 'partial' | 'cancelled' | 'failed';
+  job_type?: 'document' | 'resource';
+  batch_size?: number;
+  total_batches?: number;
+  current_batch?: number;
+  target_model: string;
+  previous_model: string | null;
+  kb_id: string | null;
+  total: number;
+  processed: number;
+  succeeded: number;
+  failed: number;
+  failed_doc_ids: string[];
+  processing: number;
+  percent: number;
+  error_message: string;
+  created_at: string | null;
+  finished_at: string | null;
+}
+
+export interface EmbeddingStatus {
+  config: {
+    backend: string | null;
+    model: string | null;
+    device: string | null;
+    model_key: string;
+  };
+  vectors: {
+    current_model_key: string;
+    stale_documents: number;
+    stale_models: string[];
+  };
+  job: RevectorizeJobStatus | null;
+  overall_status: EmbeddingDependencyState;
+}
+
+/** Embedding 运行状态总览（依赖 / 存量向量 / 待重建数量 / 任务进度）。 */
+export async function fetchEmbeddingStatus(): Promise<EmbeddingStatus> {
+  const { data } = await api.get<EmbeddingStatus>('/settings/model/embedding/status');
+  return data;
+}
+
+/** 发起批量重新向量化（仅 admin）；kb_id 为空表示全库。 */
+export async function startRevectorize(kbId?: string): Promise<RevectorizeJobStatus> {
+  const { data } = await api.post<RevectorizeJobStatus>('/settings/model/revectorize', {
+    kb_id: kbId ?? null,
+  });
+  return data;
+}
+
+/** 查询最近一次批量重新向量化任务进度。 */
+export async function fetchRevectorizeStatus(): Promise<RevectorizeJobStatus | null> {
+  const { data } = await api.get<RevectorizeJobStatus | null>('/settings/model/revectorize/status');
+  return data;
+}
+
+/** 重试指定任务的失败项（仅 admin）。 */
+export async function retryRevectorize(jobId: string): Promise<RevectorizeJobStatus> {
+  const { data } = await api.post<RevectorizeJobStatus>('/settings/model/revectorize/retry', {
+    job_id: jobId,
+  });
+  return data;
+}
+
+/**
+ * 取消进行中的批量重新向量化（仅 admin）。
+ * 协作式：已完成的文档保留新向量，剩余文档保持旧向量，不回滚已完成部分。
+ */
+export async function cancelRevectorize(jobId: string): Promise<RevectorizeJobStatus> {
+  const { data } = await api.post<RevectorizeJobStatus>('/settings/model/revectorize/cancel', {
+    job_id: jobId,
+  });
+  return data;
+}
+
+// ───────────────── 真实中医知识数据导入中心（仅 admin）─────────────────────
+
+/** 数据集字段画像。 */
+export interface ImportFieldProfile {
+  name: string;
+  dtype: string;
+  sample: string;
+  non_empty_ratio: number;
+}
+
+/**
+ * 字段映射结论。
+ * status: mapped（可导入）/ pending（待人工确认，默认不写入）/ ignored（结构性字段）
+ */
+export interface ImportFieldMapping {
+  source: string;
+  target: string | null;
+  status: 'mapped' | 'pending' | 'ignored';
+  note: string;
+}
+
+/** 数据集扫描画像（只读分析，不含任何导入副作用）。 */
+export interface ImportDataset {
+  dataset_id: string;
+  name: string;
+  relative_path: string;
+  format: string;
+  size_bytes: number;
+  record_count: number | null;
+  record_count_method: 'exact' | 'estimated' | 'file_count' | 'unknown';
+  fields: ImportFieldProfile[];
+  samples: Record<string, unknown>[];
+  detected_type: string;
+  detected_reason: string;
+  candidate_types: string[];
+  field_mappings: ImportFieldMapping[];
+  pending_fields: string[];
+  warnings: string[];
+  entries: { name: string; size_kb: number }[];
+}
+
+export interface ImportScanResult {
+  source_dir: string;
+  configured: boolean;
+  datasets: ImportDataset[];
+  skipped: string[];
+  message: string;
+}
+
+export interface ImportConfig {
+  source_dir: string;
+  configured: boolean;
+  max_records_per_job: number;
+}
+
+/** 导入任务状态（pending → processing → completed / failed / cancelled）。 */
+export interface ImportJobStatus {
+  job_id: string;
+  batch_id: string;
+  dataset_id: string;
+  dataset_name: string;
+  source_file: string;
+  target_type: string;
+  kb_id: string | null;
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
+  total: number;
+  processed: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  percent: number;
+  failed_items: {
+    index?: number;
+    name?: string;
+    reason?: string;
+    resource_id?: string;
+    pending?: boolean;
+  }[];
+  error_message: string;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string | null;
+  // 批量向量化任务扩展字段（资源批量挂载 / 文档批量重建）
+  job_type?: 'document' | 'resource';
+  resource_type?: string;
+  batch_size?: number;
+  total_batches?: number;
+  current_batch?: number;
+  processing?: number;
+}
+
+/** 资源批量挂载统计：各类型总数 / 已挂载 / 未挂载。 */
+export interface ResourceVectorizeStats {
+  kb_id: string | null;
+  items: { resource_type: string; label: string; total: number; mounted: number; unmounted: number }[];
+}
+
+export interface ResourceVectorizePayload {
+  resource_type: 'herb' | 'prescription' | 'theory' | 'literature';
+  kb_id: string;
+  limit?: number | null;
+}
+
+/** 各资源类型的挂载/向量化现状。 */
+export async function fetchResourceVectorizeStats(
+  kbId?: string,
+): Promise<ResourceVectorizeStats> {
+  const { data } = await api.get<ResourceVectorizeStats>('/admin/import/resource-vectorize/stats', {
+    params: kbId ? { kb_id: kbId } : undefined,
+  });
+  return data;
+}
+
+/** 创建资源批量挂载+向量化任务（后台执行）。 */
+export async function createResourceVectorizeJob(
+  payload: ResourceVectorizePayload,
+): Promise<ImportJobStatus> {
+  const { data } = await api.post<ImportJobStatus>('/admin/import/resource-vectorize', payload);
+  return data;
+}
+
+/** 最近一次资源批量挂载任务（轮询进度）。 */
+export async function fetchLatestResourceVectorizeJob(
+  resourceType?: string,
+): Promise<ImportJobStatus | null> {
+  const { data } = await api.get<{ job: ImportJobStatus | null }>(
+    '/admin/import/resource-vectorize/latest',
+    { params: resourceType ? { resource_type: resourceType } : undefined },
+  );
+  return data.job;
+}
+
+/** 断点续跑 / 只重试失败项（跳过已成功条目）。 */
+export async function resumeResourceVectorizeJob(jobId: string): Promise<ImportJobStatus> {
+  const { data } = await api.post<ImportJobStatus>(
+    `/admin/import/resource-vectorize/${jobId}/resume`,
+  );
+  return data;
+}
+
+export interface ImportJobPayload {
+  dataset_id: string;
+  target_type: 'herb' | 'prescription' | 'theory' | 'literature' | 'document';
+  kb_id?: string | null;
+  limit?: number | null;
+  vectorize?: boolean;
+  confirmed: boolean;
+}
+
+/** 导入中心数据源配置（是否配置了 IMPORT_SOURCE_DIR）。 */
+export async function fetchImportConfig(): Promise<ImportConfig> {
+  const { data } = await api.get<ImportConfig>('/admin/import/config');
+  return data;
+}
+
+/** 扫描数据源目录（只读，不导入）。 */
+export async function scanImportDatasets(sampleRows = 5): Promise<ImportScanResult> {
+  const { data } = await api.post<ImportScanResult>('/admin/import/scan', null, {
+    params: { sample_rows: sampleRows },
+  });
+  return data;
+}
+
+/** 单数据集映射预览（真实样例 + 映射结论）。 */
+export async function previewImportDataset(
+  datasetId: string,
+  sampleRows = 10,
+): Promise<{ dataset: ImportDataset; source_dir: string; hint: string }> {
+  const { data } = await api.get<{ dataset: ImportDataset; source_dir: string; hint: string }>(
+    `/admin/import/datasets/${datasetId}/preview`,
+    { params: { sample_rows: sampleRows } },
+  );
+  return data;
+}
+
+/** 创建并启动导入任务（confirmed 必须为 true）。 */
+export async function createImportJob(payload: ImportJobPayload): Promise<ImportJobStatus> {
+  const { data } = await api.post<ImportJobStatus>('/admin/import/jobs', payload);
+  return data;
+}
+
+/** 最近一次导入任务（轮询进度）。 */
+export async function fetchLatestImportJob(): Promise<ImportJobStatus | null> {
+  const { data } = await api.get<{ job: ImportJobStatus | null }>('/admin/import/jobs/latest');
+  return data.job;
+}
+
+/** 导入任务列表。 */
+export async function fetchImportJobs(limit = 20): Promise<ImportJobStatus[]> {
+  const { data } = await api.get<{ items: ImportJobStatus[] }>('/admin/import/jobs', {
+    params: { limit },
+  });
+  return data.items;
+}
+
+/** 取消进行中的导入任务。 */
+export async function cancelImportJob(jobId: string): Promise<ImportJobStatus> {
+  const { data } = await api.post<ImportJobStatus>(`/admin/import/jobs/${jobId}/cancel`);
+  return data;
+}
+
+/** 清理统计：知识库 / 资源 / documents / chunks / Milvus 向量。 */
+export interface CleanupStats {
+  knowledge_bases: { total: number; with_imported_data: number; test_only: number };
+  resources: Record<string, { total: number; imported: number; test: number }>;
+  documents: { total: number; imported: number; test: number };
+  chunks: { total: number; imported: number; test: number };
+  milvus_vectors: { total: number | null; note: string };
+  rule: string;
+}
+
+export interface CleanupPlan {
+  dry_run: boolean;
+  scope: string;
+  documents: number;
+  chunks: number;
+  resources: Record<string, number>;
+  knowledge_bases: number;
+  protected: string[];
+}
+
+export interface CleanupResult {
+  deleted: Record<string, number>;
+  errors: string[];
+  error_count: number;
+}
+
+export interface CleanupPayload {
+  batch_ids?: string[] | null;
+  include_test_data?: boolean;
+  include_knowledge_bases?: boolean;
+  confirm?: boolean;
+}
+
+export async function fetchCleanupStats(): Promise<CleanupStats> {
+  const { data } = await api.get<CleanupStats>('/admin/import/cleanup/stats');
+  return data;
+}
+
+/** 清理计划（只读，不删数据）。 */
+export async function planCleanup(payload: CleanupPayload): Promise<CleanupPlan> {
+  const { data } = await api.post<CleanupPlan>('/admin/import/cleanup/plan', payload);
+  return data;
+}
+
+/** 执行清理（必须 confirm: true）。 */
+export async function executeCleanup(payload: CleanupPayload): Promise<CleanupResult> {
+  const { data } = await api.post<CleanupResult>('/admin/import/cleanup/execute', payload);
   return data;
 }
 
@@ -742,9 +1084,15 @@ export async function fetchSystemConfig(): Promise<SystemConfig> {
 
 /** 更新系统级配置。 */
 export async function updateSystemConfig(
-  payload: Partial<SystemConfig>,
+  payload: Partial<SystemConfigValues>,
 ): Promise<SystemConfig> {
   const { data } = await api.put<SystemConfig>('/settings/system', payload);
+  return data;
+}
+
+/** 恢复系统级配置为后端默认值。 */
+export async function resetSystemConfig(): Promise<SystemConfig> {
+  const { data } = await api.post<SystemConfig>('/settings/system/reset');
   return data;
 }
 
@@ -1064,4 +1412,225 @@ export async function updateLiterature(
 /** 删除文献（DELETE /literatures/{id}，literature_tags 由 DB CASCADE 清理，仅 admin）。 */
 export async function deleteLiterature(literatureId: string): Promise<void> {
   await api.delete(`/literatures/${literatureId}`);
+}
+
+// ───────────── 管理中心统一回收站（中药/方剂/理论/文献/分类/标签）─────────────
+
+/** 支持回收站生命周期的资源类型。 */
+export type TrashResourceType =
+  | 'herb'
+  | 'prescription'
+  | 'theory'
+  | 'literature'
+  | 'category'
+  | 'tag';
+
+/** 资源类型 → 后端基础路径（分类/标签路由无统一前缀，故单独映射）。 */
+const TRASH_BASE_PATH: Record<TrashResourceType, string> = {
+  herb: '/herbs',
+  prescription: '/prescriptions',
+  theory: '/theories',
+  literature: '/literatures',
+  category: '/categories',
+  tag: '/tags',
+};
+
+/** 批量操作返回结构（成功数 + 失败明细）。 */
+export interface BatchOpResult {
+  total?: number;
+  success?: number;
+  purged?: number;
+  message?: string;
+  failed?: { id: string; reason: string }[];
+}
+
+/** 回收站列表返回结构。 */
+export interface TrashListResult<T> {
+  items: T[];
+  total: number;
+  limit: number | null;
+  offset: number;
+}
+
+function trashPath(rtype: TrashResourceType, suffix = ''): string {
+  return `${TRASH_BASE_PATH[rtype]}${suffix}`;
+}
+
+/** 批量删除 → 移入回收站（软删除）。 */
+export async function batchDeleteResources(
+  rtype: TrashResourceType,
+  ids: string[],
+): Promise<BatchOpResult> {
+  const { data } = await api.post<BatchOpResult>(trashPath(rtype, '/batch-delete'), { ids });
+  return data;
+}
+
+/** 回收站列表（后端进入时会自动清理超过保留期的条目）。 */
+export async function fetchResourceTrash<T>(
+  rtype: TrashResourceType,
+  params?: { limit?: number; offset?: number },
+): Promise<TrashListResult<T>> {
+  const { data } = await api.get<TrashListResult<T>>(
+    trashPath(rtype, '/trash/list'),
+    { params },
+  );
+  return data;
+}
+
+/** 批量恢复。 */
+export async function batchRestoreResources(
+  rtype: TrashResourceType,
+  ids: string[],
+): Promise<BatchOpResult> {
+  const { data } = await api.post<BatchOpResult>(trashPath(rtype, '/batch-restore'), { ids });
+  return data;
+}
+
+/** 单条恢复。 */
+export async function restoreResource(
+  rtype: TrashResourceType,
+  id: string,
+): Promise<{ id: string; restored: boolean }> {
+  const { data } = await api.post<{ id: string; restored: boolean }>(
+    trashPath(rtype, `/${id}/restore`),
+  );
+  return data;
+}
+
+/** 单条彻底删除（不可恢复）。 */
+export async function purgeResource(
+  rtype: TrashResourceType,
+  id: string,
+): Promise<{ id: string; purged: boolean }> {
+  const { data } = await api.delete<{ id: string; purged: boolean }>(
+    trashPath(rtype, `/${id}/purge`),
+  );
+  return data;
+}
+
+/** 批量彻底删除；单条失败只记录原因并继续其余记录。 */
+export async function batchPurgeResources(
+  rtype: TrashResourceType,
+  ids: string[],
+): Promise<BatchOpResult> {
+  const { data } = await api.post<BatchOpResult>(trashPath(rtype, '/batch-purge'), { ids });
+  return data;
+}
+
+/** 一键清空回收站（彻底删除回收站中的全部条目）。 */
+export async function purgeAllResourceTrash(
+  rtype: TrashResourceType,
+): Promise<BatchOpResult> {
+  const { data } = await api.delete<BatchOpResult>(trashPath(rtype, '/trash/purge-all'));
+  return data;
+}
+
+/** 用户回收站一键清空（仅 admin）。 */
+export async function purgeAllUserTrash(): Promise<BatchOpResult> {
+  const { data } = await api.delete<BatchOpResult>('/users/trash/purge-all');
+  return data;
+}
+
+// ─────────────────────────── 知识库批量操作 ───────────────────────────
+
+/** 知识库批量删除 → 回收站。 */
+export async function batchDeleteKbs(kbIds: string[]): Promise<BatchOpResult> {
+  const { data } = await api.post<BatchOpResult>('/kb/batch-delete', { ids: kbIds });
+  return data;
+}
+
+/** 知识库批量恢复（仅 admin）。 */
+export async function batchRestoreKbs(kbIds: string[]): Promise<BatchOpResult> {
+  const { data } = await api.post<BatchOpResult>('/kb/batch-restore', { ids: kbIds });
+  return data;
+}
+
+/** 一键清空知识库回收站（仅 admin）。 */
+export async function purgeAllKbTrash(): Promise<BatchOpResult> {
+  const { data } = await api.delete<BatchOpResult>('/kb/trash/purge-all');
+  return data;
+}
+
+// ──────────────────── 数据导入中心：上传文件导入 ────────────────────
+
+/** 自动识别出的目标资源类型（unknown 表示无法可靠判断，需用户选择）。 */
+export type ImportTargetType = 'herb' | 'prescription' | 'theory' | 'literature' | 'unknown';
+
+export interface ImportUploadPreview {
+  dataset_id: string;
+  file_name: string;
+  file_type: string;
+  total_rows: number;
+  headers: string[];
+  detected_type: ImportTargetType;
+  detected_scores: Record<string, number>;
+  target_type: ImportTargetType;
+  field_mapping: Record<string, string | null>;
+  need_user_type: boolean;
+  sample_rows: Record<string, string>[];
+  estimate: { insert: number; update: number; skip: number; invalid: number };
+}
+
+export interface ImportCommitResult {
+  job_id: string;
+  batch_id: string;
+  dataset_id: string;
+  target_type: string;
+  status: string;
+  total: number;
+  inserted: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  failed_items: { row?: string; name?: string; reason: string }[];
+  vectorize?: boolean;
+  vectorize_result?: { requested: number; vectorized: number; errors: string[] };
+}
+
+/** 上传数据文件并自动分析（只预览，不写业务数据）。 */
+export async function uploadImportFile(file: File): Promise<ImportUploadPreview> {
+  const form = new FormData();
+  form.append('file', file);
+  const { data } = await api.post<ImportUploadPreview>('/admin/import/upload', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,
+  });
+  return data;
+}
+
+/** 按指定类型重新生成预览与字段映射。 */
+export async function previewImportUpload(
+  datasetId: string,
+  targetType?: ImportTargetType,
+): Promise<ImportUploadPreview> {
+  const { data } = await api.post<ImportUploadPreview>('/admin/import/upload/preview', {
+    dataset_id: datasetId,
+    target_type: targetType ?? null,
+  });
+  return data;
+}
+
+/** 确认后真正导入（必须先预览确认）。 */
+export async function commitImportUpload(payload: {
+  dataset_id: string;
+  target_type: ImportTargetType;
+  field_mapping?: Record<string, string>;
+  kb_id?: string | null;
+  vectorize?: boolean;
+  confirmed: boolean;
+}): Promise<ImportCommitResult> {
+  const { data } = await api.post<ImportCommitResult>('/admin/import/upload/commit', payload, {
+    timeout: 300000,
+  });
+  return data;
+}
+
+/** 查询某次上传的导入任务状态。 */
+export async function fetchUploadImportJob(
+  datasetId: string,
+): Promise<ImportJobStatus | null> {
+  const { data } = await api.get<{ job: ImportJobStatus | null }>(
+    `/admin/import/upload/jobs/${datasetId}`,
+  );
+  return data.job;
 }

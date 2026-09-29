@@ -21,6 +21,17 @@ class VectorStoreError(Exception):
     """向量库层异常。"""
 
 
+# 批量删除 / 批量查询时的 id 分片大小：单次表达式过长会被 Milvus 拒绝
+_BULK_ID_CHUNK = 200
+# 批量查询时单次最多返回的实体数（Milvus query limit 上限 16384）
+_BULK_QUERY_LIMIT = 4096
+
+
+def _chunked(items: list[str], size: int) -> list[list[str]]:
+    """把 id 列表切成固定大小的分片（控制 Milvus 表达式长度）。"""
+    return [items[i : i + size] for i in range(0, len(items), size)] or []
+
+
 @dataclass
 class VectorRow:
     """Milvus 插入行（与 chunks 表字段对齐 + 双路向量）。
@@ -48,6 +59,10 @@ class VectorRow:
     resource_id: str | None = None
     resource_name: str | None = None
     era: str | None = None
+    # 生成该向量的 embedding 模型标识（`backend:model`，如 `flagembedding:BAAI/bge-m3`）。
+    # 随向量一起写入 Milvus 动态字段，使得"存量向量由哪个模型生成"可追溯，
+    # 切换模型后可用于识别旧模型向量，避免新旧向量混检。
+    embedding_model: str | None = None
 
 
 class BaseVectorStore(ABC):
@@ -119,6 +134,100 @@ class BaseVectorStore(ABC):
             if inserted != len(rows):
                 raise VectorStoreError(
                     f"向量入库不完整：期望 {len(rows)} 条，实际 {inserted} 条"
+                )
+        return inserted
+
+    # ── 批量写入（供批量向量化任务使用，不改变单篇写入语义）────────────────
+    # 单篇路径 replace_doc 每调用一次就 flush 一次 Milvus；批量任务里
+    # "每批 flush 一次" 即可，避免 N 篇文档触发 N 次落盘。
+
+    def insert_batch(self, rows: list[VectorRow], *, flush: bool = True) -> int:
+        """批量写入向量；``flush=False`` 时由调用方在整批结束后统一落盘。
+
+        默认实现转调 ``insert``（立即落盘，行为不变）；子类可重写为
+        "可延迟落盘的批量写入"，未重写的实现仍完全可用。
+        """
+        return self.insert(rows)
+
+    def flush(self) -> None:
+        """把已写入/删除的数据落盘（默认 no-op：内存实现无需落盘）。
+
+        为什么需要：Milvus 的 **删除在 flush 之前对查询不可见**，
+        若"写入 → 删除过期分片 → 立即校验条数"就会读到旧行、误判为重复。
+        """
+        return None
+
+    def ids_by_docs(self, doc_ids: list[str]) -> dict[str, list[str]]:
+        """批量列出多个文档现有向量的 id（默认逐个查询，子类可重写为单次查询）。"""
+        return {d: self.ids_by_doc(d) for d in doc_ids}
+
+    def count_by_docs(self, doc_ids: list[str]) -> dict[str, int]:
+        """批量统计多个文档的向量条数（默认逐个统计，子类可重写）。"""
+        return {d: self.count_by_doc(d) for d in doc_ids}
+
+    def vectorized_doc_ids(
+        self, doc_ids: list[str], embedding_model: str | None = None
+    ) -> set[str]:
+        """返回这些 doc_id 中"已存在有效向量"的子集（幂等判断用）。
+
+        ``embedding_model`` 非 None 时只统计该模型生成的向量，用于判断
+        "是否已是当前模型向量"（避免重复向量化，也便于旧模型向量重建）。
+        默认实现按条数判断，子类可重写为单次批量查询。
+        """
+        result: set[str] = set()
+        for doc_id in doc_ids:
+            try:
+                if self.count_by_doc(doc_id) > 0:
+                    result.add(doc_id)
+            except Exception:  # noqa: BLE001 - 幂等判断失败不得阻断任务
+                continue
+        return result
+
+    def replace_docs_bulk(self, rows: list[VectorRow], *, flush: bool = True) -> int:
+        """批量整体替换**多个文档**的向量（新写 → 删旧 → 校验）。
+
+        与 ``replace_doc`` 同语义（BUG-046：先写新再清旧，任何时刻都不会出现
+        "该文档向量全灭"的空窗），只是把 N 个文档合并成：
+
+        - 1 次（分批的）insert，而不是 N 次；
+        - 1 次 flush（``flush=True`` 时），而不是 N 次；
+        - 批量查询旧 id / 批量删除过期 id，而不是逐篇往返。
+
+        失败时抛 VectorStoreError，由调用方降级为逐篇处理以精确定位失败项。
+        """
+        if not rows:
+            return 0
+        self.ensure_collection()
+        by_doc: dict[str, list[VectorRow]] = {}
+        for r in rows:
+            by_doc.setdefault(r.doc_id, []).append(r)
+        keep = {r.id for r in rows}
+        old_ids = self.ids_by_docs(list(by_doc))
+        stale = [i for ids in old_ids.values() for i in ids if i not in keep]
+
+        # 写入不落盘 → 删除过期分片 → 统一 flush → 校验：
+        # 顺序很重要，删除在 flush 前对查询不可见，先校验会误判"重复"。
+        inserted = self.insert_batch(rows, flush=False)
+        if inserted != len(rows):
+            raise VectorStoreError(
+                f"向量入库不完整：期望 {len(rows)} 条，实际 {inserted} 条"
+            )
+        for i in range(0, len(stale), _BULK_ID_CHUNK):
+            self.delete_by_ids(stale[i : i + _BULK_ID_CHUNK])
+        if flush:
+            self.flush()
+
+        expected = {d: len(rs) for d, rs in by_doc.items()}
+        actual = self.count_by_docs(list(expected))
+        broken = [d for d, n in expected.items() if actual.get(d, 0) != n]
+        for doc_id in broken:
+            # 极端情况：底层把同主键行当成新行插入（重复）→ 该篇重建
+            logger.warning(f"批量替换后条数不一致 doc_id={doc_id}，回退为该篇清旧写新")
+            self.delete_by_doc(doc_id)
+            written = self.insert_batch(by_doc[doc_id], flush=flush)
+            if written != len(by_doc[doc_id]):
+                raise VectorStoreError(
+                    f"向量入库不完整：期望 {len(by_doc[doc_id])} 条，实际 {written} 条"
                 )
         return inserted
 
@@ -251,6 +360,10 @@ class MilvusStore(BaseVectorStore):
             raise VectorStoreError(f"创建 Milvus 集合失败：{exc}") from exc
 
     def insert(self, rows: list[VectorRow]) -> int:
+        """插入向量并立即落盘（单篇写入路径，行为与历史一致）。"""
+        return self.insert_batch(rows, flush=True)
+
+    def insert_batch(self, rows: list[VectorRow], *, flush: bool = True) -> int:  # noqa: D102
         if not rows:
             return 0
         client = self._get_client()
@@ -279,6 +392,8 @@ class MilvusStore(BaseVectorStore):
                 item["resource_id"] = r.resource_id or ""
                 item["resource_name"] = r.resource_name or ""
                 item["era"] = r.era or ""
+                # 向量来源模型（空串表示未标注/legacy，与 source_type 约定一致）
+                item["embedding_model"] = r.embedding_model or ""
             data.append(item)
         try:
             # 分批插入，避免超大 payload
@@ -287,11 +402,22 @@ class MilvusStore(BaseVectorStore):
             for i in range(0, len(data), batch):
                 res = client.insert(collection_name=self.COLLECTION, data=data[i : i + batch])
                 total += res.get("insert_count", 0)
-            # 立即落盘，保证后续查询可见（growing segment 有可见性延迟）
-            client.flush(self.COLLECTION)
+            # 批量任务可延迟落盘：整批结束后由调用方统一 flush（少 N-1 次落盘）
+            if flush:
+                # 立即落盘，保证后续查询可见（growing segment 有可见性延迟）
+                client.flush(self.COLLECTION)
             return total
         except Exception as exc:
             raise VectorStoreError(f"Milvus 插入失败：{exc}") from exc
+
+    def flush(self) -> None:  # noqa: D102
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION):
+            return
+        try:
+            client.flush(self.COLLECTION)
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus flush 失败：{exc}") from exc
 
     def query_rows(self, doc_id: str) -> list[dict]:
         """查询指定文档的全部向量行（标准化为 dict，供校验与调试）。"""
@@ -403,6 +529,56 @@ class MilvusStore(BaseVectorStore):
             client.delete(collection_name=self.COLLECTION, filter=f'kb_id == "{kb_id}"')
         except Exception as exc:
             raise VectorStoreError(f"Milvus 删除失败 kb_id={kb_id}：{exc}") from exc
+
+    # ── 批量查询（批量向量化任务用）：单次 RPC 取代逐篇往返 ────────────────
+
+    def ids_by_docs(self, doc_ids: list[str]) -> dict[str, list[str]]:  # noqa: D102
+        result: dict[str, list[str]] = {d: [] for d in doc_ids}
+        for chunk in _chunked(doc_ids, _BULK_ID_CHUNK):
+            for row in self._query_doc_chunk(chunk, ["id", "doc_id"]):
+                doc_id = str(row.get("doc_id"))
+                if doc_id in result and row.get("id") is not None:
+                    result[doc_id].append(str(row["id"]))
+        return result
+
+    def vectorized_doc_ids(  # noqa: D102
+        self, doc_ids: list[str], embedding_model: str | None = None
+    ) -> set[str]:
+        if embedding_model and not self._supports_dynamic_fields():
+            # 老集合未开启动态字段：embedding_model 不会随向量落盘，按模型过滤
+            # 必然为空。此处退化为"有向量即视为已向量化"，
+            # 否则批量任务每轮都会把已完成的条目重做一遍（幂等性被破坏）。
+            embedding_model = None
+        result: set[str] = set()
+        for chunk in _chunked(doc_ids, _BULK_ID_CHUNK):
+            expr = "doc_id in [" + ", ".join(f'"{d}"' for d in chunk) + "]"
+            if embedding_model:
+                expr += f' and embedding_model == "{embedding_model}"'
+            for row in self._query_by_expr(expr, ["doc_id"]):
+                if row.get("doc_id") is not None:
+                    result.add(str(row["doc_id"]))
+        return result
+
+    def _query_doc_chunk(self, doc_ids: list[str], output_fields: list[str]) -> list[dict]:
+        """按 doc_id 分片做一次 query（集合不存在返回空）。"""
+        expr = "doc_id in [" + ", ".join(f'"{d}"' for d in doc_ids) + "]"
+        return self._query_by_expr(expr, output_fields)
+
+    def _query_by_expr(self, expr: str, output_fields: list[str]) -> list[dict]:
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION):
+            return []
+        try:
+            return client.query(
+                collection_name=self.COLLECTION,
+                filter=expr,
+                output_fields=output_fields,
+                limit=_BULK_QUERY_LIMIT,
+            )
+        except Exception as exc:
+            # 幂等/校验类查询失败不得成为任务单点故障：交由调用方按"未向量化"处理
+            logger.warning(f"Milvus 批量查询失败（按空结果降级）：{exc}")
+            return []
 
     def _build_filter(
         self,

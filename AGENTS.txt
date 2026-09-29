@@ -1,0 +1,12 @@
+测试环境统一采用前端、后端本地服务启动，不使用 Docker。
+
+后端：进入 backend，启动 FastAPI 服务。
+前端：进入 frontend，启动 Next.js 开发服务。
+
+不要执行 Docker build、docker compose build 或 docker compose up --build。
+除非我明确要求，否则不要自动启动 Docker、跑全量测试或执行 build。
+
+启动成功后只汇报：
+- 后端地址
+- 前端地址
+- 是否启动成功

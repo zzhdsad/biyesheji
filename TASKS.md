@@ -37,6 +37,9 @@
 - 点赞/点踩
 - 基础 Evaluation
 - Docker 部署
+- 知识数据导入中心（扫描 / 字段映射 / 预览 / 导入任务）
+- 真实数据批次标识（dataset_name + import_batch_id + source_file）
+- 测试数据清理（按批次区分真实数据与手工测试数据）
 
 现有 RAG Baseline 已经完成。
 
@@ -771,3 +774,55 @@ TASK-001：Alembic 数据库迁移体系（2026-09-19 完成）
 然后按照本文件顺序继续。
 
 每完成一个任务，再更新本文件中的任务状态。
+
+---
+
+TASK-014：真实中医知识数据导入中心 + 真实数据接入（2026-09-27 完成）
+
+目标：把 C:\毕设数据源 中已下载的真实中医数据接入现有系统，并逐步替换测试数据。
+
+交付内容：
+
+- 数据源扫描（backend/src/application/dataset_scanner.py）
+  - 支持 ZIP / TSV / CSV / JSON / JSONL / Parquet / TXT / MD
+  - 压缩包只分析目录结构，不解压；超大语料只抽样并按字节估算记录数
+  - GBK/UTF-8 自动判定（比较两种解码的中文字符数，避免"GBK 被 UTF-8 成功解出"的乱码）
+  - 实测识别 9 个数据集：TCM-MKG 六个 TSV、中医经典 parquet（115）、
+    古籍文本集（701）、预训练语料 JSON（约 104.8 万条）
+
+- 字段映射（按字段语义 + 真实取值判定，不靠字段名猜）
+  - D1_TCM_terminology → theory；D2_Chinese_patent_medicine → prescription；
+    D6_Chinese_herbal_pieces → herb
+  - D3/D4/D7 判为 relation（关联/属性表，不直接导入）
+  - classical-tcm-canon.parquet → literature（text 另可导 document）
+  - TCM_pretrain_book_corpus.json → document（无书目著录，不构成 literature）
+  - 无法可靠判断的字段一律 pending（待确认），导入时不写入，不伪造
+
+- 导入任务（backend/src/application/import_service.py + routes/import_center.py）
+  - 状态机 pending → processing → completed / failed（可 cancelled）
+  - 复用既有链路：DocumentService.upload → ParseService.run → IndexingService.run
+    （BGE-M3 → Milvus，vector_model 自动写入），不重写向量化
+  - 清洗：去空值、批次内 + 库内同名去重、保留溯源、缺失留空
+  - 前端：/admin/import（扫描、数据集列表、映射预览、真实样例、确认后导入、
+    实时进度、失败明细、取消）
+
+- 批次标识（迁移 2f7c1d9a3b48）
+  - 新增 import_jobs 表
+  - documents / herbs / prescriptions / theories / literatures 增加
+    source_dataset + import_batch_id（可空，历史行保持 NULL）
+
+- 测试数据清理（backend/src/application/cleanup_service.py）
+  - 统计：知识库 / 中药 / 方剂 / 理论 / 文献 / documents / chunks / Milvus 向量
+  - 区分规则：import_batch_id 非空 = 真实导入；为空 = 手工/历史测试数据
+  - 默认 dry run，真实删除需二次确认；不触碰 users/权限/系统配置/审计/分类标签
+  - 生命周期：Milvus 向量 → chunks → 存储文件 → documents → 资源向量 →
+    KB 挂载 → KG 节点 → 资源行 → 仅含测试数据的知识库
+
+配置：IMPORT_SOURCE_DIR（数据源根目录，禁止写死路径）、
+IMPORT_MAX_RECORDS_PER_JOB（单次导入安全阀）。
+
+已知限制（记录备查）：
+- 预训练语料 104 万条与 13 万切片的全量向量化在 CPU BGE-M3 上耗时以天计，
+  任务可在后台继续（进度落库，可取消/续跑），建议 GPU 环境或分批执行
+- D3/D4 关联表（中成药—术语、方剂—饮片组成）尚未接入，需先确认映射规则
+- D1 的释义为英文原文、D2 缺功效/主治/组成，均按原样保留或留空，未翻译未伪造

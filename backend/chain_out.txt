@@ -1,0 +1,56 @@
+==============================================================================
+【1】名称消歧原始事实（resolve_resource_name）
+  沉香曲的功效与主治？               -> matched=True type=prescription name=沉香曲 text=沉香曲 kind=contains alias=False ambiguous=False types=('prescription',) cands=3 reason=None
+  沉香曲由哪些药物组成？              -> matched=True type=prescription name=沉香曲 text=沉香曲 kind=contains alias=False ambiguous=False types=('prescription',) cands=2 reason=None
+  丹参有什么功效？                 -> matched=True type=herb name=丹参 text=丹参 kind=contains alias=False ambiguous=False types=('herb',) cands=2 reason=None
+  广藿香归哪些经？                 -> matched=True type=herb name=藿香 text=广藿香 kind=contains alias=True ambiguous=False types=('herb',) cands=3 reason=None
+  三因学说是什么？                 -> matched=True type=theory name=三因学说 text=三因学说 kind=contains alias=False ambiguous=False types=('theory',) cands=2 reason=None
+  《三因极一病证方论》的作者是谁？         -> matched=True type=literature name=三因极一病证方论 text=三因极一病证方论 kind=contains alias=False ambiguous=False types=('literature',) cands=3 reason=None
+  藤黄素酮XYZ的作用是什么？           -> matched=True type=herb name=藤黄 text=藤黄 kind=contains alias=False ambiguous=False types=('herb',) cands=1 reason=None
+  半夏曲的功效是什么？               -> matched=True type=prescription name=半夏曲 text=半夏曲 kind=contains alias=False ambiguous=True types=('herb', 'prescription') cands=4 reason=ambiguous_multi_type
+  量子计算用 Python 怎么实现？       -> matched=False type=None name=None text=None kind=None alias=False ambiguous=False types=() cands=0 reason=no_name_match
+==============================================================================
+【2】Query → Entity Resolution → Analyzer → Router
+  [方剂实体] 沉香曲的功效与主治？
+      before: type=herb rtypes=['herb'] strategy=herb_focused filter=['herb']
+      after : type=prescription rtypes=['prescription'] strategy=prescription_focused filter=['prescription'] enabled=True
+      entity_match: matched=True type=prescription name=沉香曲 id=0345f9d2-1a29-4099-a263-7113573622ed ambiguous=False applied=True note=entity_type_applied
+  [方剂实体] 沉香曲由哪些药物组成？
+      before: type=multi_source rtypes=['herb', 'prescription'] strategy=multi_source filter=['herb', 'prescription']
+      after : type=prescription rtypes=['prescription'] strategy=prescription_focused filter=['prescription'] enabled=True
+      entity_match: matched=True type=prescription name=沉香曲 id=0345f9d2-1a29-4099-a263-7113573622ed ambiguous=False applied=True note=entity_type_applied
+  [中药实体] 丹参有什么功效？
+      before: type=herb rtypes=['herb'] strategy=herb_focused filter=['herb']
+      after : type=herb rtypes=['herb'] strategy=herb_focused filter=['herb'] enabled=True
+      entity_match: matched=True type=herb name=丹参 id=50301fab-a202-47a4-8d91-b069e81837b5 ambiguous=False applied=True note=entity_type_applied
+  [中药实体] 广藿香归哪些经？
+      before: type=herb rtypes=['herb'] strategy=herb_focused filter=['herb']
+      after : type=herb rtypes=['herb'] strategy=herb_focused filter=['herb'] enabled=True
+      entity_match: matched=True type=herb name=藿香 id=2a600369-83de-4ea2-bb54-5f5668ee95f3 ambiguous=False applied=True note=entity_type_applied
+  [理论实体] 三因学说是什么？
+      before: type=theory rtypes=['theory'] strategy=theory_focused filter=['theory']
+      after : type=theory rtypes=['theory'] strategy=theory_focused filter=['theory'] enabled=True
+      entity_match: matched=True type=theory name=三因学说 id=b1ebcf3f-54e6-45a0-9d9c-1bae4361ba01 ambiguous=False applied=True note=entity_type_applied
+  [文献实体] 《三因极一病证方论》的作者是谁？
+      before: type=multi_source rtypes=['prescription', 'literature'] strategy=multi_source filter=['prescription', 'literature']
+      after : type=literature rtypes=['literature'] strategy=literature_focused filter=['literature'] enabled=True
+      entity_match: matched=True type=literature name=三因极一病证方论 id=efe05553-18ef-4200-a77f-6dcd69391ee3 ambiguous=False applied=True note=entity_type_applied
+  [不存在名] 藤黄素酮XYZ的作用是什么？
+      before: type=herb rtypes=['herb'] strategy=herb_focused filter=['herb']
+      after : type=herb rtypes=['herb'] strategy=herb_focused filter=['herb'] enabled=True
+      entity_match: matched=True type=herb name=藤黄 id=46e6d901-427c-4174-a00a-7f358ce02e0b ambiguous=False applied=True note=entity_type_applied
+  [同名歧义] 半夏曲的功效是什么？
+      before: type=herb rtypes=['herb'] strategy=herb_focused filter=['herb']
+      after : type=herb rtypes=['herb'] strategy=herb_focused filter=['herb'] enabled=True
+      entity_match: matched=True type=prescription name=半夏曲 id=46b64626-1f81-436d-ae58-c42b7a64edae ambiguous=True applied=False note=not_applied_ambiguous
+  [域外问题] 量子计算用 Python 怎么实现？
+      before: type=unanswerable rtypes=[] strategy=baseline_hybrid filter=[]
+      after : type=unanswerable rtypes=[] strategy=baseline_hybrid filter=[] enabled=False
+      entity_match: matched=False type=None name=None id=None ambiguous=False applied=False note=entity_not_matched
+==============================================================================
+【3】消歧异常时的降级（不成为单点故障）
+  消歧抛异常 -> type=herb strategy=herb_focused is_valid=True fallback=None
+==============================================================================
+【4】检索层实测：resource_filter 是否真的生效（沉香曲）
+  before herb_focused filter=['herb']: hits=5 {'document': 4, 'herb': 1} names=['普济本事方.txt', '普济本事方.txt', '乳香', '严氏济生方.txt', '普济本事方.txt']
+  after  prescription_focused filter=['prescription']: hits=2 {'prescription': 1, 'document': 1} names=['沉香曲', '普济本事方.txt']

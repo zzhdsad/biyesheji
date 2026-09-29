@@ -103,6 +103,9 @@ def test_document_purge_deletes_vectors(client, vector_store):
 
     resp = client.delete(f"/api/v1/documents/{doc_id}/purge")
     assert resp.status_code == 200, resp.text
+    # Milvus 的删除在 flush 前对查询不可见（本部署实测：no-flush=3 / flush=0），
+    # 统计前显式 flush，避免把"删除尚未落盘"误判为"清理失败"。
+    vector_store.flush()
     assert vector_store.count_by_doc(doc_id) == 0, "purge 后向量应被清理"
 
 
@@ -136,6 +139,7 @@ def test_kb_purge_deletes_document_vectors(client, vector_store):
     assert client.delete(f"/api/v1/kb/{kb_id}").status_code == 200
     resp = client.delete(f"/api/v1/kb/{kb_id}/purge")
     assert resp.status_code == 200, resp.text
+    vector_store.flush()  # 同上：删除需落盘后才对查询可见
     assert vector_store.count_by_doc(doc_id) == 0, "KB purge 后文档向量应被清理"
 
 
@@ -314,7 +318,9 @@ def test_delete_herb_cleans_kg_nodes(client):
 
     assert asyncio.run(_build_and_check()) == 1, "构建后应存在该资源节点"
 
-    assert client.delete(f"/api/v1/herbs/{herb_id}").status_code == 204
+    # 新生命周期：DELETE = 移入回收站（200），purge 才做 KG / 向量清理
+    assert client.delete(f"/api/v1/herbs/{herb_id}").status_code == 200
+    assert client.delete(f"/api/v1/herbs/{herb_id}/purge").status_code == 200
 
     async def _after() -> int:
         async with _session() as db:
@@ -398,7 +404,10 @@ def test_vector_cleanup_failure_restores_vectors(client, vector_store, monkeypat
 
     monkeypatch.setattr(vector_store, "delete_by_doc", _flaky)
 
-    resp = client.delete(f"/api/v1/herbs/{herb_id}")
+    # 管理中心统一回收站：DELETE 只是软删除（不清理向量），
+    # 向量清理发生在回收站 purge 阶段——因此 422 应当在 purge 时出现。
+    assert client.delete(f"/api/v1/herbs/{herb_id}").status_code == 200
+    resp = client.delete(f"/api/v1/herbs/{herb_id}/purge")
     assert resp.status_code == 422, resp.text
 
     async def _mount_count() -> int:
@@ -417,10 +426,12 @@ def test_vector_cleanup_failure_restores_vectors(client, vector_store, monkeypat
     assert vector_store.count_by_doc(doc1) == before1, "已删向量必须被补偿回写"
     assert vector_store.count_by_doc(doc2) == before2, "已删向量必须被补偿回写"
 
-    # 恢复后删除成功
+    # 恢复后彻底删除成功（本次向量清理正常，不再注入失败）
     monkeypatch.undo()
-    assert client.delete(f"/api/v1/herbs/{herb_id}").status_code == 204
+    # 上一步 purge 失败，资源仍在回收站中 → 直接彻底删除
+    assert client.delete(f"/api/v1/herbs/{herb_id}/purge").status_code == 200
     assert asyncio.run(_mount_count()) == 0
+    vector_store.flush()
     assert vector_store.count_by_doc(doc1) == 0
     assert vector_store.count_by_doc(doc2) == 0
 

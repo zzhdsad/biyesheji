@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.routes.resource_trash import register_resource_trash_routes
 from src.application.audit_service import AuditService
 from src.core.deps import get_client_ip
 from src.core.exceptions import AppException
@@ -97,7 +98,8 @@ def _get_client_ip(request: Request) -> str:
 
 async def _get_category_or_404(db: AsyncSession, category_id: uuid.UUID) -> Category:
     category = await db.get(Category, category_id)
-    if category is None:
+    # 回收站中的分类视为不存在（列表/详情/引用均不可见）
+    if category is None or category.deleted_at is not None:
         raise HTTPException(status_code=404, detail="分类不存在")
     return category
 
@@ -178,10 +180,16 @@ def _category_to_out(
 
 
 def _build_tree(nodes: list[Category]) -> list[CategoryOut]:
-    """把平铺节点组装成树；同级按 sort_order、created_at 排序。"""
+    """把平铺节点组装成树；同级按 sort_order、created_at 排序。
+
+    父节点已被删除（不在本次节点集合内）时，子节点提升为顶层节点，
+    避免"父分类在回收站 → 子分类在树上彻底消失"。
+    """
     by_parent: dict[uuid.UUID | None, list[Category]] = {}
+    known_ids = {n.id for n in nodes}
     for node in nodes:
-        by_parent.setdefault(node.parent_id, []).append(node)
+        parent = node.parent_id if node.parent_id in known_ids else None
+        by_parent.setdefault(parent, []).append(node)
     for siblings in by_parent.values():
         siblings.sort(key=lambda c: (c.sort_order, c.created_at))
 
@@ -210,12 +218,13 @@ async def list_categories(
             detail=f"非法 resource_type，允许：{sorted(RESOURCE_TYPES)}",
         )
 
-    stmt = select(Category).order_by(
+    stmt = select(Category).where(Category.deleted_at.is_(None)).order_by(
         Category.resource_type, Category.sort_order, Category.created_at
     )
     if resource_type is not None:
         stmt = select(Category).where(
-            Category.resource_type == resource_type
+            Category.resource_type == resource_type,
+            Category.deleted_at.is_(None),
         ).order_by(Category.sort_order, Category.created_at)
 
     nodes = list((await db.scalars(stmt)).all())
@@ -330,12 +339,19 @@ async def update_category(
     return _category_to_out(category)
 
 
-@router.delete("/categories/{category_id}", status_code=204)
+@router.delete("/categories/{category_id}")
 async def delete_category(
     category_id: uuid.UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    """删除分类 → 移入回收站（软删除，仅 admin）。
+
+    仍保留两项删除保护（与改动前一致）：存在子分类 / 已被资源引用 → 409。
+    彻底删除只在回收站 purge 时执行，且会先解除引用与子级挂载。
+    """
+    from src.application import trash_service
+
     user = request.state.user
     if user.role != "admin":
         raise AppException(403, "仅管理员可管理分类")
@@ -344,7 +360,9 @@ async def delete_category(
 
     # 有子分类 → 409
     child = await db.scalar(
-        select(Category.id).where(Category.parent_id == category.id).limit(1)
+        select(Category.id)
+        .where(Category.parent_id == category.id, Category.deleted_at.is_(None))
+        .limit(1)
     )
     if child is not None:
         raise AppException(409, "该分类下存在子分类，请先处理子分类")
@@ -353,8 +371,10 @@ async def delete_category(
     if await _is_category_referenced(db, category.id):
         raise AppException(409, "该分类已被资源引用，无法删除")
 
-    await db.delete(category)
-    await db.flush()
+    moved = await trash_service.soft_delete_many(db, Category, [category.id])
+    if not moved:
+        raise AppException(404, "分类不存在")
+    await db.commit()
 
     audit = AuditService(db)
     await audit.log(
@@ -363,9 +383,15 @@ async def delete_category(
         operation="delete",
         target_type="category",
         target_id=str(category.id),
-        detail={"resource_type": category.resource_type, "name": category.name},
+        detail={
+            "resource_type": category.resource_type,
+            "name": category.name,
+            "retention_days": trash_service.retention_days(),
+        },
         ip=_get_client_ip(request),
     )
+    days = trash_service.retention_days()
+    return {"id": str(category_id), "deleted": True, "message": f"已移入回收站，{days} 天内可恢复"}
 
 
 # ── Tags ─────────────────────────────────────────────────────────────────────
@@ -378,8 +404,8 @@ async def list_tags(
     offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
-    """标签列表，支持关键词模糊查询与分页。"""
-    stmt = select(Tag).order_by(Tag.created_at.desc())
+    """标签列表，支持关键词模糊查询与分页（排除回收站中的标签）。"""
+    stmt = select(Tag).where(Tag.deleted_at.is_(None)).order_by(Tag.created_at.desc())
     if keyword:
         stmt = stmt.where(Tag.name.ilike(f"%{keyword}%"))
     stmt = stmt.limit(min(max(limit, 1), 200)).offset(max(offset, 0))
@@ -476,25 +502,34 @@ async def update_tag(
     return tag
 
 
-@router.delete("/tags/{tag_id}", status_code=204)
+@router.delete("/tags/{tag_id}")
 async def delete_tag(
     tag_id: uuid.UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    """删除标签 → 移入回收站（软删除，仅 admin）。
+
+    仍被资源引用时 409（与改动前一致）。彻底删除只在回收站 purge 时执行，
+    且会先清理四张 *_tags 关联行（FK 为 RESTRICT）。
+    """
+    from src.application import trash_service
+
     user = request.state.user
     if user.role != "admin":
         raise AppException(403, "仅管理员可管理标签")
 
     tag = await db.get(Tag, tag_id)
-    if tag is None:
+    if tag is None or tag.deleted_at is not None:
         raise HTTPException(status_code=404, detail="标签不存在")
 
     if await _is_tag_referenced(db, tag.id):
         raise AppException(409, "该标签已被资源引用，无法删除")
 
-    await db.delete(tag)
-    await db.flush()
+    moved = await trash_service.soft_delete_many(db, Tag, [tag.id])
+    if not moved:
+        raise AppException(404, "标签不存在")
+    await db.commit()
 
     audit = AuditService(db)
     await audit.log(
@@ -503,6 +538,34 @@ async def delete_tag(
         operation="delete",
         target_type="tag",
         target_id=str(tag.id),
-        detail={"name": tag.name},
+        detail={"name": tag.name, "retention_days": trash_service.retention_days()},
         ip=_get_client_ip(request),
     )
+    days = trash_service.retention_days()
+    return {"id": str(tag_id), "deleted": True, "message": f"已移入回收站，{days} 天内可恢复"}
+
+
+# ── 分类 / 标签回收站生命周期 ────────────────────────────────────────────────
+# 本 router 无 prefix（/categories 与 /tags 平级），故用带前缀的子 router 挂载，
+# 最终路径为 /categories/trash/list、/tags/trash/purge-all 等。
+
+_category_router = APIRouter(prefix="/categories", tags=["taxonomy"])
+_tag_router = APIRouter(prefix="/tags", tags=["taxonomy"])
+
+register_resource_trash_routes(
+    _category_router,
+    model=Category,
+    label="分类",
+    serialize=_category_to_out,
+    audit_target_type="category",
+)
+register_resource_trash_routes(
+    _tag_router,
+    model=Tag,
+    label="标签",
+    serialize=lambda t: TagOut.model_validate(t),
+    audit_target_type="tag",
+)
+
+router.include_router(_category_router)
+router.include_router(_tag_router)

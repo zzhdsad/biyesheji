@@ -131,27 +131,41 @@ def test_admin_check_helpers_delegate_to_single_implementation():
 # ── BUG-069：回收站保留天数单一数据源 ────────────────────────────────────────
 
 
-def test_trash_retention_reads_settings_not_hardcoded(monkeypatch):
-    """三个资源模块都不再写死 7 天：以 settings.TRASH_RETENTION_DAYS 为唯一数据源。"""
+def test_trash_retention_reads_runtime_config_not_hardcoded(monkeypatch):
+    """三个资源模块都不再写死 7 天：统一走运行时配置入口（DB 覆盖 .env）。"""
     from pathlib import Path
 
     routes_dir = Path(__file__).resolve().parents[1] / "src" / "api" / "routes"
     for name in ("users.py", "knowledge_bases.py", "documents.py"):
         source = (routes_dir / name).read_text(encoding="utf-8")
-        assert "settings.TRASH_RETENTION_DAYS" in source, f"{name} 未统一读 settings"
+        assert "get_system_value('trash_retention_days')" in source, (
+            f"{name} 未统一读运行时配置"
+        )
         assert "TRASH_RETENTION_DAYS = 7" not in source, f"{name} 仍写死 7 天"
 
 
-def test_trash_retention_message_follows_config(monkeypatch):
-    """改配置后提示文案必须同步（BUG-069 的核心症状）。"""
+def test_trash_retention_message_follows_config(monkeypatch, request):
+    """改运行时配置后提示文案必须同步（BUG-069 的核心症状）。"""
+    from src.core import runtime_config
     from src.core.config import settings
 
     from src.api.routes.users import BatchDeleteResult
 
+    # 还原快照，避免影响后续用例
+    request.addfinalizer(runtime_config.invalidate_system_config)
+
+    def apply_days(days: int) -> None:
+        """改动运行时配置快照（DB 覆盖 .env 的等效行为）。"""
+        cfg = runtime_config.system_config_defaults()
+        cfg["trash_retention_days"] = days
+        runtime_config.reset_system_config_snapshot(cfg)
+
     monkeypatch.setattr(settings, "TRASH_RETENTION_DAYS", 3)
+    apply_days(3)
     assert BatchDeleteResult(total=1, success=1).message == "已移入回收站，3 天内可恢复"
 
     monkeypatch.setattr(settings, "TRASH_RETENTION_DAYS", 14)
+    apply_days(14)
     assert BatchDeleteResult(total=1, success=1).message == "已移入回收站，14 天内可恢复"
 
 
@@ -253,9 +267,16 @@ def test_bug067_migration_is_appended_after_previous_head():
     cfg.set_main_option("script_location", str(backend_dir / "alembic"))
     script = ScriptDirectory.from_config(cfg)
 
-    assert script.get_heads() == ["c185a0406aa3"]
+    # head 会随后续增量迁移推进；这里断言"唯一 head"以及"Batch 6 的迁移
+    # 仍按原顺序挂在 Batch 5 之后"，而不是写死 head（否则每次新增迁移都要改）
+    heads = script.get_heads()
+    assert len(heads) == 1, f"应只有单一 head，实际：{heads}"
     revision = script.get_revision("c185a0406aa3")
     assert revision.down_revision == "f3a1c7d9b2e4", "必须追加在 Batch 5 的 head 之后"
+    # 当前 head 必须是从 Batch 6 头一路追加下来的后代（不得重写历史）
+    chain = [r.revision for r in script.walk_revisions()]
+    assert "c185a0406aa3" in chain, "Batch 6 迁移必须仍在迁移链上"
+    assert heads[0] == chain[0], "head 必须是迁移链末端"
 
 
 def test_bug067_downgrade_does_not_drop_columns():

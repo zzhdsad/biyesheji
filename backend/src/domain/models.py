@@ -167,6 +167,83 @@ class Document(Base, TimestampMixin):
     era: Mapped[str | None] = mapped_column(String(8), nullable=True)  # 先秦/汉/唐/宋/明/清/现代
     credibility_level: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)  # 1-5
     deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)  # 回收站软删除时间
+    # 向量模型标识：记录"当前 Milvus 中该文档的向量由哪个 embedding 模型生成"。
+    # 格式 `backend:model`（如 `flagembedding:BAAI/bge-m3`），由向量化流程写入。
+    # NULL = 本字段上线前已入库、未标注（legacy）：检索时不排除（保持既有行为），
+    # 但切换模型时会被统一标注为旧模型，从而进入"需重新向量化"统计。
+    vector_model: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    # 导入溯源：来自哪个数据集、哪一批次（真实数据批次管理用，测试数据/手工录入为空）
+    source_dataset: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    import_batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+
+class ImportJob(Base, TimestampMixin):
+    """真实知识数据导入任务（导入中心）。
+
+    状态机：pending → processing → completed / failed（另可 cancelled）。
+    只记录导入过程与结果，业务数据仍写入各自的业务表（herbs/prescriptions/
+    theories/literatures/documents），并以 import_batch_id 标记批次。
+    """
+
+    __tablename__ = "import_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    # 批次标识：写入各业务行的 import_batch_id，用于统计/回滚某一次导入
+    batch_id: Mapped[str] = mapped_column(String(64), index=True)
+    # 数据集标识（scanner 生成的稳定 id）与展示名
+    dataset_id: Mapped[str] = mapped_column(String(128))
+    dataset_name: Mapped[str] = mapped_column(String(255), default="")
+    # 具体文件（数据集为目录时为空）
+    source_file: Mapped[str] = mapped_column(String(512), default="")
+    # herb / prescription / theory / literature / document
+    target_type: Mapped[str] = mapped_column(String(16), index=True)
+    # 导入 documents 时归属的知识库（资源类导入为空）
+    kb_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    # pending / processing / completed / failed / cancelled
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    processed: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    skipped: Mapped[int] = mapped_column(Integer, default=0)  # 空值/重复被跳过
+    # 失败明细：[{"index": n, "name": "...", "reason": "..."}]
+    failed_items: Mapped[list] = mapped_column(JSONB, default=list)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RevectorizeJob(Base, TimestampMixin):
+    """批量重新向量化任务（切换 embedding 模型后重建存量向量）。
+
+    任务只**重写 Milvus 中的向量**，绝不动 PostgreSQL 的文档 / 切片 / 资源业务数据；
+    单篇文档失败只记入 failed_doc_ids，可整体重试，不影响其它文档。
+    """
+
+    __tablename__ = "revectorize_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    # 目标 embedding model key（本次重建要写入的模型）
+    target_model: Mapped[str] = mapped_column(String(128))
+    # 被替换掉的旧模型 key（用于展示"从 X 迁移到 Y"）
+    previous_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # 作用范围：None = 全库；否则仅该知识库
+    kb_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
+    # pending / running / succeeded / partial / failed
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    processed: Mapped[int] = mapped_column(Integer, default=0)
+    succeeded: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    # 失败文档 id 列表（字符串），供"重试失败项"精确重建
+    failed_doc_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # 与 TimestampMixin 保持一致：带时区（迁移建的是 timestamptz，naive 会触发
+    # asyncpg "can't subtract offset-naive and offset-aware" 错误）
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class Chunk(Base, TimestampMixin):
@@ -374,21 +451,21 @@ class ModelConfig(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
     # LLM 生成
-    llm_provider: Mapped[str] = mapped_column(String(32), default="mock")  # deepseek/openai/qwen/ollama/custom
+    llm_provider: Mapped[str] = mapped_column(String(32), default="openai")  # openai/deepseek/qwen/ollama/custom
     llm_base_url: Mapped[str] = mapped_column(String(512), default="")
     llm_model: Mapped[str] = mapped_column(String(128), default="")
     llm_api_key: Mapped[str] = mapped_column(String(512), default="")
-    # Embedding
-    embedding_backend: Mapped[str] = mapped_column(String(32), default="mock")  # mock/flagembedding
+    # Embedding（BGE-M3，模型权重随镜像内置）
+    embedding_backend: Mapped[str] = mapped_column(String(32), default="flagembedding")
     embedding_model: Mapped[str] = mapped_column(String(128), default="BAAI/bge-m3")
     embedding_device: Mapped[str] = mapped_column(String(16), default="cpu")
-    # Rerank
-    rerank_backend: Mapped[str] = mapped_column(String(32), default="mock")  # mock/flagreranker
+    # Rerank（BGE-Reranker-v2-m3，模型权重随镜像内置）
+    rerank_backend: Mapped[str] = mapped_column(String(32), default="flagreranker")
     rerank_model: Mapped[str] = mapped_column(String(128), default="BAAI/bge-reranker-v2-m3")
     rerank_device: Mapped[str] = mapped_column(String(16), default="cpu")
-    # HyDE
+    # HyDE（默认开启；留空则复用主 LLM 的模型与地址）
     hyde_enabled: Mapped[bool] = mapped_column(default=True)
-    hyde_backend: Mapped[str] = mapped_column(String(32), default="mock")  # mock/openai
+    hyde_backend: Mapped[str] = mapped_column(String(32), default="openai")
     hyde_model: Mapped[str] = mapped_column(String(128), default="")
     hyde_base_url: Mapped[str] = mapped_column(String(512), default="")
 
@@ -422,11 +499,13 @@ class SystemConfig(Base):
     __tablename__ = "system_configs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    # 以下默认值需与 core/config.py 中的 Settings 默认值保持一致，
+    # 保证"新建行"与"无行回落"两条路径拿到同一套值。
     trash_retention_days: Mapped[int] = mapped_column(Integer, default=7)  # 回收站保留天数 1-30
     max_file_size_mb: Mapped[int] = mapped_column(Integer, default=50)  # 文件大小限制
-    recall_top_k: Mapped[int] = mapped_column(Integer, default=50)  # 每路召回数量
-    rerank_top_n: Mapped[int] = mapped_column(Integer, default=5)  # 精排后送 LLM 数量
-    relevance_threshold: Mapped[float] = mapped_column(Float, default=0.3)  # 相似度拒答阈值
+    recall_top_k: Mapped[int] = mapped_column(Integer, default=10)  # 每路召回数量
+    rerank_top_n: Mapped[int] = mapped_column(Integer, default=3)  # 精排后送 LLM 数量
+    relevance_threshold: Mapped[float] = mapped_column(Float, default=0.35)  # 相似度拒答阈值
     history_window: Mapped[int] = mapped_column(Integer, default=5)  # 多轮对话历史轮数
 
 
@@ -448,6 +527,10 @@ class Category(Base, TimestampMixin):
     )
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     description: Mapped[str] = mapped_column(Text, default="")
+    # 软删除（回收站）：NULL = 正常；非空 = 已移入回收站，列表/检索不可见
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
     # 同一 resource_type + 同一父节点下 name 唯一。
     # 普通 unique 约束对 parent_id IS NULL 的根节点不生效（SQL NULL 语义），
@@ -479,6 +562,10 @@ class Tag(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     color: Mapped[str] = mapped_column(String(16), default="")
     description: Mapped[str] = mapped_column(Text, default="")
+    # 软删除（回收站）：与 Category / 四类资源同构
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
 
 # 中药 ↔ 标签 多对多关联表（TASK-003）。
@@ -526,6 +613,13 @@ class Herb(Base, TimestampMixin):
     effects: Mapped[str] = mapped_column(Text, default="")  # 功效
     source: Mapped[str] = mapped_column(String(255), default="")  # 出处/基原
     description: Mapped[str] = mapped_column(Text, default="")
+    # 导入溯源（真实数据批次；手工录入为 NULL）
+    source_dataset: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    import_batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # 软删除（回收站）：NULL = 正常；非空 = 已移入回收站，列表与检索不可见
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
     __table_args__ = (
         Index("ix_herbs_aliases_gin", "aliases", postgresql_using="gin"),
@@ -585,6 +679,13 @@ class Prescription(Base, TimestampMixin):
     description: Mapped[str] = mapped_column(Text, default="")  # 方解/综合描述
     usage_method: Mapped[str] = mapped_column(String(255), default="")  # 用法，如“水煎服，每日一剂”
     source: Mapped[str] = mapped_column(String(255), default="")  # 出处，如《伤寒论》
+    # 导入溯源（真实数据批次；手工录入为 NULL）
+    source_dataset: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    import_batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # 软删除（回收站）：与 Herb 同构
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
     __table_args__ = (
         Index("ix_prescriptions_aliases_gin", "aliases", postgresql_using="gin"),
@@ -685,6 +786,13 @@ class Theory(Base, TimestampMixin):
     )
     content: Mapped[str] = mapped_column(Text, default="")  # 核心正文
     source: Mapped[str] = mapped_column(String(255), default="")  # 来源出处
+    # 导入溯源（真实数据批次；手工录入为 NULL）
+    source_dataset: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    import_batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # 软删除（回收站）：与 Herb 同构
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
     __table_args__ = (
         Index("ix_theories_aliases_gin", "aliases", postgresql_using="gin"),
@@ -743,6 +851,13 @@ class Literature(Base, TimestampMixin):
     summary: Mapped[str] = mapped_column(String(500), default="")  # 内容摘要
     content: Mapped[str] = mapped_column(Text, default="")  # 正文/精选段落
     source: Mapped[str] = mapped_column(String(255), default="")  # 版本/底本/出版依据
+    # 导入溯源（真实数据批次；手工录入为 NULL）
+    source_dataset: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    import_batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # 软删除（回收站）：与 Herb 同构
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
 
     __table_args__ = (
         Index("ix_literatures_aliases_gin", "aliases", postgresql_using="gin"),

@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = "EMPTY"
     LLM_MODEL: str = "Qwen2.5-14B-Instruct-AWQ"
     EMBEDDING_MODEL: str = "BAAI/bge-m3"
-    # openai（OpenAI 兼容接口，如 vLLM）/ mock（确定性假回答，开发/测试）
+    # openai / deepseek / qwen / ollama / custom（均为 OpenAI 兼容协议）
     LLM_BACKEND: str = "openai"
     LLM_TIMEOUT_SECONDS: int = 120
     # SSE 流式问答保活（BUG-035）：反向代理（如 nginx proxy_read_timeout=60s）
@@ -51,22 +51,37 @@ class Settings(BaseSettings):
     SSE_TOTAL_TIMEOUT_SECONDS: int = 900
 
     # 向量化（TECH_DESIGN：BGE-M3 稠密 1024d + 稀疏向量）
-    # flagembedding（本地 FlagEmbedding，需下载模型）/ mock（确定性伪向量，开发/测试）
     EMBEDDING_BACKEND: str = "flagembedding"
     EMBEDDING_DEVICE: str = "cpu"
     EMBEDDING_BATCH_SIZE: int = 16
     MILVUS_DIM: int = 1024
     VECTORIZE_BATCH_SIZE: int = 32
+
+    # ── 批量向量化任务（文档重新向量化 / 资源批量挂载）的批次与并发 ──────────
+    # 目标机器：15GB RAM + CPU BGE-M3 + Milvus Docker。默认一律取保守值：
+    # 单进程、单 embedding worker、串行流水线，优先稳定而非吃满资源。
+    VECTORIZE_JOB_DOC_BATCH: int = 8  # 文档批量向量化：每批文档数
+    VECTORIZE_JOB_RESOURCE_BATCH: int = 16  # 资源批量挂载：每批资源数
+    VECTORIZE_JOB_CHUNK_BATCH: int = 32  # 单次 embedding 的文本条数上限（限定内存峰值）
+    VECTORIZE_JOB_FLUSH_EVERY: int = 1  # 每 N 个写入批次 flush 一次 Milvus（1=每批落盘）
+    VECTORIZE_JOB_MAX_ITEMS: int = 5000  # 单个批量任务的条目上限（安全阀）
+    # 并发策略（固定单 worker，不提供"调大即起飞"的开关）：
+    # 一个 embedding worker（复用全局单例 BGE-M3，不启第二个模型实例）+
+    # 一个 Milvus 写入端，批次内串行 embed→write→下一批；
+    # 内存上界 = VECTORIZE_JOB_CHUNK_BATCH × 1024 维向量，不会随任务规模增长。
     # HuggingFace 镜像：国内 huggingface.co 不可达，默认走 hf-mirror.com（可经 .env 覆盖）
     HF_ENDPOINT: str = "https://hf-mirror.com"
     HF_HUB_DOWNLOAD_TIMEOUT: int = 60
+    # 模型权重由镜像内置到该目录（见 Dockerfile），用户无需手动下载
+    HF_HOME: str | None = None
+    EMBEDDING_MODEL_PATH: str | None = None
 
-    # 检索参数
-    RECALL_TOP_K: int = 50  # 每路召回数量（送入 RRF 融合）
-    RERANK_TOP_N: int = 5  # 精排后返回给 LLM 的最终数量
+    # 检索参数（默认值同时作为系统配置的默认值来源，见 routes/settings.py::_system_defaults）
+    RECALL_TOP_K: int = 10  # 每路召回数量（送入 RRF 融合）
+    RERANK_TOP_N: int = 3  # 精排后返回给 LLM 的最终数量
     RRF_K: int = 60  # RRF 融合平滑常数
-    # 相关性门槛（BUSINESS_RULES §6：检索相关度 < 0.3 时拒答）
-    RELEVANCE_THRESHOLD: float = 0.3
+    # 相关性门槛（BUSINESS_RULES §6：检索相关度 < 0.35 时拒答）
+    RELEVANCE_THRESHOLD: float = 0.35
     # 阶段十四：Evidence Gate 总开关（False = 完全回到阶段十三及之前的行为）。
     # 默认开启；评测可用 use_evidence_gate 显式覆盖，用于"Gate 开 / 关"对照实验。
     EVIDENCE_GATE_ENABLED: bool = True
@@ -79,19 +94,20 @@ class Settings(BaseSettings):
     SELF_REFLECTION_LLM_ENABLED: bool = False
     # LLM Reflection 单次调用的超时上限（秒）；超时即视为不可用，回落到原答案
     SELF_REFLECTION_LLM_TIMEOUT_SECONDS: float = 20.0
-    # mock（确定性伪重排，开发/测试）/ flagreranker（BGE-Reranker-v2-m3 真实精排）
-    RERANK_BACKEND: str = "mock"
+    # flagreranker（BGE-Reranker-v2-m3 真实精排）
+    RERANK_BACKEND: str = "flagreranker"
     RERANK_MODEL: str = "BAAI/bge-reranker-v2-m3"  # HuggingFace 模型 ID
-    # 本地模型路径（离线/生产场景）：设了优先用本地路径，避免运行时下载
-    # 为空则按 RERANK_MODEL 从 HuggingFace 拉取（首拉约 2.3GB，国内走 HF_ENDPOINT 镜像）
+    # 本地模型路径（镜像内置）：设了优先用本地路径，避免运行时下载
+    # 为空则按 RERANK_MODEL 从 HuggingFace 拉取（国内走 HF_ENDPOINT 镜像）
     RERANK_MODEL_PATH: str | None = None
     # 设备：cpu / cuda:0 / mps；CPU 上自动禁用 fp16
     RERANK_DEVICE: str = "cpu"
-    # HyDE 查询改写（TECH_DESIGN §4.5：检索前用小模型生成假设答案替换原问题）
-    # 默认开启（用户需求）；开发期无小模型服务时设 HYDE_BACKEND=mock 或 HYDE_ENABLED=false
+    # HyDE 查询改写（TECH_DESIGN §4.5：检索前生成假设答案替换原问题）
+    # 默认开启并复用主 LLM；关闭改动的开关是 HYDE_ENABLED=false
     HYDE_ENABLED: bool = True
-    HYDE_BACKEND: str = "mock"  # mock / openai
-    HYDE_MODEL: str = "Qwen/Qwen2.5-1.5B-Instruct"
+    HYDE_BACKEND: str = "openai"  # openai（OpenAI 兼容，默认复用主 LLM）
+    # 默认留空 = 复用主 LLM 的模型；需要独立小模型（如 Qwen2.5-1.5B）时再填
+    HYDE_MODEL: str = ""
     # HyDE 小模型 API 地址：为空则复用 LLM_BASE_URL
     # Ollama：http://localhost:11434/v1（Ollama ≥0.1.x 兼容 OpenAI /v1）
     # vLLM  ：http://localhost:8001/v1（vllm serve Qwen/Qwen2.5-1.5B-Instruct --port 8001）
@@ -126,6 +142,16 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: str = "minioadmin"
     MINIO_BUCKET: str = "documents"
 
+    # ── 真实知识数据导入中心（仅扫描本机目录，不接收浏览器大文件上传）────────
+    # 数据源根目录，必须经 .env 配置，禁止写死在业务代码中
+    IMPORT_SOURCE_DIR: str = ""
+    # 单个数据集预览/扫描时最多读取的记录数（防止 1GB 级语料拖垮接口）
+    IMPORT_SCAN_SAMPLE_ROWS: int = 5
+    # 超大文件（如 JSON 语料）记录数采用"按已读字节估算"而非全量扫描的阈值（MB）
+    IMPORT_ESTIMATE_THRESHOLD_MB: int = 64
+    # 单次导入任务允许的最大记录数（安全阀：禁止一次全量导入百万级语料）
+    IMPORT_MAX_RECORDS_PER_JOB: int = 200
+
     # 开发环境默认管理员（系统首次启动时若 users 表为空则自动创建）
     DEFAULT_ADMIN_EMAIL: str = "admin@company.com"
     DEFAULT_ADMIN_USERNAME: str = "admin"
@@ -156,3 +182,6 @@ settings = get_settings()
 # 必须在 FlagEmbedding/transformers 触发下载前设置；config 在启动早期被各模块导入。
 os.environ.setdefault("HF_ENDPOINT", settings.HF_ENDPOINT)
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", str(settings.HF_HUB_DOWNLOAD_TIMEOUT))
+if settings.HF_HOME:
+    os.environ.setdefault("HF_HOME", settings.HF_HOME)
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", settings.HF_HOME)

@@ -80,8 +80,15 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-knowledge_platform}
       REDIS_URL: redis://redis:6379/0
       MILVUS_URI: http://milvus:19530
-      # HuggingFace 国内镜像，加速 BGE-M3 / BGE-Reranker 模型下载
+      # 模型权重在构建镜像时已下载到 /app/models（见 backend/Dockerfile），
+      # 容器运行时不再联网拉模型；HF_ENDPOINT 仅作为兜底，不需要用户侧下载
       HF_ENDPOINT: https://hf-mirror.com
+      EMBEDDING_MODEL_PATH: /app/models/bge-m3
+      RERANK_MODEL_PATH: /app/models/bge-reranker-v2-m3
+      # CPU 编码限流：默认会用满容器内可见核数（实测 ~400% CPU，持续满载会饿死
+      # etcd 心跳导致 Milvus 退出）。限制为 2 线程，给 etcd/Milvus 留出 CPU。
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
     ports:
       - "8000:8000"
     depends_on:

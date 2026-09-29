@@ -12,6 +12,7 @@ TECH_DESIGN §1.4 / §4.3：BGE-Reranker-v2-m3（Cross-Encoder）对 Top-K 精�
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 
 from loguru import logger
 
@@ -34,9 +35,9 @@ class BaseRerank:
 
 
 class MockRerank(BaseRerank):
-    """确定性伪重排（开发/测试）：按 query 字符与候选内容重叠率打分。
+    """确定性伪重排：**仅供单元测试**（避免测试加载 2.3GB 真实模型）。
 
-    无需下载模型即可验证 RRF→Rerank→Top-N 全流程链路。
+    生产环境不可选：``get_rerank`` 不再提供 mock 分支。
     """
 
     @staticmethod
@@ -61,7 +62,8 @@ class MockRerank(BaseRerank):
 class BGERerank(BaseRerank):
     """BGE-Reranker-v2-m3（FlagEmbedding Cross-Encoder）真实实现。
 
-    依赖：pip install FlagEmbedding（模型约 2.3GB，首次运行自动下载）。
+    依赖：FlagEmbedding（镜像已内置）。模型权重同样由镜像内置到
+    RERANK_MODEL_PATH，无需运行时下载。
 
     加载顺序（缓存优先级）：
     1. RERANK_MODEL_PATH 非空 → 本地路径直接加载（离线/生产推荐）
@@ -72,8 +74,13 @@ class BGERerank(BaseRerank):
 
     # 历史别名（向后兼容旧引用）
     def __init__(self, model_name: str | None = None, device: str | None = None) -> None:
-        # 优先用本地路径（如配置），否则用 HuggingFace 模型 ID
+        # 优先用本地路径（镜像内置），否则用 HuggingFace 模型 ID
         self._local_path: str | None = settings.RERANK_MODEL_PATH or None
+        if self._local_path and not Path(self._local_path).exists():
+            raise RerankError(
+                f"内置重排序模型路径不存在：{self._local_path}。"
+                "请检查镜像模型目录或清空 RERANK_MODEL_PATH 走模型 ID 加载。"
+            )
         self._model_name: str = (
             model_name or self._local_path or settings.RERANK_MODEL
         )
@@ -96,8 +103,8 @@ class BGERerank(BaseRerank):
             from FlagEmbedding import FlagReranker
         except ImportError as exc:
             raise RerankError(
-                "未安装 FlagEmbedding：pip install -r requirements-ai.txt"
-                "，或在 .env 设置 RERANK_BACKEND=mock"
+                "重排序依赖缺失（未安装 FlagEmbedding）。"
+                "请使用项目镜像部署，或在部署环境 pip install -r requirements-ai.txt。"
             ) from exc
 
         # CPU 设备禁用 fp16（半精度在 CPU 上不支持/无加速），GPU 才开启
@@ -109,7 +116,7 @@ class BGERerank(BaseRerank):
         )
         logger.info(
             f"Reranker 首次加载中（{load_from}, device={self._device}, "
-            f"use_fp16={use_fp16}）… 首次加载约 2.3GB，可能耗时较长…"
+            f"use_fp16={use_fp16}）…"
         )
         try:
             self._model = FlagReranker(
@@ -178,7 +185,7 @@ def _resolve_rerank_config(config: dict | None) -> tuple[str, str, str]:
 
 
 def get_rerank(config: dict | None = None) -> BaseRerank:
-    """工厂：按 RERANK_BACKEND 注入（mock / flagreranker），单槽缓存。
+    """工厂：按 RERANK_BACKEND 注入（默认 flagreranker 真实精排），单槽缓存。
 
     缓存策略：按 (backend, model, device) 缓存实例，命中直接复用；
     配置变更时重建并替换。线程安全（调用方可能在 to_thread 中）。
@@ -187,6 +194,8 @@ def get_rerank(config: dict | None = None) -> BaseRerank:
     backend, model, device = _resolve_rerank_config(config)
 
     if backend == "mock":
+        # 仅测试/环境级逃生舱：产品参数（DB 默认值、API 校验、前端选项）
+        # 均已不再提供 mock，存量 mock 配置也由 ModelConfigService 规范化掉。
         return MockRerank()
     if backend != "flagreranker":
         raise RerankError(f"未知 RERANK_BACKEND：{backend}")

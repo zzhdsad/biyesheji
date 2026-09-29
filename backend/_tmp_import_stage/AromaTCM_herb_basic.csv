@@ -1,0 +1,125 @@
+﻿Herb_ID,Chinese_Character,Pinyin_Name,Latin_Name,Source_Plant_Latin_Names,Efficacy,Flavors,Properties_and_actions_of_TCM,Toxicity,Meridians
+Herb_1,续断,Xuduan,DIPSACI RADIX,"Dipsacus asper Wall. ex Henry",curing rheumatism,bitter、pungent,warm,,liver、kidney
+Herb_2,肉桂,Rougui,CINNAMOMI  CORTEX,"Cinnamomum cassia Presl",restoring vital energy,pungent、sweetish,warm,,kidney、spleen、heart、liver
+Herb_3,淫羊藿,Yinyanghuo,EPIMEDII FOLIUM,"Epimedium brevicornu Maxim. | Epimedium sagittatum (Sieb.et Zucc.) Maxim. | Epimedium pubescens Maxim. | Epimedium koreanum Nakai",restoring vital energy,pungent、sweetish,warm,,liver、kidney
+Herb_4,巴戟天,Bajitian,MORINDAE OFFICINALIS RADIX,"Morinda officinalis How",restoring vital energy,sweetish、pungent,warm,,kidney、liver
+Herb_5,当归,Danggui,ANGELICAE SINENSIS RADIX,"Angelica sinensis (Oliv.) Diels",restoring vital energy,sweetish、pungent,warm,,liver、heart、spleen
+Herb_6,香薷,Xiangru,MOSLAE HERBA,"Mosla chinensis Maxim. | Mosla chinensis 'Jiangxiangru'",diaphoresis relieving superficies,pungent,warm,,lung、stomach
+Herb_7,桂枝,Guizhi,CINNAMOMI RAMULUS,"Cinnamomum cassia Presl",diaphoresis relieving superficies,pungent、sweetish,warm,,heart、lung、bladder
+Herb_8,麻黄,Mahuang,EPHEDRAE HERBA,"Ephedra sinica Stapf | Ephedra intermedia Schrenk et C.A.Mey. | Ephedra equisetina Bge.",diaphoresis relieving superficies,pungent、bitter,warm,,lung、bladder
+Herb_9,佩兰,Peilan,EUPATORII HERBA,"Eupatorium fortunei Turcz.",dissipating dampness,pungent,warm,,spleen、stomach、lung
+Herb_10,广藿香,Guanghuoxiang,POGOSTEMONIS HERBA,"Pogostemon cablin (Blanco) Benth.",dissipating dampness,pungent,warm,,spleen、stomach、lung
+Herb_11,砂仁,Sharen,AMOMI FRUCTUS,"Amomum villosum Lour. | Amomum villosum Lour. var. xanthioides T. L. Wu et Senjen | Amomum longiligulare T. L. Wu",dissipating dampness,pungent,warm,,spleen、stomach、kidney
+Herb_12,豆蔻,Doukou,AMOMI FRUCTUS ROTUNDUS,"Amomurn kravanh Pierre ex Gagnep. | Amomum compactum Soland ex Maton",dissipating dampness,pungent,warm,,lung、spleen、stomach
+Herb_13,降香,Jiangxiang,DALBERGIAE ODORIFERAE LIGNUM,"Dalbergia odorifera T. Chen",activating blood flow and removing blood stasis,pungent,warm,,liver、spleen
+Herb_15,泽兰,Zelan,LYCOPI  HERBA,"Lycopus lucidus Turcz. var. hirtus Regel",activating blood flow and removing blood stasis,bitter、pungent,warm,,liver、spleen
+Herb_16,月季花,Yuejihua,ROSAE CHINENSIS FLOS,"Rosa chinensis Jacq.",activating blood flow and removing blood stasis,sweetish,warm,,liver
+Herb_17,乳香,Ruxiang,OLIBANUM,"Boswellia carterii Birdw. | Boswellia bhaw-dajiana Birdw.",activating blood flow and removing blood stasis,pungent、bitter,warm,,heart、liver、spleen
+Herb_18,丹参,Danshen,SALVIAE MILTIORRHIZAE RADIX ET RHIZOMA,"Salvia miltiorrhiza Bge.",activating blood flow and removing blood stasis,bitter,cold,,heart、liver
+Herb_19,苏木,Sumu,SAPPAN  LIGNUM,"Caesalpinia sappan L.",activating blood flow and removing blood stasis,sweetish、salty,warm,,heart、liver、spleen
+Herb_20,红花,Honghua,CARTHAMI FLOS,"Carthamus tinctorius L.",activating blood flow and removing blood stasis,pungent,warm,,heart、liver
+Herb_21,川芎,Chuanxiong,CHUANXIONG  RHIZOMA,"Ligusticum chuanxiong Hort.",activating blood flow and removing blood stasis,pungent,warm,,liver、gallbladder、Pericardium
+Herb_22,郁金,Yujin,CURCUMAE  RADIX,"Curcuma wenyujin Y.H. Chen et C. Ling | Curcuma longa L. | Curcuma kwangsiensis S. G. Lee et C. F. Liang | Curcuma phaeocaulis Val.",activating blood flow and removing blood stasis,pungent、bitter,warm,,liver、heart、lung
+Herb_23,土木香,Tumuxiang,INULAE RADIX,"Inula helenium L.",dissipating dampness,pungent、bitter,warm,,liver、spleen
+Herb_24,白术,Baizhu,ATRACTYLODIS MACROCEPHALAE RHIZOMA,"Atractylodes macrocephala Koidz.",dissipating dampness,bitter、sweetish,warm,,spleen、stomach
+Herb_25,紫花前胡,Zihuaqianhu,PEUCEDANI DECURSIVI RADIX,"Peucedanum decursivum (Miq.) Maxim.",regulating qi,bitter、pungent,warm,,lung
+Herb_26,前胡,Qianhu,PEUCEDANI RADIX,"Peucedanum praeruptorum Dunn",regulating qi,bitter、pungent,warm,,lung
+Herb_27,荆芥,Jingjie,SCHIZONEPETAE  HERBA,"Schizonepeta tenuifolia Briq.",diaphoresis relieving superficies,pungent,warm,,lung、liver
+Herb_28,羌活,Qianghuo,NOTOPTERYGII RHIZOMA ET RADIX,"Notopterygium incisum Ting ex H.T. Chang | Notopterygium franchetii H. de Boiss.",diaphoresis relieving superficies,pungent、bitter,warm,,bladder、kidney
+Herb_29,细辛,Xixin,ASARI  RADIX  ET  RHIZOMA,"Asarum heterotropoides Fr. Schmidt var. mandshuricum (Maxim.) Kitag. | Asarum sieboldii Miq. var. seoulense Nakai | Asarum sieboldii Miq.",diaphoresis relieving superficies,pungent,warm,,heart、lung、kidney
+Herb_30,白芷,Baizhi,ANGELICAE DAHURICAE RADIX,"Angelica dahurica (Fisch.ex Hoffm.) Benth.et Hook.f. | Angelica dahurica (Fisch.ex Hoffm.) Benth.et Hook.f.var.formosana (Boiss.) Shan et Yuan",diaphoresis relieving superficies,pungent,warm,,stomach、large intestine、lung
+Herb_31,生姜,Shengjiang,ZINGIBERIS RHIZOMA RECENS,"Zingiber officinale Rosc.",diaphoresis relieving superficies,pungent,warm,,lung、spleen、stomach
+Herb_32,紫苏叶,Zisuye,PERILLAE FOLIUM,"Perilla frutescens (L.) Britt.",diaphoresis relieving superficies,pungent,warm,,lung、spleen
+Herb_33,大蒜,Dasuan,ALLII SATIVI BULBUS,"Allium sativum L.",clearing away heat,pungent,warm,,spleen、stomach、lung
+Herb_34,合欢花,Hehuanhua,ALBIZIAE  FLOS,"Albizia julibrissin Durazz.",tranquilization,sweetish,mild,,heart、liver
+Herb_35,苏合香,Suhexiang,STYRAX,"Liquidambar orientalis Mill.",inducing resuscitation,pungent,warm,,heart、spleen
+Herb_36,石菖蒲,Shichangpu,ACORI TATARINOWII RHIZOMA,"Acorus tatarinowii Schott",inducing resuscitation,pungent、bitter,warm,,heart、stomach
+Herb_37,安息香,Anxixiang,BENZOINUM,"Styrax tonkinensis (Pierre) Craib ex Hart",inducing resuscitation,pungent、bitter,warm,,heart、spleen
+Herb_38,陈皮,Chenpi,CITRI  RETICULATAE  PERICARPIUM,"Citrus reticulata Blanco",regulating qi,bitter、pungent,warm,,lung、spleen
+Herb_39,化橘红,Huajuhong,CITRI GRANDIS EXOCARPIUM,"Citrus grandis‘Tomentosa’ | Citrus grandis (L.) Osbeck",regulating qi,pungent、bitter,warm,,lung、spleen
+Herb_40,甘松,Gansong,NARDOSTACHYOS RADIX ET RHIZOMA,"Nardostachys jatamansi DC.",regulating qi,pungent、sweetish,warm,,spleen、stomach
+Herb_41,蜘蛛香,Zhizhuxiang,VALERIANAE  JATAMANSI  RHIZOMA ET  RADIX,"Valeriana jatamansi Jones",regulating qi,bitter、pungent,warm,,heart、spleen、stomach
+Herb_42,香加皮,Xiangjiapi,PERIPLOCAE CORTEX,"Periploca sepium Bge.",removing dampness and promoting diuresis,pungent、bitter,warm,toxic,liver、kidney、heart
+Herb_43,侧柏叶,Cebaiye,PLATYCLADI CACUMEN,"Platycladus orientalis (L.) Franco",clearing away heat,bitter、涩,warm,,lung、liver、spleen
+Herb_44,槐花,Huaihua,SOPHORAE FLOS,"Sophora japonica L.",clearing away heat,bitter,warm,,liver、large intestine
+Herb_45,益智,Yizhi,ALPINIAE  OXYPHYLLAE FRUCTUS,"Alpinia oxyphylla Miq.",wenli,pungent,warm,,spleen、kidney
+Herb_46,枳实,Zhishi,AURANTII FRUCTUS IMMATURUS,"Citrus aurantium L. | Citrus sinensis Osbeck",regulating qi,bitter、pungent、酸,warm,,spleen、stomach
+Herb_47,姜黄,Jianghuang,CURCUMAE LONGAE RHIZOMA,"Curcuma Longa L.",activating blood flow and removing blood stasis,pungent、bitter,warm,,spleen、liver
+Herb_48,三棱,Sanleng,SPARGANII RHIZOMA,"Sparganium stoloniferum Buch.-Ham.",activating blood flow and removing blood stasis,pungent、bitter,warm,,liver、spleen
+Herb_49,枇杷叶,Pipaye,ERIOBOTRYAE  FOLIUM,"Eriobotrya japonica (Thunb.) Lindl.",clearing away heat,bitter,cold,,lung、stomach
+Herb_50,茵陈,Yinchen,ARTEMISIAE  SCOPARIAE  HERBA,"Artemisia scoparia Waldst. et Kit. | Artemisia capillaris Thunb.",removing dampness and promoting diuresis,bitter、pungent,warm,,spleen、stomach、liver、gallbladder
+Herb_14,延胡索,Yanhusuo,CORYDALIS  RHIZOMA,"Corydalis yanhusuo W.T.Wang",activating blood flow and removing blood stasis,pungent、bitter,warm,,liver、spleen
+,冰片,Bingpiɑn,BORNEOLUM SYNTHETICUM,"",inducing resuscitation,pungent、bitter,cold,,heartheart、spleen、lung
+,紫菀,Ziwan,ASTERIS RADIX ET RHIZOMA,"Aster tataricus L.f.",phlegm-eliminating cough-relieving and asthma-relieving,pungent、bitter,warm,,heartlung
+,芥子,Jiezi,SINAPIS SEMEN,"Sinapis alba L. | Brassica juncea (L.) Czern. et Coss.",wenli,pungent,warm,,heartlung
+,麝香,Shexiɑng,MOSCHUS,"Moschus berezovskii Flerov | Moschus sifanicus Przewalski | Moschus moschiferus Linnaeus",inducing resuscitation,pungent,warm,,heartheart、spleen
+Herb_52,金银花,Jinyinhua,LONICERAE JAPONICAE FLOS,"Lonicera japonica Thunb.",clearing away heat,sweetish,cold,,lung、heart、stomach
+Herb_53,鱼腥草,Yuxingcao,HOUTTUYNIAE  HERBA,"Houttuynia cordata Thunb.",clearing away heat,pungent,warm,,lung
+Herb_54,四季青,Sijiqing,ILICIS CHINENSIS FOLIUM,"Ilex chinensis Sims",clearing away heat,bitter、涩,warm,,lung、large intestine、bladder
+Herb_55,连翘,Lianqiao,FORSYTHIAE FRUCTUS,"Forsythia suspensa (Thunb.) Vahl",clearing away heat,bitter,warm,,lung、heart、small intestine
+Herb_56,野菊花,Yejuhua,CHRYSANTHEMI INDICI FLOS,"Ghrysanthemum indicum L.",clearing away heat,bitter、pungent,warm,,liver、heart
+Herb_57,青蒿,Qinghao,ARTEMISIAE  ANNUAE  HERBA,"Artemisia annua L.",clearing away heat,bitter、pungent,warm,,liver、gallbladder
+Herb_58,藁本,Gaoben,LIGUSTICI RHIZOMA ET RADIX,"Ligusticum sinense Oliv. | Ligusticum jeholense Nakai et Kitag.",curing rheumatism,pungent,warm,,bladder
+Herb_59,五加皮,Wujiapi,ACANTHOPANACIS CORTEX,"Acanthoppanax gracilistylus W. W. Smith.",curing rheumatism,pungent、bitter,warm,,liver、kidney
+Herb_60,伸筋草,Shenjincao,LYCOPODII HERBA,"Lycopodium japonicum Thunb.",curing rheumatism,bitter、pungent,warm,,liver、spleen、kidney
+Herb_61,独活,Duhuo,ANGELICAE PUBESCENTIS RADIX,"Angelica pubescens Maxim. f. biserrata Shan et Yuan",curing rheumatism,pungent、bitter,warm,,kidney、bladder
+Herb_62,防风,Fangfeng,SAPOSHNIKOVIAE RADIX,"Saposhnikovia divaricata (Turcz.) Schischk.",curing rheumatism,pungent、sweetish,warm,,bladder、liver、spleen
+Herb_63,秦艽,Qinjiao,GENTIANAE MACROPHYLLAE RADIX,"Gentiana macrophylla Pall. | Gentiana straminea Maxim. | Gentiana crassicaulis Duthie ex Burk. | Gentiana dahurica Fisch.",curing rheumatism,pungent、bitter,warm,,stomach、liver、gallbladder
+Herb_64,千年健,Qiannianjian,HOMALOMENAE RHIZOMA,"Homalomena occulta (Lour.) Schott",curing rheumatism,bitter、pungent,warm,,liver、kidney
+Herb_65,防己,Fangji,STEPHANIAE TETRANDRAE RADIX,"Stephania tetrandra S.Moore",curing rheumatism,bitter,warm,,bladder、lung
+Herb_66,款冬花,Kuandonghua,FARFARAE FLOS,"Tussilago farfara L.",phlegm-eliminating cough-relieving and asthma-relieving,pungent、bitter,warm,,lung
+Herb_67,辛夷,Xinyi,MAGNOLIAE FLOS,"Magnolia biondii Pamp. | Magnolia denudata Desr. | Magnolia sprengeri Pamp.",diaphoresis relieving superficies,pungent,warm,,lung、stomach
+Herb_68,苍耳子,Cangerzi,XANTHII FRUCTUS,"Xanthium sibiricum Patr.",diaphoresis relieving superficies,pungent、bitter,warm,toxic,lung
+Herb_69,菊花,Juhua,CHRYSANTHEMI FLOS,"Chrysanthemum morifolium Ramat.",diaphoresis relieving superficies,sweetish、bitter,cold,,lung、liver
+Herb_70,红豆蔻,Hongdoukou,GALANGAE FRUCTUS,"Alpinia galanga Willd.",diaphoresis relieving superficies,pungent,warm,,spleen、lung
+Herb_71,吴茱萸,Wuzhuyu,EUODIAE FRUCTUS,"Euodia rutaecarpa (Juss.) Benth. | Euodia rutaecarpa (Juss.) Benth. var. officinalis (Dode) Huang | Euodia rutaecarpa (Juss.)Benth. var. bodinieri (Dode) Huang",diaphoresis relieving superficies,pungent、bitter,warm,slightly toxic,liver、spleen、stomach、kidney
+Herb_72,小茴香,Xiaohuixiang,FOENICULI FRUCTUS,"Foeniculum vulgare Mill.",diaphoresis relieving superficies,pungent,warm,,liver、kidney、spleen、stomach
+Herb_73,没药,Moyao,MYRRHA,"Commiphora myrrha Engl. | Commiphora momol Engl.",activating blood flow and removing blood stasis,pungent、bitter,mild,,heart、liver、spleen
+Herb_74,梅花,Meihua,MUME FLOS,"Prunus mume (Sieb.) Sieb. et Zucc",regulating qi,酸,warm,,liver、stomach、lung
+Herb_75,香附,Xiangfu,CYPERI RHIZOMA,"Cyperus rotundus L.",regulating qi,pungent、bitter、sweetish,warm,,liver、spleen、Triple Energizer
+Herb_76,佛手,Foshou,CITRI SARCODACTYLIS FRUCTUS,"Citrus medica L.var.sarcodactylis Swingle",regulating qi,pungent、bitter、酸,warm,,liver、spleen、stomach、lung
+Herb_77,香橼,Xiangyuan,CITRI FRUCTUS,"Citrus medica L. | Citrus wilsonii Tanaka",regulating qi,pungent、bitter、酸,warm,,liver、spleen、lung
+Herb_78,青皮,Qingpi,CITRI  RETICULATAE  PERICARPIUM  VIRIDE,"Citrus reticulata Blanco",regulating qi,bitter、pungent,warm,,liver、gallbladder、stomach
+Herb_79,川楝子,Chuanlianzi,TOOSENDAN  FRUCTUS,"Melia toosendan Sieb.et Zucc.",clearing away heat,bitter,warm,slightly toxic,liver、small intestine、bladder
+Herb_80,蔓荆子,Manjingzi,VITICIS  FRUCTUS,"Vitex trifolia L.Var. simplicifolia Cham. | Vitex trifolia L.",diaphoresis relieving superficies,pungent、bitter,warm,,bladder、liver、stomach
+Herb_81,薄荷,Bohe,MENTHAE HAPLOCALYCIS HERBA,"Mentha haplocalyx Briq.",diaphoresis relieving superficies,pungent,warm,,lung、liver
+Herb_82,柴胡,Chaihu,BUPLEURI RADIX,"Bupleurum chinense DC. | Bupleurum scorzonerifolium Willd.",diaphoresis relieving superficies,pungent、bitter,cold,,liver、gallbladder、lung
+Herb_83,薤白,Xiebai,ALLII  MACROSTEMONIS  BULBUS,"Allium macrostemon Bge. | Allium chinense G.Don",activating blood flow and removing blood stasis,pungent、bitter,warm,,heart、lung、stomach、large intestine
+Herb_84,韭菜子,Jiucaizi,ALLII TUBEROSI SEMEN,"Allium tuberosum Rottl.ex Spreng.",restoring vital energy,pungent、sweetish,warm,,liver、kidney
+Herb_85,艾叶,Aiye,ARTEMISIAE ARGYI FOLIUM,"Artemisia argyi levl. et Vant.",wenli,pungent、bitter,warm,slightly toxic,liver、spleen、kidney
+Herb_86,炮姜,Paojiang,ZINGIBERIS RHIZOMA PRAEPARATUM,"Zingiber officinale Rosc.",wenli,pungent,warm,,spleen、stomach、kidney
+Herb_87,补骨脂,Buguzhi,PSORALEAE FRUCTUS,"Psoralea corylifolia L.",wenli,pungent、bitter,warm,,kidney、spleen
+Herb_88,高良姜,Gaoliangjiang,ALPINIAE OFFICINARUM RHIZOMA,"Alpinia officinarum Hance",wenli,pungent,warm,,spleen、stomach
+Herb_89,八角茴香,Bajiaohuixiang,ANISI STELLATI FRUCTUS,"Illicium verum Hook.f.",diaphoresis relieving superficies,pungent,warm,,liver、kidney、spleen、stomach
+Herb_90,丁香,Dingxiang,CARYOPHYLLI FLOS,"Eugenia caryophyllata Thunb.",wenli,pungent,warm,,spleen、stomach、lung、kidney
+Herb_91,干姜,Ganjiang,ZINGIBERIS RHIZOMA,"Zingiber officinale Rosc.",wenli,pungent,warm,,spleen、stomach、kidney、heart、lung
+Herb_92,胡椒,Hujiao,PIPERIS FRUCTUS,"Piper nigrum L.",wenli,pungent,warm,,stomach、large intestine
+Herb_93,荜茇,Bibo,PIPERIS  LONGI  FRUCTUS,"Piper longum L.",wenli,pungent,warm,,stomach、large intestine
+Herb_94,荜澄茄,Bichengqie,LITSEAE  FRUCTUS,"Litsea cubeba (Lour.) Pers.",wenli,pungent,warm,,spleen、stomach、kidney、bladder
+Herb_95,肉豆蔻,Roudoukou,MYRISTICAE  SEMEN,"Myristica fragrans Houtt.",wenli,pungent,warm,,spleen、stomach、large intestine
+Herb_96,花椒,Huajiao,ZANTHOXYLI PERICARPIUM,"Zanthoxylum schinifolium Sieb. et Zucc. | Zanthoxylum bungeanum Maxim.",wenli,pungent,warm,,spleen、stomach、kidney
+Herb_97,玫瑰花,Meiguihua,ROSAE  RUGOSAE FLOS,"Rosa rugosa Thunb.",regulating qi,sweetish、bitter,warm,,liver、spleen
+Herb_98,莪术,Ezhu,CURCUMAE RHIZOMA,"Curcuma phaeocaulis Val. | Curcuma kwangsiensis S.G.Lee et C.F.Liang | Curcuma wenyujin Y.H.Chen et C.Ling | Curcuma longa L.",regulating qi,pungent、bitter,warm,,liver、spleen
+Herb_99,檀香,Tanxiang,SANTALI ALBI LIGNUM,"Santalum album L.",regulating qi,pungent,warm,,spleen、stomach、heart、lung
+Herb_100,山柰,Shannai,KAEMPFERIAE RHIZOMA,"Kaempferia galanga L.",regulating qi,pungent,warm,,stomach
+Herb_102,九里香,Jiulixiang,MURRAYAE FOLIUM ET CACUMEN,"Murraya exotica L. | Murraya paniculata(L.)Jack",regulating qi,pungent、bitter,warm,slightly toxic,liver、stomach
+Herb_103,木香,Muxiang,AUCKLANDIAE RADIX,"Aucklandia lappa Decne.",regulating qi,pungent、bitter,warm,,spleen、stomach、large intestine、Triple Energizer、gallbladder
+Herb_104,乌药,Wuyao,LINDERAE RADIX,"Lindera aggregata (Sims) Kosterm.",regulating qi,pungent,warm,,lung、spleen、kidney、bladder
+Herb_105,沉香,Chenxiang,AQUILARIAE LIGNUM RESINATUM,"Aquilaria sinensis (Lour.) Gilg",regulating qi,pungent、bitter,warm,,spleen、stomach、kidney
+Herb_106,刺五加,Ciwujia,ACANTHOPANACIS  SENTICOSI  RADIX  ET  RHIZOMA  SEU  CAULIS,"Acanthopanax senticosus (Rupr. et Maxim.) Harms",dissipating dampness,pungent、bitter,warm,,spleen、kidney、heart
+Herb_107,苍术,Cangzhu,ATRACTYLODIS RHIZOMA,"Atractylodes lancea (Thunb.) DC. | Atractylodes chinensis (DC.) Koidz.",dissipating dampness,pungent、bitter,warm,,spleen、stomach、liver
+Herb_108,蛇床子,Shechuangzi,CNIDII FRUCTUS,"Cnidium monnieri (L.) Cuss.",curing rheumatism,pungent、bitter,warm,slightly toxic,kidney
+Herb_109,草果,Caoguo,TSAOKO  FRUCTUS,"Amomum tsao-ko Crevost et Lemaire",wenli,pungent,warm,,spleen、stomach
+Herb_110,厚朴,Houpo,MAGNOLIAE OFFICINALIS CORTEX,"Magnolia officinalis Rehd. et Wils. | Magnolia officinalis Rehd. et Wils. var. biloba Rehd. et W ils.",phlegm-eliminating cough-relieving and asthma-relieving,bitter、pungent,warm,,spleen、stomach、lung、large intestine
+Herb_111,草豆蔻,Caodoukou,ALPINIAE  KATSUMADAI  SEMEN,"Alpinia katsumadai Hayata",regulating qi,pungent,warm,,spleen、stomach
+Herb_112,蒲黄,Puhuang,TYPHAE POLLEN,"Typha angustifolia L. | Typha orientalis Presl",hemostasis,sweetish,warm,,liver、Pericardium
+Herb_113,芫荽,Yansui,,"Coriandrum sativum L.",diaphoresis relieving superficies,pungent,warm,,lung、spleen
+Herb_114,油松节,Yousongjie,PINI LIGNUM NODI,"Pinus tabulieformis Carr. | Pinus massoniana Lamb.",curing rheumatism,bitter、pungent,warm,,liver、kidney
+Herb_115,黑胡椒,Hujiɑo,PIPERIS FRUCTUS,"Piper nigrum L.",wenli,pungent,hot,,stomach、large intestine
+Herb_116,白芥子,Jiezi,SINAPIS SEMEN,"Sinapis alba L. | Brassica juncea (L.) Czern. et Coss.",regulating qi,pungent,warm,,lung
+Herb_117,天然冰片（右旋龙脑）,Tiɑnrɑnbingpiɑn,BORNEOLUM,"Cinnamomum camphora (h.) Pres",inducing resuscitation,pungent、bitter,cool,,heartheart、spleen、lung
+Herb_118,艾片（左旋龙脑）,Aipiɑn,l-BORNEOLUM,"Blumea balsamifera (L.) DC",inducing resuscitation,pungent、bitter,cold,,heartheart、spleen、lung
+Herb_119,葱白,Congbai,Fistular Onion Stalk,"Allium fislulosum L.",diaphoresis relieving superficies,pungent,warm,,lung、stomach
+Herb_120,菥蓂,Ximing,THLASPI HERBA,"Thlaspi arvense L.",clearing away heat,pungent,cold,,heartliver、stomach、large intestine。
+Herb_121,绵马贯众,Miɑnmɑguɑnzhong,DRYOPTERIDIS CRASSIRHIZOMATIS RHIZOMA,"Dryopteris crassirhizoma Nakai",clearing away heat,bitter,cold,,heartliver、stomach
+Herb_122,九香虫,Jiuxiɑngchong,CORIDIUS,"Aspongopus chinensis Dallas",regulating qi,salty,warm,,heartliver、spleen、kidney

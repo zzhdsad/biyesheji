@@ -1,0 +1,13 @@
+DATASET AromaTCM_herb_basic.csv id=c077d2e26eae type=herb limit=124
+JOB_CREATED id=54edf59a-46b6-410f-95a6-bac07161092e batch=06fb6c30d1e749bd total=124
+JOB_STARTED
+  poll status=processing processed=100/124 ok=0 skip=100 failed=0
+  poll status=processing processed=105/124 ok=5 skip=100 failed=0
+  poll status=processing processed=105/124 ok=5 skip=100 failed=0
+  poll status=processing processed=115/124 ok=15 skip=100 failed=0
+  poll status=processing processed=115/124 ok=15 skip=100 failed=0
+  poll status=processing processed=120/124 ok=20 skip=100 failed=0
+  poll status=processing processed=120/124 ok=20 skip=100 failed=0
+  poll status=completed processed=124/124 ok=24 skip=100 failed=0
+ERROR_MSG: 
+CHECK processed==ok+skip+failed ? 124 == 24+100+0 = True

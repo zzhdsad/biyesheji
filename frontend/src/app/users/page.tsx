@@ -46,6 +46,7 @@ import {
   enableUser,
   fetchTrashUsers,
   fetchUsersPage,
+  purgeAllUserTrash,
   purgeUser,
   resetUserPassword,
   restoreUser,
@@ -76,7 +77,7 @@ interface UserFormValues {
 type TabKey = 'active' | 'trash';
 
 export default function UsersPage() {
-  const { message } = App.useApp();
+  const { message, modal } = App.useApp();
 
   const [tab, setTab] = useState<TabKey>('active');
   const [users, setUsers] = useState<UserOut[]>([]);
@@ -349,6 +350,53 @@ export default function UsersPage() {
     }
   };
 
+  /**
+   * 一键清空回收站：前端二次确认，后端仍会再次校验 admin 权限，
+   * 且只处理**已在回收站**的用户（活跃用户、当前管理员、最后一个管理员不受影响）。
+   * 单条失败只记录原因并继续（后端 savepoint 隔离），不会出现半完成状态。
+   */
+  const [purgingAll, setPurgingAll] = useState(false);
+  const onPurgeAllTrash = () => {
+    modal.confirm({
+      title: '确认一键清空用户回收站？',
+      okText: '确认清空',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      content: (
+        <div>
+          <p>
+            将彻底删除回收站中的 <b>{trashUsers.length}</b> 个用户，<b>不可恢复</b>。
+          </p>
+          <Typography.Text type="secondary">
+            活跃用户、当前登录管理员与最后一个管理员不会被删除；单条失败会在结果中列出。
+          </Typography.Text>
+        </div>
+      ),
+      onOk: async () => {
+        setPurgingAll(true);
+        try {
+          const res = await purgeAllUserTrash();
+          const failed = res.failed?.length ?? 0;
+          if (failed) {
+            message.warning(
+              `已彻底删除 ${res.purged ?? 0} 个，失败 ${failed} 个：${res.failed?.[0]?.reason ?? ''}`,
+            );
+          } else {
+            message.success(res.message ?? `已彻底删除 ${res.purged ?? 0} 个用户`);
+          }
+          setTrashSelectedRowKeys([]);
+          await loadTrash();
+        } catch (e) {
+          const detail = (e as { response?: { data?: { detail?: string } } })?.response?.data
+            ?.detail;
+          message.error(detail ?? '清空失败');
+        } finally {
+          setPurgingAll(false);
+        }
+      },
+    });
+  };
+
   // ── 导入 ──
   const handleImport: UploadProps['beforeUpload'] = async (file) => {
     setImporting(true);
@@ -541,6 +589,18 @@ export default function UsersPage() {
                   message="回收站说明"
                   description="删除用户后将在此保留 7 天，期间可恢复；超过 7 天将自动彻底删除。"
                 />
+                <Space style={{ marginBottom: 12 }}>
+                  {/* 一键清空回收站：前端二次确认 + 后端权限/安全复核 */}
+                  <Button
+                    danger
+                    icon={<DeleteOutlined />}
+                    loading={purgingAll}
+                    disabled={trashUsers.length === 0}
+                    onClick={onPurgeAllTrash}
+                  >
+                    一键清空回收站{trashUsers.length ? `（${trashUsers.length}）` : ''}
+                  </Button>
+                </Space>
                 {trashSelectedRowKeys.length > 0 && (
                   <Space style={{ marginBottom: 12 }}>
                     <span style={{ color: '#666' }}>

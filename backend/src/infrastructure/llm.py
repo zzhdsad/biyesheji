@@ -1,4 +1,4 @@
-"""大模型客户端抽象：OpenAI 兼容接口（vLLM/Qwen）/ mock 可切换（依赖倒置）。
+"""大模型客户端抽象：OpenAI 兼容接口（vLLM/Qwen/DeepSeek/Ollama 等）（依赖倒置）。
 
 TECH_DESIGN：LLM 通过 vLLM 提供 OpenAI 兼容接口，AWQ 4bit 量化部署。
 支持流式生成（stream=True）供 SSE 端点逐 chunk 推送答案。
@@ -106,7 +106,10 @@ class OpenAICompatibleLLM(BaseLLM):
 
 
 class MockLLM(BaseLLM):
-    """确定性假回答（开发/测试）：验证 RAG 流程而不依赖真实模型。
+    """确定性假回答：**仅供单元测试/前端联调**（不依赖真实模型服务）。
+
+    生产环境不可选：``get_llm`` 不再提供 mock 分支；旧库残留的 mock 配置
+    会被 ModelConfigService 规范化为真实 OpenAI 兼容后端。
 
     行为与防幻觉约束一致：有参考资料时生成带 [citation: 编号, 页码] 标注的回答；
     无资料时明确回答"不知道"。
@@ -152,7 +155,10 @@ def get_llm(config: dict | None = None) -> BaseLLM:
         config: 运行时配置（来自 DB），含 llm_base_url/llm_model/llm_api_key；
                 为 None 时回退到 .env 环境变量。
     """
-    backend = (config or {}).get("llm_provider") or settings.LLM_BACKEND
+    backend = ((config or {}).get("llm_provider") or settings.LLM_BACKEND).lower()
+    # 仅测试/环境级逃生舱：产品已不提供 mock 选项（见 ModelConfigService.normalize_backends）
+    if backend == "mock":
+        return MockLLM()
     # deepseek/openai/qwen/ollama/custom 都走 OpenAI 兼容协议
     if backend in ("openai", "deepseek", "qwen", "ollama", "custom"):
         return OpenAICompatibleLLM(
@@ -160,6 +166,4 @@ def get_llm(config: dict | None = None) -> BaseLLM:
             model=(config or {}).get("llm_model"),
             api_key=(config or {}).get("llm_api_key"),
         )
-    if backend == "mock":
-        return MockLLM()
     raise LLMError(f"未知 LLM_BACKEND：{backend}")

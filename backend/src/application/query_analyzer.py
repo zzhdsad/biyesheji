@@ -36,10 +36,11 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from loguru import logger
 
+from src.application.entity_resolver import EntityResolutionResult
 from src.application.evidence import RESOURCE_TYPE_LABELS
 from src.application.question_types import (
     DEFAULT_QUESTION_TYPE,
@@ -79,6 +80,22 @@ _STRONG_SIGNALS: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# ── 强信号正则（补固定词表无法枚举的问法）────────────────────────────────
+# 例："广藿香归哪些经？" 不含连续的"归经"二字，固定词表命中不了，会被误判为
+# general 而走 Baseline（recall=10），资源被大量古籍 chunk 挤出候选集。
+# 这里只加**语义唯一**的问法模式，不做"出现药名就判 herb"的脆弱匹配。
+_STRONG_PATTERNS: dict[str, tuple[str, ...]] = {
+    "herb": (
+        r"归[^。？?]{0,8}经",  # 归哪些经 / 归入哪几条经
+        r"入[^。？?]{0,8}经",  # 入哪经
+    ),
+    "prescription": (
+        r"由(哪些|什么)药物?组成",
+        r"组成(是|有哪些|为什么)",
+    ),
+}
+
+
 _WEAK_SIGNALS: dict[str, tuple[str, ...]] = {
     "herb": ("单味", "药对", "采收", "草药", "主治"),
     "prescription": ("主治", "煎法", "服法", "汤剂"),
@@ -91,6 +108,9 @@ _OUT_OF_DOMAIN_SIGNALS: tuple[str, ...] = (
     "西医", "现代医学", "股票", "基金", "房价", "天气", "编程", "代码", "足球", "篮球",
     "电影", "游戏", "明星", "娱乐", "汇率", "外卖", "快递", "旅游", "星座", "彩票",
     "手机", "电脑", "汽车", "保险", "贷款",
+    # 信息技术类：这类问题没有中医资源线索，且"量子/神经网络"等词容易被
+    # 药名实体正则误命中（如"量子"被当作 X子 类药名）而错误收窄检索范围
+    "量子", "计算机", "神经网络", "人工智能", "深度学习", "区块链",
 )
 
 # ── 实体候选词表（轻量规则：仅按"名称"匹配，不解释医学含义）────────────────
@@ -260,6 +280,100 @@ def analysis_from_dict(raw: dict, query: str = "") -> QueryAnalysis:
     )
 
 
+# ── 阶段十六：依据「资源名称消歧」事实校正分析结果 ───────────────────────────
+
+
+def _entity_feature(result: EntityResolutionResult | None) -> dict:
+    """结构化调试信息：matched / resource_type / resource_id / resource_name / ambiguous。"""
+    if result is None:
+        return {
+            "matched": False,
+            "resource_type": None,
+            "resource_id": None,
+            "resource_name": None,
+            "matched_text": None,
+            "match_kind": None,
+            "alias_hit": False,
+            "ambiguous": False,
+            "candidate_types": [],
+            "candidate_count": 0,
+            "entity_texts": [],
+            "reason": "entity_resolution_unavailable",
+        }
+    return result.to_feature()
+
+
+def _annotate(
+    analysis: QueryAnalysis, result: EntityResolutionResult | None, note: str, *, applied: bool
+) -> QueryAnalysis:
+    feature = {**_entity_feature(result), "applied": applied, "note": note}
+    features = dict(analysis.features or {})
+    features["entity_match"] = feature
+    return replace(analysis, features=features)
+
+
+def apply_entity_resolution(
+    analysis: QueryAnalysis,
+    result: EntityResolutionResult | None,
+) -> QueryAnalysis:
+    """用「已存在的资源名称」这一事实校正 question_type / resource_types。
+
+    优先级（严格按此顺序，禁止通用关键词盖过已确认的实体）：
+    1. 消歧不可用 / 未命中名称 → **完全保持**原 Analyzer 结果
+    2. 域外话题（unanswerable 候选）→ 不覆盖（避免把无关问题的检索收窄）
+    3. 同名跨资源类型（ambiguous）→ 不覆盖，仅记录
+    4. 唯一确定 → question_type = 该资源类型，resource_types = [该类型]
+       （"功效""主治"等通用词不再覆盖已确认的实体类型）
+
+    本函数只做结构化改写：不改判据（是否拒答仍由 Evidence Gate 决定）、
+    不碰检索参数（top_k / rerank / HyDE / Dense-Sparse 权重）。
+    任何异常都返回原 analysis，Analyzer / Router 不因此失败。
+    """
+    try:
+        if not isinstance(analysis, QueryAnalysis):
+            return analysis
+        if result is None or not getattr(result, "matched", False):
+            return _annotate(analysis, result, "entity_not_matched", applied=False)
+        if analysis.is_unanswerable_candidate:
+            return _annotate(analysis, result, "not_applied_unanswerable", applied=False)
+        if getattr(result, "ambiguous", False):
+            return _annotate(analysis, result, "not_applied_ambiguous", applied=False)
+        # 多个并列命名实体（"金银花在《本草纲目》中…"）→ 属于既有 multi_source
+        # 语义，不能被最长名覆盖成单一类型（保留 Analyzer 的多来源结论）。
+        # 同名干扰（theories 中存在名为"功效"的资源）不计入实体。
+        entity_texts = [
+            t
+            for t in (getattr(result, "entity_texts", ()) or ())
+            if t and t not in _GENERIC_SIGNAL_TERMS
+        ]
+        if len(entity_texts) >= 2:
+            return _annotate(analysis, result, "not_applied_multiple_entities", applied=False)
+
+        rtype = result.resource_type
+        if rtype not in RESOURCE_TYPES or rtype not in QUESTION_TYPES:
+            return _annotate(analysis, result, "not_applied_unknown_type", applied=False)
+
+        # 只校正类型，不额外注入 entities：Dynamic Router 的 kg_enhanced 分支由
+        # 实体个数触发，注入实体会把"某方剂的功效"这类单实体属性查询误判为
+        # 关系型查询，从而覆盖掉本应生效的聚焦策略（Router 规则保持原样不变）。
+        corrected = replace(
+            analysis,
+            question_type=rtype,
+            question_type_label=QUESTION_TYPE_LABELS.get(rtype, rtype),
+            resource_types=[rtype],
+            is_multi_source=False,
+        )
+        out = _annotate(corrected, result, "entity_type_applied", applied=True)
+        logger.info(
+            f"实体消歧覆盖：{analysis.question_type} → {rtype} "
+            f"名称={result.resource_name} kind={result.match_kind}"
+        )
+        return out
+    except Exception as exc:  # noqa: BLE001 - 消歧绝不能让 Analyzer 失败
+        logger.warning(f"实体消歧结果应用失败（沿用 Analyzer 结果）: {exc}")
+        return analysis
+
+
 # ── 规则分析内部实现 ────────────────────────────────────────────────────────
 
 
@@ -274,6 +388,17 @@ def _all_known_terms() -> tuple[str, ...]:
 
 
 _KNOWN_TERMS: tuple[str, ...] = _all_known_terms()
+
+# 受控词表内的**已知实体名**（区别于"X子/XX汤"等启发式后缀命中）：
+# 用于判断一个问题是否真的包含可靠实体依据，避免仅靠启发式把无关问题判成资源类.
+_KNOWN_ENTITIES: frozenset[str] = (
+    frozenset(_KNOWN_BOOKS) | frozenset(_KNOWN_HERBS) | frozenset(_KNOWN_THEORY_TERMS)
+)
+
+# 「信号词」与实体名的差集：资源表里存在与通用词同名的条目（如 theories 中有
+# 一条名为"功效"的资源），这类同名不能被当作命名实体使用，否则每个"功效"问句
+# 都会被判成"多实体"而失效。
+_GENERIC_SIGNAL_TERMS: frozenset[str] = frozenset(_KNOWN_TERMS) - _KNOWN_ENTITIES
 
 
 def _extract_entities(query: str) -> list[dict]:
@@ -347,6 +472,9 @@ def _signal_scores(query: str, entities: list[dict]) -> dict[str, int]:
         for term in _WEAK_SIGNALS.get(rtype, ()):
             if term in query:
                 scores[rtype] += 1
+        for pattern in _STRONG_PATTERNS.get(rtype, ()):
+            if re.search(pattern, query):
+                scores[rtype] += 2
     for e in entities:
         rtype = e.get("type")
         if rtype in scores:
@@ -409,6 +537,19 @@ def _decide(
         question_type = "unanswerable"
     else:
         question_type = DEFAULT_QUESTION_TYPE
+
+    # 域外话题（如"量子计算…"）可能被**启发式后缀规则**误命中成某个资源类型
+    # （"量子"被当作 X子 类药名）。判据：
+    #  - 问题中确实出现了受控词表内的已知实体（金银花 / 黄帝内经 / 阴阳…）
+    #    → 保留类型结论，仅标记 unanswerable 候选（既有行为）；
+    #  - 否则（只有启发式命中） → 不猜类型：清空 resource_types，
+    #    Dynamic Router 回落 Baseline 通用混合检索。
+    # 是否拒答仍由既有 Relevance Gate / Evidence Gate 决定，此处不改判据。
+    if out_of_domain and not any(
+        e.get("text") in _KNOWN_ENTITIES for e in entities
+    ):
+        question_type = "unanswerable"
+        active = []
 
     features = {
         "query_length": len(query.strip()),

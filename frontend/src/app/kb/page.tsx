@@ -32,6 +32,7 @@ import { createKb, deleteKb, fetchKnowledgeBases, updateKb } from '@/services/ap
 import { useChatStore } from '@/stores/chatStore';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
+import KbRecycleBin from '@/components/admin/KbRecycleBin';
 // BUG-059：窗口渲染，避免一次性渲染上千张卡片阻塞主线程
 import { KB_WINDOW_SIZE, clampVisibleCount, nextVisibleCount } from '@/utils/pagination';
 
@@ -149,6 +150,8 @@ export default function KBPage() {
       <Button icon={<ReloadOutlined />} onClick={() => void loadKbs()}>
         刷新
       </Button>
+      {/* 批量删除 + 回收站（恢复 / 彻底删除 / 一键清空） */}
+      <KbRecycleBin onChanged={() => void loadKbs()} />
       <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>
         创建知识库
       </Button>
@@ -205,7 +208,7 @@ export default function KBPage() {
                     <Popconfirm
                       key="delete"
                       title="确认删除该知识库？"
-                      description="将同时级联删除其下所有文档、切片与向量数据，不可恢复。"
+                      description="将移入回收站（保留期内可恢复）；在回收站中彻底删除才会清理文档、切片与向量。"
                       okText="删除"
                       okButtonProps={{ danger: true }}
                       cancelText="取消"

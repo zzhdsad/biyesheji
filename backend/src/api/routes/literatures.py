@@ -22,6 +22,7 @@ from sqlalchemy import exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.api.routes.resource_trash import register_resource_trash_routes
 from src.application.audit_service import AuditService
 from src.core.deps import get_client_ip
 from src.core.exceptions import AppException
@@ -224,12 +225,20 @@ def _array_ilike(column, pattern: str):
     return exists().where(item.ilike(pattern))
 
 
+# 「未填写分类」哨兵值：前端 TreeSelect 虚拟节点值 __none__（与中药模块同口径）
+UNCATEGORIZED_VALUE = "__none__"
+UNCATEGORIZED_VALUES = frozenset({"__none__", "none", "null", "uncategorized"})
+
+
 def _build_conditions(
     keyword: str | None,
     category_id: uuid.UUID | None,
     tag_id: uuid.UUID | None,
+    uncategorized: bool = False,
 ) -> list:
-    conditions: list = []
+    conditions: list = [Literature.deleted_at.is_(None)]
+    if uncategorized:
+        conditions.append(Literature.category_id.is_(None))
     if keyword:
         pattern = f"%{keyword.strip()}%"
         conditions.append(
@@ -255,14 +264,29 @@ def _build_conditions(
 @router.get("", response_model=LiteratureListResponse)
 async def list_literatures(
     keyword: str | None = None,
-    category_id: uuid.UUID | None = None,
+    category_id: str | None = None,
     tag_id: uuid.UUID | None = None,
+    uncategorized: bool = False,
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     db: AsyncSession = Depends(get_db),
 ):
-    """文献列表：关键词搜索 + 分类/标签筛选 + 分页（created_at DESC, id DESC）。"""
-    conditions = _build_conditions(keyword, category_id, tag_id)
+    """文献列表：关键词搜索 + 分类/标签筛选 + 分页（created_at DESC, id DESC）。
+
+    ``uncategorized=true`` 或 ``category_id=__none__``（前端「未填写分类」
+    哨兵值）→ 只返回 category_id IS NULL。
+    """
+    cat_uuid: uuid.UUID | None = None
+    if category_id:
+        raw = category_id.strip()
+        if raw.lower() in UNCATEGORIZED_VALUES:
+            uncategorized = True
+        else:
+            try:
+                cat_uuid = uuid.UUID(raw)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="category_id 不是合法 UUID") from exc
+    conditions = _build_conditions(keyword, cat_uuid, tag_id, uncategorized)
 
     total = await db.scalar(
         select(func.count()).select_from(Literature).where(*conditions)
@@ -288,9 +312,9 @@ async def get_literature(
     literature_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
 ):
-    """文献详情；不存在 404。"""
+    """文献详情；不存在 404（回收站中的文献视为不存在）。"""
     literature = await db.get(Literature, literature_id)
-    if literature is None:
+    if literature is None or literature.deleted_at is not None:
         raise HTTPException(status_code=404, detail="文献不存在")
     return _literature_to_out(literature)
 
@@ -450,47 +474,30 @@ async def update_literature(
     return _literature_to_out(stored)
 
 
-@router.delete("/{literature_id}", status_code=204)
+@router.delete("/{literature_id}")
 async def delete_literature(
     literature_id: uuid.UUID,
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """删除文献（仅 admin）；literature_tags 关联随 DB CASCADE 自动清理。
+    """删除文献 → 移入回收站（软删除，仅 admin）。
 
-    Stage 4-6：删除前清理所有 KBR 关联及 Milvus vectors。
+    彻底删除（清理 KB 挂载 + Milvus 向量 + KG 节点）只在回收站 purge 时执行。
     """
+    from src.application import trash_service
+
     user = request.state.user
     if user.role != "admin":
         raise AppException(403, "仅管理员可管理文献")
 
     literature = await db.get(Literature, literature_id)
-    if literature is None:
+    if literature is None or literature.deleted_at is not None:
         raise HTTPException(status_code=404, detail="文献不存在")
 
-    # Stage 4-6：删除资源前清理 KBR + 向量（失败则阻止删除）
-    try:
-        from src.application.resource_vector_service import ResourceVectorService
-        svc = ResourceVectorService()
-        await svc.cleanup_resource_mounts(db, "literature", literature.id)
-    except Exception as exc:
-        raise AppException(
-            422, f"资源向量清理失败，无法删除：{exc}"
-        ) from exc
-
-    # BUG-009：同步清理该资源的知识图谱节点（边随 FK CASCADE 删除）
-    try:
-        from src.application.kg_service import KgService
-        await KgService(db).delete_resource_nodes("literature", literature.id)
-    except Exception as exc:
-        import logging
-        logging.getLogger(__name__).error(
-            f"literature KG 节点清理失败 id={literature.id}: {exc}",
-            exc_info=True,
-        )
-
-    await db.delete(literature)
-    await db.flush()
+    moved = await trash_service.soft_delete_many(db, Literature, [literature_id])
+    if not moved:
+        raise HTTPException(status_code=404, detail="文献不存在")
+    await db.commit()
 
     audit = AuditService(db)
     await audit.log(
@@ -499,6 +506,19 @@ async def delete_literature(
         operation="delete",
         target_type="literature",
         target_id=str(literature.id),
-        detail={"name": literature.name},
+        detail={"name": literature.name, "retention_days": trash_service.retention_days()},
         ip=_get_client_ip(request),
     )
+    days = trash_service.retention_days()
+    return {"id": str(literature_id), "deleted": True, "message": f"已移入回收站，{days} 天内可恢复"}
+
+
+# ── 回收站生命周期（批量删除 / 恢复 / 彻底删除 / 一键清空）─────────────────
+
+register_resource_trash_routes(
+    router,
+    model=Literature,
+    resource_type="literature",
+    label="文献",
+    serialize=_literature_to_out,
+)

@@ -34,6 +34,7 @@ import {
   ExperimentOutlined,
   FileTextOutlined,
   HistoryOutlined,
+  ImportOutlined,
   LogoutOutlined,
   MedicineBoxOutlined,
   MessageOutlined,
@@ -85,10 +86,43 @@ const NAV_ITEMS: Required<MenuProps>['items'] = [
       { key: '/evaluation', icon: <ExperimentOutlined />, label: '评估面板' },
       { key: '/admin', icon: <DashboardOutlined />, label: '系统仪表盘' },
       { key: '/audit', icon: <AuditOutlined />, label: '审计日志' },
+      { key: '/admin/import', icon: <ImportOutlined />, label: '数据导入中心' },
       { key: '/settings', icon: <ControlOutlined />, label: '系统设置' },
     ],
   },
 ];
+
+/**
+ * 侧边栏可被选中的路由 key（自动从 NAV_ITEMS 展开，**不含分组节点**）。
+ * 新增菜单项时无需再改任何匹配逻辑——匹配完全由数据结构推导。
+ */
+export const NAV_ROUTE_KEYS: string[] = (NAV_ITEMS ?? [])
+  .flatMap((item) =>
+    item && 'children' in item && Array.isArray(item.children) ? item.children : [item],
+  )
+  .map((item) => String((item as { key?: string })?.key ?? ''))
+  .filter((key) => key && key !== 'admin-group');
+
+/**
+ * 统一路由匹配：**最长前缀命中**。
+ *
+ * BUG 修复：此前是一串 `pathname.startsWith('/xxx')` 的 if-else，`/admin`
+ * 排在 `/admin/import` 之前，导致进入「数据导入中心」时高亮的是「系统仪表盘」；
+ * 同时 `/taxonomy` 根本没有分支，分类与标签页永远不高亮。
+ * 这里改为按菜单 key 做最长前缀匹配，子路由（/admin/import/xxx）也会保持
+ * 父级菜单高亮，且不写死任何页面名称。
+ */
+export function matchNavKey(pathname: string | null | undefined): string {
+  const path = (pathname || '/').replace(/\/+$/, '') || '/';
+  let best = '';
+  for (const key of NAV_ROUTE_KEYS) {
+    const candidate = key.replace(/\/+$/, '');
+    if (candidate && (path === candidate || path.startsWith(`${candidate}/`))) {
+      if (candidate.length > best.length) best = candidate;
+    }
+  }
+  return best || 'chat';
+}
 
 /** 右上角系统状态指示器：postgres/redis/milvus 全 ok 则绿，否则红。 */
 function SystemStatus() {
@@ -203,21 +237,8 @@ export function AppSider() {
     }
   };
 
-  // 当前在哪个管理页？（用于高亮主导航的选中子项）
-  const selectedNavKeys: string[] = (() => {
-    if (pathname.startsWith('/kb')) return ['/kb'];
-    if (pathname.startsWith('/herbs')) return ['/herbs'];
-    if (pathname.startsWith('/prescriptions')) return ['/prescriptions'];
-    if (pathname.startsWith('/theories')) return ['/theories'];
-    if (pathname.startsWith('/literatures')) return ['/literatures'];
-    if (pathname.startsWith('/documents')) return ['/documents'];
-    if (pathname.startsWith('/users')) return ['/users'];
-    if (pathname.startsWith('/evaluation')) return ['/evaluation'];
-    if (pathname.startsWith('/admin')) return ['/admin'];
-    if (pathname.startsWith('/audit')) return ['/audit'];
-    if (pathname.startsWith('/settings')) return ['/settings'];
-    return ['chat'];
-  })();
+  // 当前在哪个管理页？（统一最长前缀匹配，见 matchNavKey 注释）
+  const selectedNavKeys: string[] = [matchNavKey(pathname)];
 
   return (
     <Sider

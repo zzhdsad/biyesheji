@@ -1,0 +1,40 @@
+======================================================================
+Q: 丹参有什么功效？
+  hits=6 kinds={'resource': 2, 'document': 4} dense=5 sparse=0 rerank=6
+  top=['资源', '塘医话.txt', '资源', '普济本事方.txt', '塘医话.txt']
+  best_dense=0.6872 best_rerank=0.9827
+  evidence=5
+  gate=accept reason=multiple_medium_evidence
+  elapsed=395.1s reflection=None
+  citations=[]
+  ANSWER: 根据现有资料，我无法回答该问题。知识库中未找到与您问题直接相关的内容，请尝试更换提问方式，或确认知识库中已包含相关文档。
+======================================================================
+Q: 郁金的性味是什么？
+  hits=6 kinds={'resource': 5, 'document': 1} dense=4 sparse=0 rerank=6
+  top=['资源', '资源', '肘后备急方.txt', '资源', '资源']
+  best_dense=0.6936 best_rerank=0.9913
+  evidence=4
+  gate=accept reason=multiple_medium_evidence
+  elapsed=367.6s reflection=accept
+  citations=['[citation: 1, 0]']
+  ANSWER: 根据现有资料，郁金的性味记载为：四气：warm；五味：pungent、bitter [citation: 1, 0]。
+======================================================================
+Q: 广藿香归哪些经？
+  hits=3 kinds={'resource': 3} dense=0 sparse=0 rerank=3
+  top=['资源', '资源', '资源']
+  best_dense=0.0000 best_rerank=0.9873
+  evidence=1
+  gate=accept reason=has_high_evidence
+  elapsed=104.1s reflection=accept
+  citations=[]
+  ANSWER: 根据现有资料，我无法回答该问题。知识库中未找到与您问题直接相关的内容，请尝试更换提问方式，或确认知识库中已包含相关文档。
+======================================================================
+Q: 量子计算机如何用Python训练神经网络？
+  hits=6 kinds={'document': 6} dense=4 sparse=0 rerank=6
+  top=['褚氏遗书.txt', '普济本事方.txt', '严氏济生方.txt', '普济本事方.txt', '褚氏遗书.txt']
+  best_dense=0.3300 best_rerank=0.0011
+  evidence=0
+  gate=insufficient reason=no_evidence
+  elapsed=373.1s reflection=accept
+  citations=[]
+  ANSWER: 根据现有资料，我无法回答该问题。当前检索到的证据不足以支撑可靠回答（已换用其他检索策略重试仍未获得充分证据），请补充相关资料或调整提问方式。

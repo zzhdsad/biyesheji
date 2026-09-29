@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
 from src.core.exceptions import AppException, NotFoundError, PermissionDeniedError
+from src.core.runtime_config import get_system_value
 from src.core.source_meta import (
     credibility_for,
     is_valid_era,
@@ -69,11 +70,14 @@ class DocumentService:
 
         # 2. 大小校验（先落盘到临时文件，read 进内存判断；超大文件分片上传见 PRD 8）
         content = await file.read()
-        max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
+        # BUG：原先直接读 settings（.env），后台"文件大小限制"改了不生效；
+        # 现统一走运行时入口：DB 值优先，回落 .env 默认值。
+        max_mb = int(get_system_value("max_file_size_mb"))
+        max_bytes = max_mb * 1024 * 1024
         if len(content) == 0:
             raise AppException(400, "文件为空")
         if len(content) > max_bytes:
-            raise AppException(400, f"文件超过 {settings.MAX_FILE_SIZE_MB}MB 限制")
+            raise AppException(400, f"文件超过 {max_mb}MB 限制")
 
         # 3. 知识库存在性校验：kb_id 是检索隔离与越权防护的关键字段
         kb = await self.db.get(KnowledgeBase, kb_id)

@@ -88,12 +88,15 @@ def _force_mock_model_config(monkeypatch):
     import src.application.model_config_service as mcs
 
     async def _mock_cached(db):
-        return {
-            "llm_provider": "mock",
-            "llm_base_url": "",
-            "llm_model": "mock",
-            "llm_api_key": "",
-            "embedding_backend": "mock",
+        # 产品已移除 mock 选项（DB 默认值 / API 校验 / 前端选项均无 mock），工厂仅保留
+        # 环境级 mock 逃生舱供测试使用；同时必须给出非空的 base_url/model，
+        # 否则 /chat 会因 BUSINESS_RULES §10「模型未配置」返回 503。
+            return {
+                "llm_provider": "mock",
+                "llm_base_url": "http://mock-llm.invalid/v1",
+                "llm_model": "mock-model",
+                "llm_api_key": "mock-key",
+                "embedding_backend": "mock",
             "embedding_model": "mock",
             "embedding_device": "cpu",
             "rerank_backend": "mock",
@@ -111,6 +114,11 @@ def _force_mock_model_config(monkeypatch):
     monkeypatch.setattr(mcs, "get_effective_config_cached", _mock_cached)
     import src.application.rag_service as rag_mod
     monkeypatch.setattr(rag_mod, "get_effective_config_cached", _mock_cached)
+    # indexing_service 同样是 `from ... import` 绑定：不 patch 的话向量化会走真实
+    # BGE-M3（下载/加载 2.3GB），既拖慢测试又依赖外网。
+    import src.application.indexing_service as index_mod
+
+    monkeypatch.setattr(index_mod, "get_effective_config_cached", _mock_cached)
     yield
     mcs._config_cache = None
 

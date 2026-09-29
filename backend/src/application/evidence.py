@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import hashlib
 
-from src.core.config import settings
+from src.core.runtime_config import get_system_value
 
 # ── 来源类别（已有概念，Stage 4-4 引入，继续复用）────────────────────────────
 SOURCE_KIND_DOCUMENT = "document"
@@ -75,8 +75,33 @@ def evidence_level(score: float) -> str:
 
 
 def hit_score(hit: dict) -> float:
-    """取命中分数：rerank_score 优先，回退 score（与既有 Citation 逻辑一致）。"""
+    """取命中**展示**分数：rerank_score 优先，回退 score（与既有 Citation 逻辑一致）。"""
     return float(hit.get("rerank_score", hit.get("score", 0.0)) or 0.0)
+
+
+def relevance_score(hit: dict) -> float | None:
+    """取"语义相关度"分数，用于相关性门槛与证据分级（与 RELEVANCE_THRESHOLD 同量纲）。
+
+    为什么不能直接用 hit_score（reranker sigmoid）去比 0.35 / 0.3 / 0.7：
+    这三个阈值是为 **BGE-M3 稠密余弦相似度**设计的（见 rag_service._is_relevant）。
+    BGE-Reranker-v2-m3 的 normalize=True 输出是 sigmoid 分数，量纲与分布完全不同
+    （相关但非精确匹配的段落常常只有 0.1~0.4）。用 reranker 分数去卡余弦阈值，
+    会把 dense 0.5+ 的明显相关段落判成"证据不足"——这是"知识库明明有数据却拒答"
+    的直接原因之一。
+
+    取值顺序：
+    - 向量命中（Document / Resource）：dense_score（COSINE，同量纲）
+    - KG 命中：沿用既有行为（BUG-064：dense_score 被复用为实体匹配分，量纲不同），
+      取 rerank_score / score
+    - 都没有 → None（相关度未知，调用方**不得**按 0 静默丢弃）
+    """
+    if hit.get("source_kind") == SOURCE_KIND_KG:
+        raw = hit.get("rerank_score", hit.get("score"))
+        return float(raw) if raw is not None else None
+    raw = hit.get("dense_score")
+    if raw is None:
+        raw = hit.get("rerank_score", hit.get("score"))
+    return float(raw) if raw is not None else None
 
 
 def is_resource_hit(hit: dict) -> bool:
@@ -112,6 +137,9 @@ def hit_to_evidence(hit: dict, source_index: int) -> dict:
         Evidence dict：旧 Citation 字段 + 统一 Evidence 字段。
     """
     score = hit_score(hit)
+    # 证据分级用"语义相关度"（与阈值同量纲），展示分数仍用 hit_score（兼容 Citation）
+    rel = relevance_score(hit)
+    level_score = rel if rel is not None else score
     is_kg = hit.get("source_kind") == SOURCE_KIND_KG
     is_resource = is_resource_hit(hit) or is_kg
     source_kind = (
@@ -172,7 +200,9 @@ def hit_to_evidence(hit: dict, source_index: int) -> dict:
         "source_name": source_name,
         "source_label": source_label,
         "evidence_text": content,
-        "evidence_level": evidence_level(score),
+        "evidence_level": evidence_level(level_score),
+        # 相关性门槛 / 分级实际依据的分数（dense COSINE；便于排障与前端调试）
+        "relevance_score": rel,
         # ── 阶段十四：KG 证据的关系属性（可选）───────────────────────────
         # Evidence Gate 需要按「关系类型 + 跳数 + 来源」判断 KG 证据可信度，
         # 不能只依赖 score（KG score 是实体匹配分，不是向量相似度）。
@@ -200,10 +230,10 @@ def displayable_hits(hits: list[dict]) -> list[dict]:
     注意：**缺少分数字段的命中视为相关度未知，不做静默丢弃**（按 0 处理会
     把这类命中整体过滤掉，与既有行为不兼容）；只有明确低于阈值的才过滤。
     """
-    threshold = settings.RELEVANCE_THRESHOLD
+    threshold = float(get_system_value("relevance_threshold"))
     displayable: list[dict] = []
     for h in hits:
-        raw = h.get("rerank_score", h.get("score", None))
+        raw = relevance_score(h)
         if raw is None:
             displayable.append(h)
             continue

@@ -49,6 +49,7 @@ from src.application.retrieval_strategies import (
     strategy_out,
 )
 from src.core.config import settings
+from src.core.runtime_config import get_system_value
 from src.core.exceptions import AppException, NotFoundError
 from src.domain.models import EvaluationResult, EvaluationRun, TestCase
 
@@ -798,10 +799,11 @@ class EvaluationService:
             "runtime": runtime,
             # 旧结构保留（全局配置），便于与阶段九/十历史快照对比
             "retrieval": {
-                "recall_top_k": settings.RECALL_TOP_K,
-                "rerank_top_n": settings.RERANK_TOP_N,
+                # 记录本次真正生效的值（后台配置可覆盖 .env）
+                "recall_top_k": int(get_system_value("recall_top_k")),
+                "rerank_top_n": int(get_system_value("rerank_top_n")),
                 "rrf_k": settings.RRF_K,
-                "relevance_threshold": settings.RELEVANCE_THRESHOLD,
+                "relevance_threshold": float(get_system_value("relevance_threshold")),
                 "hyde_enabled": settings.HYDE_ENABLED,
             },
             # 阶段十二：本次实际生效的策略参数（strategy=None 时即 Baseline 全局值）

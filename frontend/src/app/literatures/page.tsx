@@ -32,6 +32,7 @@ import {
 } from '@ant-design/icons';
 import type { Category, Literature, Tag } from '@/types';
 import {
+  batchDeleteResources,
   createLiterature,
   deleteLiterature,
   fetchCategories,
@@ -42,12 +43,16 @@ import {
 } from '@/services/api';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
+import ResourceRecycleBin from '@/components/admin/ResourceRecycleBin';
 import { useUserStore } from '@/stores/userStore';
 import { useRequestSeq } from '@/hooks/useRequestSeq';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_ALIASES = 20;
+
+/** 「未填写分类」哨兵值（后端解析为 category_id IS NULL）。 */
+const UNCATEGORIZED_VALUE = '__none__';
 const MAX_TAGS = 20;
 
 // ── 工具 ──────────────────────────────────────────────────────────────────────
@@ -138,6 +143,8 @@ export default function LiteraturesPage() {
   const [editTarget, setEditTarget] = useState<Literature | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [form] = Form.useForm<LiteratureFormValues>();
+  // 批量选择（批量删除 → 回收站）
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
 
   // ── 数据加载 ──────────────────────────────────────────────────────────────
 
@@ -338,10 +345,26 @@ export default function LiteraturesPage() {
     }
   };
 
+  /** 批量删除：选中项移入回收站（后端二次校验 admin，保留期内可恢复）。 */
+  const onBatchDelete = async () => {
+    if (selectedRowKeys.length === 0) return;
+    try {
+      const res = await batchDeleteResources('literature', selectedRowKeys as string[]);
+      message.success(res.message ?? `已移入回收站 ${res.success ?? 0} 条`);
+      if (res.failed?.length) {
+        message.warning(`${res.failed.length} 条失败：${res.failed[0].reason}`);
+      }
+      setSelectedRowKeys([]);
+      await loadLiteratures();
+    } catch (err) {
+      message.error(pickErrorMessage(err, '批量删除失败'));
+    }
+  };
+
   const onDelete = async (literature: Literature) => {
     try {
       await deleteLiterature(literature.id);
-      message.success(`文献「${literature.name}」已删除`);
+      message.success(`文献「${literature.name}」已移入回收站`);
       // 若当前页只剩这一条且非首页，回退一页
       if (literatures.length === 1 && current > 1) {
         setCurrent(current - 1);
@@ -482,6 +505,24 @@ export default function LiteraturesPage() {
         刷新
       </Button>
       {isAdmin && (
+        <Popconfirm
+          title={`确认删除选中的 ${selectedRowKeys.length} 条文献？`}
+          description="将移入回收站，保留期内可恢复。"
+          okText="移入回收站"
+          cancelText="取消"
+          onConfirm={() => void onBatchDelete()}
+        >
+          <Button danger icon={<DeleteOutlined />} disabled={selectedRowKeys.length === 0}>
+            批量删除{selectedRowKeys.length ? `（${selectedRowKeys.length}）` : ''}
+          </Button>
+        </Popconfirm>
+      )}
+      <ResourceRecycleBin
+        resourceType="literature"
+        label="文献"
+        onChanged={() => void loadLiteratures()}
+      />
+      {isAdmin && (
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
           新增文献
         </Button>
@@ -541,7 +582,10 @@ export default function LiteraturesPage() {
             placeholder="按分类筛选"
             allowClear
             style={{ width: 220 }}
-            treeData={toTreeSelectData(categoryTree)}
+            treeData={[
+              { title: '未填写分类', value: UNCATEGORIZED_VALUE },
+              ...toTreeSelectData(categoryTree),
+            ]}
             treeDefaultExpandAll
             value={categoryId}
             onChange={(v) => setCategoryId(v ?? undefined)}
@@ -568,6 +612,11 @@ export default function LiteraturesPage() {
         columns={columns}
         dataSource={literatures}
         loading={loading}
+        rowSelection={
+          isAdmin
+            ? { selectedRowKeys, onChange: (keys) => setSelectedRowKeys(keys) }
+            : undefined
+        }
         scroll={{ x: 1200 }}
         locale={{ emptyText: '暂无文献数据' }}
         pagination={{

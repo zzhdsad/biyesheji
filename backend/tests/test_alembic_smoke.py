@@ -54,6 +54,8 @@ EXPECTED_TABLES = {
     # TASK-013
     "kg_nodes",
     "kg_edges",
+    # BGE-M3 切换体验优化：批量重新向量化任务表
+    "revectorize_jobs",
 }
 
 SMOKE_DB_NAME = "knowledge_platform_alembic_smoke"

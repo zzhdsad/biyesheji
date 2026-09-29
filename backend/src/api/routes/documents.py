@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.document_service import DocumentService
 from src.core.config import settings
+from src.core.runtime_config import get_system_value
 from src.core.deps import (
     KB_WRITE_ROLES,
     get_accessible_kb_ids,
@@ -381,8 +382,8 @@ async def delete_document(
 
     doc.deleted_at = utcnow()
     await db.commit()
-    # BUG-069：天数跟随 settings.TRASH_RETENTION_DAYS，不再写死 7 天
-    days = settings.TRASH_RETENTION_DAYS
+    # BUG-069：天数统一由运行时配置决定（DB 覆盖 .env），不再读固定的 settings
+    days = int(get_system_value("trash_retention_days"))
     return {"id": str(doc_id), "deleted": True, "message": f"已移入回收站，{days}天内可恢复"}
 
 
@@ -393,7 +394,6 @@ async def list_trash_documents(
 ) -> list[Document]:
     """回收站文档列表（仅 admin，自动清理过期项）。"""
     from datetime import timedelta
-    from src.core.config import settings as cfg
 
     user: User = request.state.user
     if user.role != "admin":
@@ -401,7 +401,7 @@ async def list_trash_documents(
         raise PermissionDeniedError("仅管理员可查看回收站")
 
     # 清理过期项
-    cutoff = utcnow() - timedelta(days=cfg.TRASH_RETENTION_DAYS)
+    cutoff = utcnow() - timedelta(days=int(get_system_value("trash_retention_days")))
     expired = (await db.scalars(select(Document).where(Document.deleted_at < cutoff))).all()
     for d in expired:
         await db.delete(d)

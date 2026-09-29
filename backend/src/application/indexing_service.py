@@ -22,6 +22,7 @@ from src.infrastructure.milvus_store import (
     get_vector_store,
 )
 from src.application.model_config_service import get_effective_config_cached
+from src.application.vector_model import key_from_config
 
 
 class IndexingService:
@@ -37,6 +38,9 @@ class IndexingService:
         self.embedding = embedding
         self.store = store or get_vector_store()
         self._config_loaded = False
+        # 本次向量化使用的 embedding 模型标识（`backend:model`），成功后写入
+        # documents.vector_model 与 Milvus 动态字段，供"模型切换后识别旧向量"用。
+        self.model_key: str = ""
 
     async def _ensure_embedding(self) -> None:
         if self._config_loaded:
@@ -45,6 +49,10 @@ class IndexingService:
         if self.embedding is None:
             cfg = await get_effective_config_cached(self.db)
             self.embedding = get_embedding(cfg)
+            self.model_key = key_from_config(cfg)
+        else:
+            # 注入实现（测试/资源向量化场景）：回退到 env 配置推导标识
+            self.model_key = key_from_config(None)
 
     async def run(self, doc_id: uuid.UUID) -> Document:
         """向量化指定文档的全部切片并写入 Milvus。
@@ -92,6 +100,8 @@ class IndexingService:
 
         doc.parse_status = "completed"
         doc.error_message = ""
+        # 记录"该文档当前向量由哪个模型生成"（切换模型后可据此识别旧向量）
+        doc.vector_model = self.model_key
         await self.db.commit()
         await self.db.refresh(doc)
 
@@ -123,6 +133,7 @@ class IndexingService:
                         sparse_vector=sv,
                         source_type=chunk.source_type,
                         credibility_level=chunk.credibility_level,
+                        embedding_model=self.model_key or None,
                     )
                 )
         return rows

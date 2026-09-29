@@ -1,0 +1,10 @@
+==============================================================================
+Q: 黄芪有什么功效？
+  hits=6 有dense分=5 best_dense=0.6222 best_rerank=0.5743
+  displayable(修复后)=5 evidence=5
+  _is_relevant=True
+  gate=accept reason=multiple_medium_evidence evidence=5 accepted=5
+  ANSWER: 根据现有资料，我无法回答该问题。
+  citations/evidence: 5 -> ['严氏济生方.txt', '普济本事方.txt', 'TCM_pretrain_book_corpus.json-16371.txt', '肘后备急方.txt', '肘后备急方.txt']
+==============================================================================
+Q: 四君子汤由哪些药组成？

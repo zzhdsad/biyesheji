@@ -1,0 +1,62 @@
+==========================================================================
+[A-中药] Q: 丹参有什么功效？
+ Analyzer: qtype=herb rtypes=['herb'] keywords=['丹参', '功效'] entities=[None]
+ Router  : strategy=herb_focused filter={'resource_types': ['herb'], 'include_document': True, 'enabled': True} recall=60 rerank_top=6 hyde=True
+ Retrieve: hyde=ON(ok=True) dense=60{'resource': 10, 'document': 50} sparse=60{'document': 59, 'resource': 1} rrf[60, 60]->60 rerank 60->6
+ Result  : hits=6 {'resource': 4, 'document': 2} best_dense=0.7805 best_rerank=0.9827 evidence=6 gate=accept/has_high_evidence citations=6
+ Sources : ['丹参', '肘后备急方.txt', '云南丹参', '资源', '三对叶丹参', '严氏济生方.txt']
+ ANSWER  : 根据现有资料，丹参的功效为活血化瘀（activating blood flow and removing blood stasis）[citation: 1, 0]。丹参的性味为四气：cold，五味：bitter [citation: 1, 0]；归经为heart、liver [citation: 1, 0]。丹参的别名包括丹参酮、酒丹参、紫丹参 [citation: 1, 0]。《肘后备急方》中记载，以丹参一两，杵为散，每服热酒调下二钱匕 [citation: 2, 0]。现有资料中关于丹参功效的记载较为简略，仅明确列出「活血化瘀」一项 [citation: 1, 0]。
+==========================================================================
+[A-中药] Q: 广藿香归哪些经？
+ Analyzer: qtype=herb rtypes=['herb'] keywords=['广藿香归'] entities=[]
+ Router  : strategy=herb_focused filter={'resource_types': ['herb'], 'include_document': True, 'enabled': True} recall=60 rerank_top=6 hyde=True
+ Retrieve: hyde=ON(ok=True) dense=60{'resource': 8, 'document': 52} sparse=60{'document': 59, 'resource': 1} rrf[60, 60]->60 rerank 60->6
+ Result  : hits=6 {'resource': 4, 'document': 2} best_dense=0.7842 best_rerank=0.9873 evidence=6 gate=accept/has_high_evidence citations=2
+ Sources : ['广藿香', '八角茴香', '九里香', '小茴香', '严氏济生方.txt', '严氏济生方.txt']
+ ANSWER  : 广藿香归脾、胃、肺三经 [citation: 1, 0]。
+
+具体来说，其归经记载为 spleen（脾）、stomach（胃）、lung（肺）[citation: 1, 0]。
+==========================================================================
+[A-中药] Q: 郁金的性味是什么？
+ Analyzer: qtype=herb rtypes=['herb'] keywords=['性味', '郁金'] entities=[]
+ Router  : strategy=herb_focused filter={'resource_types': ['herb'], 'include_document': True, 'enabled': True} recall=60 rerank_top=6 hyde=True
+ Retrieve: hyde=ON(ok=True) dense=60{'resource': 16, 'document': 44} sparse=60{'document': 59, 'resource': 1} rrf[60, 60]->60 rerank 60->6
+ Result  : hits=6 {'resource': 6} best_dense=0.8168 best_rerank=0.9913 evidence=6 gate=accept/has_high_evidence citations=1
+ Sources : ['郁金', '佩兰', '广藿香', '乳香', '九香虫', '乌药']
+ ANSWER  : 郁金的性味为：四气属温，五味属辛、苦 [citation: 1, 0]。
+==========================================================================
+[B-方剂] Q: 沉香曲的功效与主治是什么？
+ Analyzer: qtype=herb rtypes=['herb'] keywords=['沉香', '功效', '主治'] entities=[None]
+ Router  : strategy=herb_focused filter={'resource_types': ['herb'], 'include_document': True, 'enabled': True} recall=60 rerank_top=6 hyde=True
+ Retrieve: hyde=ON(ok=True) dense=60{'resource': 17, 'document': 43} sparse=60{'document': 60} rrf[60, 60]->60 rerank 60->6
+ Result  : hits=5 {'document': 3, 'resource': 2} best_dense=0.6218 best_rerank=0.0502 evidence=5 gate=accept/multiple_medium_evidence citations=3
+ Sources : ['普济本事方.txt', '广藿香', '乳香', '严氏济生方.txt', '普济本事方.txt']
+ ANSWER  : 根据现有资料，我无法回答该问题。
+
+参考资料中虽然出现了「沉香」和「曲」（如神曲、半夏曲）等字样，但均未涉及「沉香曲」这一药物，也没有关于其功效与主治的记载。资料中出现的相关方剂（如含沉香的沉附汤、砂丸等）与「沉香曲」并非同一药物，不能作为依据 [citation: 1, 0][citation: 4, 0][citation: 5, 0]。
+==========================================================================
+[C-理论] Q: 三因学说是什么？
+ Analyzer: qtype=theory rtypes=['theory'] keywords=['学说', '三因'] entities=[]
+ Router  : strategy=theory_focused filter={'resource_types': ['theory'], 'include_document': True, 'enabled': True} recall=40 rerank_top=None hyde=True
+ Retrieve: hyde=ON(ok=True) dense=40{'resource': 12, 'document': 28} sparse=40{'resource': 3, 'document': 37} rrf[40, 40]->40 rerank 40->3
+ Result  : hits=3 {'resource': 2, 'document': 1} best_dense=0.6840 best_rerank=0.9687 evidence=3 gate=accept/multiple_medium_evidence citations=0
+ Sources : ['三因学说', '三因', '塘医话.txt']
+ ANSWER  : 根据现有资料，我无法回答该问题。
+==========================================================================
+[D-古籍] Q: 《严氏济生方》主要记载了什么内容？
+ Analyzer: qtype=literature rtypes=['literature'] keywords=['严氏济生方', '记载', '主要', '内容'] entities=[None]
+ Router  : strategy=literature_focused filter={'resource_types': ['literature'], 'include_document': True, 'enabled': True} recall=None rerank_top=6 hyde=False
+ Retrieve: hyde=OFF(ok=None) dense=10{'document': 10} sparse=10{'document': 10} rrf[10, 10]->10 rerank 10->6
+ Result  : hits=6 {'document': 6} best_dense=0.6539 best_rerank=0.7243 evidence=3 gate=accept/multiple_medium_evidence citations=4
+ Sources : ['严氏济生方.txt', '孙真人海上方.txt', '辅行诀脏腑用药法要.txt', '肘后备急方.txt', '普济本事方.txt', '肘后备急方.txt']
+ ANSWER  : 《严氏济生方》作者为严用和，朝代题为宋·宝元，年份为公元1253年 [citation: 1, 0]。据原序一，严用和幼年喜读书，十二岁受学于复真刘先生之门，后因考虑到世变有古今之殊、风土有燥湿之异、人禀亦有浓薄之不齐，概执古方以疗今病往往不相入，遂采集古人可用之方，汇集所学已试之效，疏其论治，犁为条类，名曰济生方 [citation: 1, 0]。据原序二，其论治凡八十，制方凡四百，总为十卷 [citation: 1, 0]。书中设有“五脏门”等门类，其下包含“肝胆虚实论治”等内容，并载有柏子仁汤等方剂及其主治、药物组成、炮制与煎服法 [citation: 1, 0]。
+==========================================================================
+[E-无关] Q: 量子计算机如何用Python训练神经网络？
+ Analyzer: qtype=herb rtypes=['herb'] keywords=['量子', '计算机', '用Python训练神经网络'] entities=[None]
+ Router  : strategy=herb_focused filter={'resource_types': ['herb'], 'include_document': True, 'enabled': True} recall=60 rerank_top=6 hyde=True
+ Retrieve: hyde=ON(ok=True) dense=60{'resource': 41, 'document': 19} sparse=60{'document': 55, 'resource': 5} rrf[60, 60]->60 rerank 60->6
+ Result  : hits=6 {'document': 6} best_dense=0.3714 best_rerank=0.0013 evidence=1 gate=accept/single_medium_evidence citations=1
+ Sources : ['褚氏遗书.txt', '褚氏遗书.txt', '普济本事方.txt', '褚氏遗书.txt', '严氏济生方.txt', '严氏济生方.txt']
+ ANSWER  : 根据现有资料，我无法回答该问题。
+
+参考资料为宋代中医古籍《严氏济生方》的内容，涉及皂角丸、地肤子汤、通草汤等方剂，用于治疗大便秘结、淋证、小便不通等症 [citation: 1, 0]，与量子计算机、Python、神经网络训练等主题完全无关，因此无法据此作答。

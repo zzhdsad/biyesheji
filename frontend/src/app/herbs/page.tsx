@@ -31,6 +31,7 @@ import {
 } from '@ant-design/icons';
 import type { Category, Herb, Tag } from '@/types';
 import {
+  batchDeleteResources,
   createHerb,
   deleteHerb,
   fetchCategories,
@@ -40,11 +41,18 @@ import {
 } from '@/services/api';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
+import ResourceRecycleBin from '@/components/admin/ResourceRecycleBin';
 import { useUserStore } from '@/stores/userStore';
 import { useRequestSeq } from '@/hooks/useRequestSeq';
 
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
+
+/**
+ * 「未填写分类」哨兵值：TreeSelect 的虚拟节点值，提交给后端后解析为
+ * `category_id IS NULL`（与后端 UNCATEGORIZED_VALUES 保持一致）。
+ */
+const UNCATEGORIZED_VALUE = '__none__';
 
 // ── 工具 ──────────────────────────────────────────────────────────────────────
 
@@ -136,6 +144,8 @@ export default function HerbsPage() {
   const [modalMode, setModalMode] = useState<ModalMode>('create');
   const [editTarget, setEditTarget] = useState<Herb | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  // 批量选择（批量删除 → 回收站）
+  const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [form] = Form.useForm<HerbFormValues>();
 
   // ── 数据加载 ──────────────────────────────────────────────────────────────
@@ -314,10 +324,26 @@ export default function HerbsPage() {
     }
   };
 
+  /** 批量删除：选中项移入回收站（后端二次校验 admin，保留期内可恢复）。 */
+  const onBatchDelete = async () => {
+    if (selectedRowKeys.length === 0) return;
+    try {
+      const res = await batchDeleteResources('herb', selectedRowKeys as string[]);
+      message.success(res.message ?? `已移入回收站 ${res.success ?? 0} 条`);
+      if (res.failed?.length) {
+        message.warning(`${res.failed.length} 条失败：${res.failed[0].reason}`);
+      }
+      setSelectedRowKeys([]);
+      await loadHerbs();
+    } catch (err) {
+      message.error(pickErrorMessage(err, '批量删除失败'));
+    }
+  };
+
   const onDelete = async (herb: Herb) => {
     try {
       await deleteHerb(herb.id);
-      message.success(`中药「${herb.name}」已删除`);
+      message.success(`中药「${herb.name}」已移入回收站`);
       // 若当前页只剩这一条且非首页，回退一页
       if (herbs.length === 1 && current > 1) {
         setCurrent(current - 1);
@@ -445,6 +471,21 @@ export default function HerbsPage() {
         刷新
       </Button>
       {isAdmin && (
+        <Popconfirm
+          title={`确认删除选中的 ${selectedRowKeys.length} 条中药？`}
+          description="将移入回收站，保留期内可恢复。"
+          okText="移入回收站"
+          cancelText="取消"
+          onConfirm={() => void onBatchDelete()}
+        >
+          <Button danger icon={<DeleteOutlined />} disabled={selectedRowKeys.length === 0}>
+            批量删除{selectedRowKeys.length ? `（${selectedRowKeys.length}）` : ''}
+          </Button>
+        </Popconfirm>
+      )}
+      {/* 回收站：恢复 / 彻底删除 / 一键清空（权限由后端二次校验） */}
+      <ResourceRecycleBin resourceType="herb" label="中药" onChanged={() => void loadHerbs()} />
+      {isAdmin && (
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>
           新建中药
         </Button>
@@ -504,7 +545,11 @@ export default function HerbsPage() {
             placeholder="按分类筛选"
             allowClear
             style={{ width: 220 }}
-            treeData={toTreeSelectData(categoryTree)}
+            treeData={[
+              // 「未填写分类」虚拟节点：后端收到 __none__ 时按 category_id IS NULL 过滤
+              { title: '未填写分类', value: UNCATEGORIZED_VALUE },
+              ...toTreeSelectData(categoryTree),
+            ]}
             treeDefaultExpandAll
             value={categoryId}
             onChange={(v) => setCategoryId(v ?? undefined)}
@@ -531,6 +576,14 @@ export default function HerbsPage() {
         columns={columns}
         dataSource={herbs}
         loading={loading}
+        rowSelection={
+          isAdmin
+            ? {
+                selectedRowKeys,
+                onChange: (keys) => setSelectedRowKeys(keys),
+              }
+            : undefined
+        }
         scroll={{ x: 1400 }}
         locale={{ emptyText: '暂无中药数据' }}
         pagination={{

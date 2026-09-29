@@ -28,8 +28,11 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.config import settings
-from src.core.deps import require_admin
+from loguru import logger
+
+from src.application.audit_service import AuditService
+from src.core.runtime_config import get_system_value
+from src.core.deps import get_client_ip, require_admin
 from src.core.exceptions import PermissionDeniedError
 from src.core.security import generate_random_password, hash_password
 from src.domain.models import User
@@ -41,7 +44,7 @@ router = APIRouter(prefix="/users", tags=["users"])
 ALLOWED_ROLES = {"admin", "member", "viewer"}
 CSV_HEADERS = ["username", "name", "department", "email", "role"]
 
-# BUG-069：回收站保留天数**统一读 settings.TRASH_RETENTION_DAYS**（1-30 天可配），
+# BUG-069：回收站保留天数**统一读运行时配置**（1-30 天可配，后台改完即生效），
 # 不再在本模块写死 7 天——否则通过 /settings/system 把保留期改成 3 天后，
 # 用户模块的清理时机与"X 天内可恢复"提示仍按旧口径输出。
 # 注意：必须在**函数内**读取，import 时固化成常量等于换了个地方写死。
@@ -131,7 +134,7 @@ class BatchDeleteResult(BaseModel):
     success: int
     # BUG-069：文案跟随配置（default_factory 每次实例化时求值，避免 import 期固化）
     message: str = Field(
-        default_factory=lambda: f"已移入回收站，{settings.TRASH_RETENTION_DAYS} 天内可恢复"
+        default_factory=lambda: f"已移入回收站，{get_system_value('trash_retention_days')} 天内可恢复"
     )
 
 
@@ -152,6 +155,11 @@ def _require_admin(request: Request) -> User:
     （返回值被用于"操作者 = 当前管理员"的场景）。
     """
     return require_admin(request, "仅管理员可操作用户")
+
+
+def _get_client_ip(request: Request) -> str:
+    """审计用客户端 IP（实现统一到 src.core.deps.get_client_ip，BUG-072）。"""
+    return get_client_ip(request)
 
 
 async def _get_active_user(db: AsyncSession, user_id: uuid.UUID) -> User | None:
@@ -189,8 +197,8 @@ async def _ensure_admin_kept(
 
 
 async def _purge_expired_trash(db: AsyncSession) -> None:
-    """清理回收站中超过保留期的用户（硬删除，保留天数见 settings.TRASH_RETENTION_DAYS）。"""
-    cutoff = utcnow() - timedelta(days=settings.TRASH_RETENTION_DAYS)
+    """清理回收站中超过保留期的用户（硬删除，保留天数取自运行时配置）。"""
+    cutoff = utcnow() - timedelta(days=int(get_system_value("trash_retention_days")))
     expired = (
         await db.scalars(
             select(User).where(User.deleted_at < cutoff)
@@ -313,7 +321,7 @@ async def delete_user(
 
     user.deleted_at = utcnow()
     await db.commit()
-    days = settings.TRASH_RETENTION_DAYS
+    days = int(get_system_value("trash_retention_days"))
     return {"message": f"用户已移入回收站，{days} 天内可恢复"}
 
 
@@ -588,6 +596,66 @@ async def purge_user(
     await db.delete(user)
     await db.commit()
     return {"message": f"用户 {username} 已彻底删除，不可恢复"}
+
+
+@router.delete("/trash/purge-all")
+async def purge_all_trash(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """一键清空用户回收站（仅 admin）：彻底删除回收站中的全部用户。
+
+    安全约束（后端二次校验，不依赖前端确认）：
+    - 仅 admin 可操作；
+    - 只处理**已在回收站**的用户，活跃用户（含当前登录管理员、最后一个管理员）
+      不受影响；
+    - 单条失败（外键引用等）只记录原因并继续其余记录（savepoint 隔离），
+      不会出现"删了一半且事务未决"的中间态；
+    - 全过程写审计日志。
+
+    注：路由为 ``/trash/purge-all``，先于 ``/{user_id}/*`` 之外，不会与
+    ``DELETE /{user_id}/purge`` 冲突。
+    """
+    current = _require_admin(request)
+
+    rows = list(
+        (await db.scalars(select(User).where(User.deleted_at.isnot(None)))).all()
+    )
+    purged: list[str] = []
+    failed: list[dict[str, str]] = []
+    for user in rows:
+        uid = user.id
+        username = user.username
+        if uid == current.id:  # 兜底：当前管理员即便在回收站也不被清空
+            failed.append({"id": str(uid), "reason": "不能删除当前登录管理员"})
+            continue
+        try:
+            async with db.begin_nested():
+                await db.delete(user)
+                await db.flush()
+            purged.append(str(uid))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"清空回收站：用户 {username} 彻底删除失败: {exc}")
+            failed.append({"id": str(uid), "reason": str(exc)[:200]})
+
+    if purged:
+        await db.commit()
+
+    audit = AuditService(db)
+    await audit.log(
+        operator_id=current.id,
+        operator_name=current.username,
+        operation="purge_all_trash",
+        target_type="user",
+        target_id="",
+        detail={"purged": len(purged), "failed": len(failed)},
+        ip=_get_client_ip(request),
+    )
+    return {
+        "purged": len(purged),
+        "failed": failed,
+        "message": f"已彻底删除 {len(purged)} 个用户，失败 {len(failed)} 个",
+    }
 
 
 # ── 导入 / 模板（不变） ────────────────────────────────────────────────────

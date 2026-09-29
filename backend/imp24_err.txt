@@ -1,0 +1,13 @@
+[32m2026-09-28 16:12:28.059[0m | [1mINFO    [0m | [36msrc.application.dataset_scanner[0m:[36mscan_source_dir[0m:[36m838[0m - [1m数据源扫描完成：1 个数据集，跳过 0 项[0m
+[32m2026-09-28 16:12:28.243[0m | [1mINFO    [0m | [36msrc.application.dataset_scanner[0m:[36mscan_source_dir[0m:[36m838[0m - [1m数据源扫描完成：1 个数据集，跳过 0 项[0m
+[32m2026-09-28 16:12:28.263[0m | [1mINFO    [0m | [36msrc.application.import_service[0m:[36mcreate_job[0m:[36m527[0m - [1m创建导入任务 job_id=54edf59a-46b6-410f-95a6-bac07161092e batch=06fb6c30d1e749bd dataset=c077d2e26eae type=herb limit=124 vectorize=True[0m
+[32m2026-09-28 16:12:28.328[0m | [1mINFO    [0m | [36msrc.application.dataset_scanner[0m:[36mscan_source_dir[0m:[36m838[0m - [1m数据源扫描完成：1 个数据集，跳过 0 项[0m
+[32m2026-09-28 16:12:39.121[0m | [1mINFO    [0m | [36msrc.infrastructure.embedding[0m:[36m__init__[0m:[36m57[0m - [1m加载 BGE-M3 模型（device=cpu, model=C:\bi ye she ji\backend\prebuilt-models\bge-m3）…[0m
+Loading weights:   0%|          | 0/391 [00:00<?, ?it/s]Loading weights: 100%|██████████| 391/391 [00:00<00:00, 18009.81it/s]
+C:\bi ye she ji\backend\venv\Lib\site-packages\pymilvus\client\__init__.py:6: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import DistributionNotFound, get_distribution
+[32m2026-09-28 16:12:47.096[0m | [33m[1mWARNING [0m | [36msrc.infrastructure.milvus_store[0m:[36mreplace_doc[0m:[36m129[0m - [33m[1m向量替换后条数不一致 doc_id=756906a29f3183c84832cb8d1e96e5df245e753776c62661acb7c0915cc59411，回退为清旧写新[0m
+[32m2026-09-28 16:13:07.066[0m | [33m[1mWARNING [0m | [36msrc.infrastructure.milvus_store[0m:[36mreplace_doc[0m:[36m129[0m - [33m[1m向量替换后条数不一致 doc_id=fd246616002398a1db9c2dc33a7fc21904226136f07dc9490c6ee842d8a93bee，回退为清旧写新[0m
+[32m2026-09-28 16:13:29.266[0m | [33m[1mWARNING [0m | [36msrc.infrastructure.milvus_store[0m:[36mreplace_doc[0m:[36m129[0m - [33m[1m向量替换后条数不一致 doc_id=b1e95d3bdfcf89c805a43971d4034dbcfa90c790bc7bbe9aaab58baaf08210d9，回退为清旧写新[0m
+[32m2026-09-28 16:14:48.843[0m | [33m[1mWARNING [0m | [36msrc.infrastructure.milvus_store[0m:[36mreplace_doc[0m:[36m129[0m - [33m[1m向量替换后条数不一致 doc_id=ff769a9f91805bf9602f41df1d6e31260e47cad30985f7ac0c7b60aed8bfeaa5，回退为清旧写新[0m
+[32m2026-09-28 16:14:59.416[0m | [1mINFO    [0m | [36msrc.application.import_service[0m:[36m_execute[0m:[36m717[0m - [1m导入任务结束 job_id=54edf59a-46b6-410f-95a6-bac07161092e status=completed total=124 succeeded=24 skipped=100 failed=0 enriched=19[0m

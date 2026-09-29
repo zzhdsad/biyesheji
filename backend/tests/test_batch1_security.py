@@ -203,14 +203,14 @@ def test_model_config_update_requires_admin(auth_client):
 
     resp = auth_client.put(
         "/api/v1/settings/model",
-        json={"llm_provider": "mock"},
+        json={"llm_provider": "openai"},
         headers=member_h,
     )
     assert resp.status_code == 403
 
     resp = auth_client.put(
         "/api/v1/settings/model",
-        json={"llm_provider": "mock"},
+        json={"llm_provider": "openai"},
         headers={"Authorization": f"Bearer {admin}"},
     )
     assert resp.status_code == 200

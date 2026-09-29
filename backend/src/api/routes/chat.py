@@ -275,17 +275,11 @@ class MessageOut(BaseModel):
 
 
 async def _check_model_configured(db: AsyncSession) -> None:
-    """BUSINESS_RULES §10：模型未配置时禁止提问。
-
-    mock 模式允许（开发/测试）；非 mock 模式必须有 base_url 和 model。
-    """
+    """BUSINESS_RULES §10：模型未配置时禁止提问（必须有 base_url 和 model）。"""
     from src.application.model_config_service import get_effective_config_cached
     from src.core.exceptions import AppException
 
     config = await get_effective_config_cached(db)
-    provider = config.get("llm_provider", "mock")
-    if provider == "mock":
-        return  # mock 模式视为已配置（开发/测试用）
     base_url = config.get("llm_base_url", "")
     model = config.get("llm_model", "")
     if not base_url or not model:

@@ -30,7 +30,11 @@ def test_get_hyde_disabled_returns_none(monkeypatch):
 
 
 def test_get_hyde_enabled_mock(monkeypatch):
-    """HYDE_ENABLED + mock 后端 → 返回 MockHyDE 实例。"""
+    """HYDE_ENABLED + mock 后端 → MockHyDE（环境级逃生舱，仅供测试）。
+
+    产品侧不存在 mock：DB 默认值 / API 校验 / 前端选项均为 openai，
+    存量 mock 配置由 ModelConfigService.normalize_backends 规范化。
+    """
     monkeypatch.setattr(settings, "HYDE_ENABLED", True)
     monkeypatch.setattr(settings, "HYDE_BACKEND", "mock")
     hyde.set_hyde(None)
@@ -53,13 +57,15 @@ def test_get_hyde_enabled_openai_returns_qwen_hyde(monkeypatch):
 # ---------- 单元：QwenHyDE 配置解析（不调用真实 API） ----------
 
 
-def test_qwen_hyde_falls_back_to_llm_base_url_when_unset(monkeypatch):
-    """HYDE_BASE_URL 未设置时回退 LLM_BASE_URL（与主 LLM 同服务，节省部署）。"""
+def test_qwen_hyde_reuses_llm_when_unset(monkeypatch):
+    """HYDE_BASE_URL / HYDE_MODEL 未设置时复用主 LLM 的地址与模型。"""
     monkeypatch.setattr(settings, "HYDE_BASE_URL", None)
+    monkeypatch.setattr(settings, "HYDE_MODEL", "")
     monkeypatch.setattr(settings, "LLM_BASE_URL", "https://api.deepseek.com/v1")
+    monkeypatch.setattr(settings, "LLM_MODEL", "deepseek-chat")
     h = hyde.QwenHyDE()
     assert h._base_url == "https://api.deepseek.com/v1"
-    assert h._model == settings.HYDE_MODEL
+    assert h._model == "deepseek-chat"
 
 
 def test_qwen_hyde_uses_custom_base_url(monkeypatch):

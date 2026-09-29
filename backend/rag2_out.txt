@@ -1,0 +1,62 @@
+========================================================================
+Q: 丹参有什么功效？
+  [HyDE] 调用成功 model=deepseek-chat len=113
+  [检索] hits=3 dense=1 sparse=0 rrf=0 rerank=3 kinds={'document': 3}
+  [检索] top=['严氏济生方.txt', '民间草药药性赋.txt', '民间草药药性赋.txt']
+  [检索] best_dense=0.6826 best_rerank=0.0260
+  [Evidence] count=1 gate=accept reason=single_medium_evidence
+  [HyDE] 调用成功 model=deepseek-chat len=114
+  [检索] hits=3 dense=1 sparse=0 rrf=0 rerank=3 kinds={'document': 3}
+  [检索] top=['严氏济生方.txt', '民间草药药性赋.txt', '民间草药药性赋.txt']
+  [检索] best_dense=0.6816 best_rerank=0.0260
+  [生成] elapsed=144.5s hits_out=3
+  [Citation] []
+  ANSWER: 根据现有资料，我无法回答该问题。
+
+参考资料中并未出现关于「丹参」功效的任何内容，因此无法就此作答。
+========================================================================
+Q: 广藿香归哪些经？
+  [HyDE] 调用成功 model=deepseek-chat len=113
+  [检索] hits=3 dense=2 sparse=0 rrf=0 rerank=3 kinds={'document': 3}
+  [检索] top=['严氏济生方.txt', '严氏济生方.txt', '严氏济生方.txt']
+  [检索] best_dense=0.7005 best_rerank=0.0479
+  [Evidence] count=2 gate=accept reason=has_high_evidence
+  [HyDE] 调用成功 model=deepseek-chat len=126
+  [检索] hits=3 dense=2 sparse=0 rrf=0 rerank=3 kinds={'document': 3}
+  [检索] top=['严氏济生方.txt', '民间草药药性赋.txt', '严氏济生方.txt']
+  [检索] best_dense=0.7085 best_rerank=0.0479
+  [生成] elapsed=119.5s hits_out=3
+  [Citation] ['[citation: 2, 0]']
+  ANSWER: 根据现有资料，我无法回答该问题。
+
+两份参考资料中均未出现「广藿香」这一药名，也没有关于其归经的任何记载。资料[1]虽为药性赋，但其中并未收录广藿香；资料[2]中出现的「藿香叶」是另一味药，且仅记载其用于大藿香散等方剂的配伍，未涉及归经内容 [citation: 2, 0]。因此无法据此回答广藿香的归经。
+========================================================================
+Q: 郁金的性味是什么？
+  [HyDE] 调用成功 model=deepseek-chat len=127
+  [检索] hits=3 dense=2 sparse=0 rrf=0 rerank=3 kinds={'document': 3}
+  [检索] top=['辅行诀脏腑用药法要.txt', '民间草药药性赋.txt', '严氏济生方.txt']
+  [检索] best_dense=0.6340 best_rerank=0.0055
+  [Evidence] count=2 gate=accept reason=multiple_medium_evidence
+  [HyDE] 调用成功 model=deepseek-chat len=127
+  [检索] hits=3 dense=3 sparse=0 rrf=0 rerank=3 kinds={'document': 3}
+  [检索] top=['严氏济生方.txt', '民间草药药性赋.txt', '严氏济生方.txt']
+  [检索] best_dense=0.6506 best_rerank=0.0039
+  [生成] elapsed=117.8s hits_out=3
+  [Citation] []
+  ANSWER: 根据现有资料，我无法回答该问题。
+
+参考资料中未出现关于「郁金」性味的记载。资料[1]和[3]为《严氏济生方》的方剂内容，资料[2]为《民间草药药性赋》，均未涉及郁金的性味描述。
+========================================================================
+Q: 量子计算机如何用Python训练神经网络？
+  [HyDE] 调用成功 model=deepseek-chat len=127
+  [检索] hits=3 dense=0 sparse=0 rrf=0 rerank=3 kinds={'document': 3}
+  [检索] top=['严氏济生方.txt', '严氏济生方.txt', '严氏济生方.txt']
+  [检索] best_dense=0.0000 best_rerank=0.0006
+  [Evidence] count=0 gate=insufficient reason=no_evidence
+  [HyDE] 调用成功 model=deepseek-chat len=125
+  [检索] hits=3 dense=1 sparse=0 rrf=0 rerank=3 kinds={'resource': 1, 'document': 2}
+  [检索] top=['普济本事方.txt', '肘后备急方.txt', '资源']
+  [检索] best_dense=0.4633 best_rerank=0.0004
+  [生成] elapsed=111.3s hits_out=3
+  [Citation] []
+  ANSWER: 根据现有资料，我无法回答该问题。
