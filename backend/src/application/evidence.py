@@ -281,6 +281,25 @@ def _group_key_and_label(evidence: dict) -> tuple[str, str, str | None]:
     return SOURCE_KIND_DOCUMENT, SOURCE_KIND_LABELS[SOURCE_KIND_DOCUMENT], None
 
 
+def _group_score(ev: dict) -> float:
+    """组/来源聚合时使用的分数（与 hit_to_evidence 的 evidence_level 同量纲）。
+
+    evidence_level 的 0.7 / 0.3 阈值是为 BGE-M3 dense cosine 设计的
+    （见模块顶部注释与 rag_service._is_relevant）。hit_to_evidence 用
+    relevance_score（dense）判定 per-citation level；但 group_evidence 的
+    max_score / evidence_level 必须使用同一量纲，否则会出现同一份命中
+    per-citation "high" 与 per-source/group "insufficient" 的不一致。
+
+    优先取 evidence.relevance_score（已由 hit_to_evidence 从 dense_score
+    写入）；缺失时回退到 evidence.score（兼容 KG 路径 / 历史 fixture /
+    旧版本产出的 evidence dict）。
+    """
+    rel = ev.get("relevance_score")
+    if rel is not None:
+        return float(rel)
+    return float(ev.get("score", 0.0) or 0.0)
+
+
 def group_evidence(evidence: list[dict]) -> list[dict]:
     """多来源证据分组：先按来源类别（+ 细分类型），组内再按具体来源聚合。
 
@@ -341,9 +360,15 @@ def group_evidence(evidence: list[dict]) -> list[dict]:
         group = groups[group_key]
         del group["_by_source"]
         for source in group["sources"]:
+            # 排序仍按 ev.score（reranker 排序语义不变：精排后的位次是 LLM 看到的次序）
             source["evidences"].sort(key=lambda e: e.get("score", 0.0), reverse=True)
             source["evidence_count"] = len(source["evidences"])
-            source["max_score"] = max((e.get("score", 0.0) for e in source["evidences"]), default=0.0)
+            # max_score / evidence_level 改用 _group_score：与 per-citation 同量纲
+            # （详见 _group_score 注释与 evidence_level 阈值说明）
+            source["max_score"] = max(
+                (_group_score(e) for e in source["evidences"]),
+                default=0.0,
+            )
             source["evidence_level"] = evidence_level(source["max_score"])
         group["sources"].sort(key=lambda s: s["max_score"], reverse=True)
         group["source_count"] = len(group["sources"])
@@ -374,7 +399,10 @@ def summarize_evidence(
         "evidence_count": len(evidence),
         "source_count": sum(g.get("source_count", 0) for g in groups),
         "group_count": len(groups),
-        "max_score": max((ev.get("score", 0.0) for ev in evidence), default=0.0),
+        # max_score 与 evidence_level / group_evidence 同量纲（_group_score：
+        # 优先 relevance_score=dense cosine，缺失回退 ev.score=reranker），
+        # 避免 summary.max_score=0.03（rerank）而 by_level 全是 medium 的矛盾。
+        "max_score": max((_group_score(ev) for ev in evidence), default=0.0),
         "by_level": by_level,
     }
 

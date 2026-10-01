@@ -260,6 +260,178 @@ def test_group_and_source_level_from_max_score():
     assert levels == {"medium", "high"}
 
 
+# ── 8a. 量纲对齐回归：per-source / per-group 必须使用 dense（relevance_score）量纲 ─────
+
+
+def test_per_citation_high_when_dense_high_rerank_low():
+    """relevance_score（dense）高、score（reranker）低 → evidence_level 必须依据 dense 判定为 high。
+
+    复现「丹参有什么功效」类跨语言 chunk 场景：reranker sigmoid 0.03、dense cosine 0.85+。
+    不修复 group_evidence 量纲之前：per-citation 已正确（high），但 group/source 会错判 insufficient。
+    """
+    hit = _doc_hit(score=0.03, doc_name="丹参.pdf")
+    hit["dense_score"] = 0.85
+    hit["rerank_score"] = 0.03
+    hit["score"] = 0.03
+    ev = hit_to_evidence(hit, 1)
+    assert ev["score"] == 0.03  # reranker（前端"相关度 %"展示用）
+    assert ev["relevance_score"] == 0.85  # dense（阈值同量纲使用）
+    assert ev["evidence_level"] == "high"
+
+
+def test_group_source_level_aligns_with_relevance_score_not_rerank():
+    """组/来源的 max_score 与 evidence_level 必须用 dense（relevance_score），不能用 rerank。
+
+    同一 source（resource_id）下三条命中，dense 全部 ≥ 0.71、rerank 全部 0.03：
+    - 修复前：source.max_score = max(ev.score) = 0.03 → insufficient；与 per-citation 不一致
+    - 修复后：source.max_score = max(ev.relevance_score) = 0.85 → high；与 per-citation 一致
+    """
+    rid = str(uuid.uuid4())
+    hits = []
+    for name, dense in [("丹参", 0.85), ("金银花", 0.75), ("连翘", 0.71)]:
+        h = _resource_hit(score=0.03, rtype="herb", rname=name)
+        h["dense_score"] = dense
+        h["rerank_score"] = 0.03
+        h["score"] = 0.03
+        h["resource_id"] = rid  # 三条合并到同一 source
+        hits.append(h)
+    evidence = build_evidence(hits)
+    # per-citation 全部 high（dense ≥ 0.71）
+    assert all(ev["evidence_level"] == "high" for ev in evidence)
+    groups = group_evidence(evidence)
+    assert len(groups) == 1
+    g = groups[0]
+    # group / source 使用 dense（0.85），不是 rerank（0.03）
+    assert g["max_score"] == 0.85
+    assert g["evidence_level"] == "high"
+    src = g["sources"][0]
+    assert src["max_score"] == 0.85
+    assert src["evidence_level"] == "high"
+    # 但 ev.score（= reranker）仍保留：前端"相关度 %"展示不变
+    assert all(ev["score"] == 0.03 for ev in src["evidences"])
+
+
+def test_group_score_falls_back_to_ev_score_when_relevance_score_absent():
+    """兼容：evidence dict 没有 relevance_score 字段时，_group_score 回退到 ev.score。
+
+    兼容对象：KG 路径（relevance_score() 取 rerank_score）、历史 fixture 数据、
+    旧版本产出的 evidence dict——确保本次修复不破坏既有调用链。
+    """
+    hit = _resource_hit(score=0.74, rtype="herb", rname="桂枝")
+    ev = hit_to_evidence(hit, 1)
+    # 模拟：evidence 字典里没有 relevance_score 字段（KG 路径 / 历史数据）
+    ev.pop("relevance_score", None)
+    # per-citation 仍按 hit_to_evidence 的原有逻辑判为 high（_group_score 不影响 per-citation）
+    assert ev["evidence_level"] == "high"
+    assert ev["score"] == 0.74
+    # group/source 走 _group_score 回退：max_score = ev.score = 0.74 → high
+    groups = group_evidence([ev])
+    assert len(groups) == 1
+    assert groups[0]["max_score"] == 0.74
+    assert groups[0]["evidence_level"] == "high"
+    assert groups[0]["sources"][0]["max_score"] == 0.74
+
+
+def test_group_level_insufficient_when_dense_low_even_if_rerank_high():
+    """dense 低（0.2）即使 reranker 给 0.9，evidence_level 必须依据 dense 判为 insufficient。
+
+    防止"reranker 分数高就被算作 high"的误判——证据等级阈值是按 dense cosine 设计的。
+    注意：此处跳过 build_evidence 的 displayable_hits 阈值过滤（dense=0.2 在生产中会被
+    RELEVANCE_THRESHOLD=0.35 过滤掉，本测试聚焦"若绕过过滤到达分组，_group_score 必须按
+    dense 取值"这一边界保护——即 _group_score 自身的语义不被 reranker 污染）。
+    """
+    hit = _resource_hit(score=0.9, rtype="herb", rname="X")
+    hit["dense_score"] = 0.2
+    hit["rerank_score"] = 0.9
+    hit["score"] = 0.9
+    ev = hit_to_evidence(hit, 1)
+    assert ev["score"] == 0.9  # reranker（前端"相关度 %"展示）
+    assert ev["relevance_score"] == 0.2  # dense（阈值同量纲使用）
+    assert ev["evidence_level"] == "insufficient"  # 必须按 dense 判
+    # 绕过 displayable_hits 阈值过滤，直接喂给 group_evidence：验证聚合层量纲
+    groups = group_evidence([ev])
+    assert len(groups) == 1
+    # group.max_score 必须取 dense 最大 0.2，不能被 rerank 0.9 推上去
+    assert groups[0]["max_score"] == 0.2
+    assert groups[0]["evidence_level"] == "insufficient"
+
+
+def test_group_max_score_takes_max_relevance_across_all_evidence_and_sources():
+    """多 source / 多 evidence 场景：group.max_score 取所有 evidence 的 relevance_score 最大值。
+
+    source 内部 max_score 与 source 排序：均按 dense 量纲（relevance_score）。
+    """
+    rid_a = str(uuid.uuid4())
+    rid_b = str(uuid.uuid4())
+    # source A: relevance 0.5 / 0.45；source B: relevance 0.92 / 0.4
+    a1 = _resource_hit(score=0.5, rtype="herb", rname="A1", chunk="a1")
+    a1["dense_score"] = 0.5; a1["rerank_score"] = 0.5; a1["resource_id"] = rid_a
+    a2 = _resource_hit(score=0.45, rtype="herb", rname="A2", chunk="a2")
+    a2["dense_score"] = 0.45; a2["rerank_score"] = 0.45; a2["resource_id"] = rid_a
+    b1 = _resource_hit(score=0.92, rtype="herb", rname="B1", chunk="b1")
+    b1["dense_score"] = 0.92; b1["rerank_score"] = 0.92; b1["resource_id"] = rid_b
+    b2 = _resource_hit(score=0.4, rtype="herb", rname="B2", chunk="b2")
+    b2["dense_score"] = 0.4; b2["rerank_score"] = 0.4; b2["resource_id"] = rid_b
+    groups = group_evidence(build_evidence([a1, a2, b1, b2]))
+    assert len(groups) == 1
+    g = groups[0]
+    # group.max_score 取所有 evidence 的 relevance_score 最大 = 0.92（B1）
+    assert g["max_score"] == 0.92
+    assert g["evidence_level"] == "high"
+    # source 排序按 source.max_score 降序：B (0.92) 在前、A (0.5) 在后
+    assert [s["source_name"] for s in g["sources"]] == ["B1", "A1"]
+    assert g["sources"][0]["max_score"] == 0.92
+    assert g["sources"][1]["max_score"] == 0.5
+
+
+# ── 8b. summarize_evidence 量纲回归：max_score 必须与 evidence_level 同量纲 ─────
+
+
+def test_summary_max_score_uses_relevance_score_not_rerank():
+    """summarize_evidence 的 max_score 优先 relevance_score（dense）。
+
+    复现真实场景（丹参）：relevance_score=0.85、rerank score=0.03：
+    - 修复前：summary.max_score=0.03（rerank），与 by_level={'high': 1} 自相矛盾；
+    - 修复后：summary.max_score=0.85，与 per-citation/group level 一致。
+    """
+    hit = _resource_hit(score=0.03, rtype="herb", rname="丹参")
+    hit["dense_score"] = 0.85
+    hit["rerank_score"] = 0.03
+    hit["score"] = 0.03
+    evidence = build_evidence([hit])
+    assert evidence[0]["relevance_score"] == 0.85
+    groups, summary = package_evidence(evidence)
+    assert summary["by_level"] == {"high": 1, "medium": 0, "insufficient": 0}
+    # max_score 用 dense（0.85），不是 rerank（0.03）
+    assert summary["max_score"] == 0.85
+    # 与 group 层一致
+    assert groups[0]["max_score"] == 0.85
+    assert groups[0]["evidence_level"] == "high"
+
+
+def test_summary_max_score_falls_back_to_score_without_relevance():
+    """兼容：evidence 无 relevance_score（KG / 历史 fixture）→ max_score 回退 ev.score。"""
+    hit = _resource_hit(score=0.74, rtype="herb", rname="桂枝")
+    evidence = build_evidence([hit])
+    evidence[0].pop("relevance_score", None)
+    _, summary = package_evidence(evidence)
+    assert summary["max_score"] == 0.74
+    assert summary["by_level"]["high"] == 1
+
+
+def test_summary_max_score_takes_max_group_score_across_evidence():
+    """多 evidence：max_score 取所有 evidence 的 _group_score 最大值（dense 量纲）。"""
+    rid = str(uuid.uuid4())
+    h1 = _resource_hit(score=0.03, rtype="herb", rname="A", chunk="v1")
+    h1["dense_score"] = 0.9; h1["rerank_score"] = 0.03; h1["score"] = 0.03; h1["resource_id"] = rid
+    h2 = _resource_hit(score=0.02, rtype="herb", rname="A", chunk="v2")
+    h2["dense_score"] = 0.4; h2["rerank_score"] = 0.02; h2["score"] = 0.02; h2["resource_id"] = rid
+    _, summary = package_evidence(build_evidence([h1, h2]))
+    assert summary["max_score"] == 0.9
+    assert summary["by_level"]["high"] == 1
+    assert summary["by_level"]["medium"] == 1
+
+
 # ── 9. Citation 向后兼容 ────────────────────────────────────────────────────
 
 

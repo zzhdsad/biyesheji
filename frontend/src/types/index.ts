@@ -81,6 +81,12 @@ export interface Citation {
   kg_relation?: string | null;
   kg_hop?: number | null;
   kg_provenance?: string | null;
+  // ── 相关度展示（BUG-（相关度 3%））：BGE-M3 dense cosine，由后端
+  //    application/evidence.py:hit_to_evidence 写入 evidence dict，
+  //    /chat/ask-stream 流式 dict 直传已含此字段；/chat/ask 同步路径此前
+  //    因 Citation 模型未声明而被 Pydantic 静默丢弃。EvidencePanel 优先
+  //    使用此字段展示「相关度」百分比；缺失时 fallback 到 ev.score。
+  relevance_score?: number | null;
 }
 
 /** 证据等级（沿用后端既有分级规则）。 */

@@ -3,12 +3,14 @@
 import { useMemo, type ReactNode } from 'react';
 import { Collapse, Tag, Typography } from 'antd';
 import { FileTextOutlined } from '@ant-design/icons';
-import type { Citation, Evidence } from '@/types';
+import type { Citation, Evidence, EvidenceGroup } from '@/types';
 import { credibilityColor } from '@/constants/source';
 import {
   EVIDENCE_LEVEL_COLOR,
   EVIDENCE_LEVEL_LABEL,
   buildEvidenceGroups,
+  displayRelevanceScore,
+  normalizeEvidenceGroups,
   summarizeEvidence,
 } from '@/utils/evidence';
 
@@ -48,19 +50,26 @@ function cardLabel(ev: Evidence): ReactNode {
           · {ev.title_path}
         </Text>
       )}
-      {ev.score != null && (
-        <Tag
-          style={{
-            margin: 0,
-            fontSize: 12,
-            color: '#8c8c8c',
-            background: '#fafafa',
-            border: 'none',
-          }}
-        >
-          相关度 {(ev.score * 100).toFixed(0)}%
-        </Tag>
-      )}
+      {(() => {
+        // BUG-（相关度 3%）：优先展示 BGE-M3 dense cosine（relevance_score），
+        // 缺失时 fallback 到 ev.score（reranker sigmoid）。两者都缺失则不渲染。
+        const rel = displayRelevanceScore(ev);
+        if (rel == null) return null;
+        const pct = Math.round(Math.max(0, Math.min(1, rel)) * 100);
+        return (
+          <Tag
+            style={{
+              margin: 0,
+              fontSize: 12,
+              color: '#8c8c8c',
+              background: '#fafafa',
+              border: 'none',
+            }}
+          >
+            相关度 {pct}%
+          </Tag>
+        );
+      })()}
     </div>
   );
 }
@@ -74,14 +83,27 @@ function cardLabel(ev: Evidence): ReactNode {
  */
 export function EvidencePanel({
   citations,
+  groups: backendGroups,
   activeKey,
   onChange,
 }: {
   citations: Citation[];
+  /** 后端下发的 evidence_groups（/ask-stream citations 事件）。 */
+  groups?: EvidenceGroup[];
   activeKey: string[];
   onChange: (keys: string[]) => void;
 }) {
-  const groups = useMemo(() => buildEvidenceGroups(citations), [citations]);
+  // 优先使用后端下发的 evidence_groups（group_evidence 已按 relevance_score
+  // 量纲算好 max_score / evidence_level，与 per-citation 一致），避免前端重复
+  // 业务计算引入量纲漂移；历史消息 / 旧数据缺失时回退本地 buildEvidenceGroups
+  // （内部同样按 relevance_score 优先，见 groupScore）。
+  const groups = useMemo(
+    () =>
+      backendGroups && backendGroups.length > 0
+        ? normalizeEvidenceGroups(backendGroups)
+        : buildEvidenceGroups(citations),
+    [backendGroups, citations],
+  );
   const summary = useMemo(() => summarizeEvidence(citations, groups), [citations, groups]);
 
   if (citations.length === 0) return null;

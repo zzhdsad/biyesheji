@@ -183,6 +183,85 @@ async def test_build_citations_resolves_index_and_fallback():
     assert len(cits3) == 2  # 越界无匹配 → 兜底全部
 
 
+# ---------- 单元：Citation / Evidence Pydantic 模型保留 relevance_score（BUG-（相关度 3%））----------
+
+
+def test_citation_pydantic_preserves_relevance_score():
+    """Citation(**c) 必须保留 evidence dict 里的 relevance_score 字段，不能静默丢弃。
+
+    修复前：Citation 模型未声明 relevance_score，Pydantic 默认忽略未声明字段 →
+    /chat/ask 同步路径下的 citations / evidence 列表里 relevance_score 永远是 None，
+    前端 EvidencePanel 只能拿到 ev.score（reranker sigmoid 0.0297）→ 显示「相关度 3%」。
+    修复后：声明 relevance_score: float | None = None → 同步路径能直接下发给前端。
+    """
+    from src.api.routes.chat import Citation, Evidence
+
+    base_dict = {
+        "chunk_id": "c1",
+        "source_index": 1,
+        "doc_id": "d1",
+        "doc_name": "丹参.pdf",
+        "page_num": 5,
+        "title_path": "丹参·活血",
+        "content": "丹参活血祛瘀",
+        "score": 0.0297,  # ev.score 仍是 reranker sigmoid
+        "source_type": "经典古籍",
+        "era": "汉",
+        "credibility_level": 3,
+        "source_kind": "document",
+        "evidence_level": "high",
+        "resource_type": None,
+        "resource_id": None,
+        "resource_name": None,
+        "evidence_id": "e1",
+        "source_id": "d1",
+        "source_name": "丹参.pdf",
+        "source_label": "文档",
+        "evidence_text": "丹参活血祛瘀",
+    }
+    # dense=0.85, rerank=0.0297 → relevance_score 必须保留到 Pydantic 输出
+    c = Citation(**{**base_dict, "relevance_score": 0.85})
+    assert c.relevance_score == 0.85
+    assert c.score == 0.0297  # ev.score 仍是 reranker，量纲未被改写
+
+    # Evidence 继承 Citation：同样保留 relevance_score
+    e = Evidence(**{**base_dict, "relevance_score": 0.85})
+    assert e.relevance_score == 0.85
+
+    # 缺失 relevance_score（历史消息 / 旧 fixture / 缺 dense 的命中） → 默认为 None
+    c_legacy = Citation(**{**base_dict})
+    assert c_legacy.relevance_score is None
+
+    # model_dump 后 JSON 序列化输出仍带 relevance_score 字段（前端 type 已有）
+    dumped = c.model_dump()
+    assert dumped["relevance_score"] == 0.85
+    dumped_legacy = c_legacy.model_dump()
+    assert "relevance_score" in dumped_legacy
+    assert dumped_legacy["relevance_score"] is None
+
+
+def test_citation_pydantic_relevance_score_null_compatible_with_legacy_data():
+    """缺失 relevance_score（历史数据） → 显式传 None 与字段缺省等价，向前兼容。
+
+    旧客户端（如浏览器缓存的旧会话页面）解析 citations 时若严格校验字段类型，
+    必须保证 relevance_score=null 与字段缺省都能被接受（TypeScript 端为
+    `relevance_score?: number | null`）。
+    """
+    from src.api.routes.chat import Citation
+
+    base = {
+        "chunk_id": "c1", "source_index": 1, "doc_id": "d1", "doc_name": "x",
+        "content": "x", "score": 0.5,
+    }
+    c_default = Citation(**base)
+    c_explicit_null = Citation(**{**base, "relevance_score": None})
+    c_explicit_zero = Citation(**{**base, "relevance_score": 0.0})
+
+    assert c_default.relevance_score is None
+    assert c_explicit_null.relevance_score is None
+    assert c_explicit_zero.relevance_score == 0.0  # 0.0 也是合法 dense cosine
+
+
 # ---------- 单元：MockLLM 防幻觉行为 ----------
 
 

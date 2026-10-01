@@ -13,12 +13,14 @@ import { describe, it } from 'node:test';
 
 import {
   buildEvidenceGroups,
+  displayRelevanceScore,
   evidenceLevel,
   normalizeEvidence,
+  normalizeEvidenceGroups,
   resolveCitationKey,
   summarizeEvidence,
 } from './evidence.ts';
-import type { Citation } from '@/types';
+import type { Citation, EvidenceGroup } from '@/types';
 
 function docCitation(overrides: Partial<Citation> = {}): Citation {
   return {
@@ -60,6 +62,86 @@ describe('evidenceLevel', () => {
     assert.equal(evidenceLevel(0.69), 'medium');
     assert.equal(evidenceLevel(0.3), 'medium');
     assert.equal(evidenceLevel(0.29), 'insufficient');
+  });
+});
+
+// ── 相关度展示（BUG-（相关度 3%））───────────────────────────────────────────
+
+describe('displayRelevanceScore', () => {
+  it('relevance_score=0.85 → 返回 0.85（用户可见相关度）', () => {
+    // 复现「丹参有什么功效」场景：dense 高（0.85）但 reranker sigmoid 低（0.0297）。
+    // 修复前 EvidencePanel 会渲染成「相关度 3%」（取 ev.score），误导用户；
+    // 修复后必须优先取 relevance_score，渲染成「相关度 85%」。
+    assert.equal(
+      displayRelevanceScore({ score: 0.0297, relevance_score: 0.85 }),
+      0.85,
+    );
+  });
+
+  it('relevance_score=0.35 → 返回 0.35（中等）', () => {
+    assert.equal(
+      displayRelevanceScore({ score: 0.5, relevance_score: 0.35 }),
+      0.35,
+    );
+  });
+
+  it('relevance_score=0 → 返回 0', () => {
+    assert.equal(
+      displayRelevanceScore({ score: 0.1, relevance_score: 0 }),
+      0,
+    );
+  });
+
+  it('relevance_score=null → fallback 到 ev.score', () => {
+    // 兼容历史消息 / 旧 fixture / 缺 dense 的命中
+    assert.equal(
+      displayRelevanceScore({ score: 0.74, relevance_score: null }),
+      0.74,
+    );
+  });
+
+  it('relevance_score=undefined → fallback 到 ev.score', () => {
+    assert.equal(
+      displayRelevanceScore({ score: 0.6 }),
+      0.6,
+    );
+  });
+
+  it('relevance_score=NaN → fallback 到 ev.score', () => {
+    assert.equal(
+      displayRelevanceScore({ score: 0.4, relevance_score: NaN }),
+      0.4,
+    );
+  });
+
+  it('relevance_score 越界（>1） → fallback 到 ev.score', () => {
+    // 防御：防御性编程，理论上后端不会发送越界值
+    assert.equal(
+      displayRelevanceScore({ score: 0.5, relevance_score: 1.5 }),
+      0.5,
+    );
+  });
+
+  it('relevance_score 越界（<0） → fallback 到 ev.score', () => {
+    assert.equal(
+      displayRelevanceScore({ score: 0.5, relevance_score: -0.1 }),
+      0.5,
+    );
+  });
+
+  it('两者都缺失 → 返回 null（EvidencePanel 不渲染相关度 Tag，不出现 NaN%）', () => {
+    assert.equal(displayRelevanceScore({}), null);
+    assert.equal(displayRelevanceScore({ score: undefined, relevance_score: null }), null);
+    assert.equal(displayRelevanceScore({ score: NaN, relevance_score: NaN }), null);
+  });
+
+  it('不能错误采用 ev.score 即使 ev.score 比 relevance_score 高', () => {
+    // 边界保护：dense=0.2、reranker=0.9 → 必须返回 0.2（按 dense 展示），
+    // 不能因 reranker 高就显示 90%。
+    assert.equal(
+      displayRelevanceScore({ score: 0.9, relevance_score: 0.2 }),
+      0.2,
+    );
   });
 });
 
@@ -154,6 +236,51 @@ describe('buildEvidenceGroups', () => {
     assert.deepEqual(
       groups.map((g) => g.group_key),
       ['resource:prescription', 'document', 'resource:literature'],
+    );
+  });
+
+  // ── 量纲对齐回归（BUG-：分组 Insufficient / 子证据 Medium 69%）───────────────
+
+  it('relevance_score=0.85、score=0.03 → group/source 均为 high，不再 Insufficient', () => {
+    // 复现「丹参有什么功效」：dense cosine 0.85、reranker sigmoid 0.03。
+    // 修复前：max(e.score)=0.03 < 0.3 → 分组显示 Insufficient，与子证据 Medium 矛盾。
+    const groups = buildEvidenceGroups([
+      docCitation({ score: 0.03, relevance_score: 0.85, doc_name: '严氏济生方.txt' }),
+    ]);
+    const g = groups[0];
+    assert.equal(g.max_score, 0.85);
+    assert.equal(g.evidence_level, 'high');
+    assert.equal(g.sources[0].max_score, 0.85);
+    assert.equal(g.sources[0].evidence_level, 'high');
+    // 子证据自身 level 与相关度展示不变
+    assert.equal(g.sources[0].evidences[0].evidence_level, 'high');
+    assert.equal(displayRelevanceScore(g.sources[0].evidences[0]), 0.85);
+  });
+
+  it('relevance_score 缺失 → fallback 到 ev.score（历史消息 / 旧 fixture 兼容）', () => {
+    const groups = buildEvidenceGroups([docCitation({ score: 0.74 })]);
+    assert.equal(groups[0].max_score, 0.74);
+    assert.equal(groups[0].evidence_level, 'high');
+  });
+
+  it('relevance_score 低（0.2）时不能被 reranker 高分（0.9）推高等级', () => {
+    const groups = buildEvidenceGroups([docCitation({ score: 0.9, relevance_score: 0.2 })]);
+    assert.equal(groups[0].max_score, 0.2);
+    assert.equal(groups[0].evidence_level, 'insufficient');
+  });
+
+  it('多证据：group.max_score 取 relevance_score 最大值，排序仍按 ev.score', () => {
+    const groups = buildEvidenceGroups([
+      docCitation({ chunk_id: 'v1', score: 0.03, relevance_score: 0.69, doc_name: 'A.txt' }),
+      docCitation({ chunk_id: 'v2', score: 0.05, relevance_score: 0.9, doc_name: 'A.txt' }),
+    ]);
+    const g = groups[0];
+    assert.equal(g.max_score, 0.9); // dense 最大值
+    assert.equal(g.evidence_level, 'high');
+    // 证据排序按 ev.score（reranker 位次）降序，语义不变
+    assert.deepEqual(
+      g.sources[0].evidences.map((e) => e.score),
+      [0.05, 0.03],
     );
   });
 });
@@ -340,6 +467,104 @@ describe('阶段十六：缺省 / 空值 / 弱证据健壮性', () => {
     const groups = buildEvidenceGroups([legacy]);
     assert.equal(groups[0].group_key, 'document');
     assert.equal(groups[0].sources[0].source_label, '文档');
+  });
+});
+
+// ── 后端 evidence_groups 直用（BUG-：分组 Insufficient / 子证据 Medium 69%）──
+
+describe('normalizeEvidenceGroups（后端 evidence_groups 优先）', () => {
+  /** 模拟后端 group_evidence 的真实输出（丹参场景：dense 0.6946 / rerank 0.031）。 */
+  function backendGroups(): EvidenceGroup[] {
+    return [
+      {
+        group_key: 'document',
+        source_kind: 'document',
+        source_type: null,
+        source_label: '文档',
+        source_count: 1,
+        evidence_count: 1,
+        max_score: 0.6946,
+        evidence_level: 'medium',
+        sources: [
+          {
+            source_id: 'doc-1',
+            source_name: '严氏济生方.txt',
+            source_kind: 'document',
+            source_type: null,
+            source_label: '文档',
+            evidence_count: 1,
+            max_score: 0.6946,
+            evidence_level: 'medium',
+            evidences: [
+              {
+                chunk_id: 'chunk-1',
+                source_index: 1,
+                doc_id: 'doc-1',
+                doc_name: '严氏济生方.txt',
+                content: '丹参，主心腹邪气',
+                score: 0.031,
+                relevance_score: 0.6946,
+                evidence_level: 'medium',
+              } as Citation,
+            ],
+          },
+        ],
+      } as EvidenceGroup,
+    ];
+  }
+
+  it('直接沿用后端 max_score / evidence_level（不重复计算，不显示 Insufficient）', () => {
+    const groups = normalizeEvidenceGroups(backendGroups());
+    assert.equal(groups[0].max_score, 0.6946);
+    assert.equal(groups[0].evidence_level, 'medium');
+    assert.equal(groups[0].sources[0].max_score, 0.6946);
+    assert.equal(groups[0].sources[0].evidence_level, 'medium');
+    // 后端算好的等级绝不能被前端用 rerank score 重算成 insufficient
+    assert.notEqual(groups[0].evidence_level, 'insufficient');
+  });
+
+  it('evidences 补齐展示字段（source_label / evidence_text）', () => {
+    const groups = normalizeEvidenceGroups(backendGroups());
+    const ev = groups[0].sources[0].evidences[0];
+    assert.equal(ev.source_label, '文档');
+    assert.equal(ev.evidence_text, '丹参，主心腹邪气');
+    // reranker score 原样保留（相关度展示用 relevance_score）
+    assert.equal(ev.score, 0.031);
+    assert.equal(displayRelevanceScore(ev), 0.6946);
+  });
+
+  it('后端组缺失 max_score / evidence_level（防御）→ 按 groupScore 兜底重算', () => {
+    const raw = backendGroups() as unknown as {
+      sources: { max_score?: number; evidence_level?: string; evidences: unknown[] }[];
+    }[];
+    delete raw[0].sources[0].max_score;
+    delete raw[0].sources[0].evidence_level;
+    const groups = normalizeEvidenceGroups(raw as unknown as EvidenceGroup[]);
+    assert.equal(groups[0].sources[0].max_score, 0.6946); // dense 优先，非 0.031
+    assert.equal(groups[0].sources[0].evidence_level, 'medium');
+  });
+});
+
+describe('summarizeEvidence 量纲（BUG-：max_score 用 rerank 导致与 by_level 矛盾）', () => {
+  it('max_score 优先 relevance_score，与 by_level 同量纲', () => {
+    const citations = [docCitation({ score: 0.03, relevance_score: 0.85 })];
+    const summary = summarizeEvidence(citations);
+    assert.equal(summary.max_score, 0.85); // 不是 0.03
+    assert.deepEqual(summary.by_level, { high: 1, medium: 0, insufficient: 0 });
+  });
+
+  it('relevance_score 缺失 → fallback 到 ev.score', () => {
+    const summary = summarizeEvidence([docCitation({ score: 0.74 })]);
+    assert.equal(summary.max_score, 0.74);
+  });
+
+  it('多证据取 relevance_score 最大值', () => {
+    const summary = summarizeEvidence([
+      docCitation({ chunk_id: 'v1', score: 0.03, relevance_score: 0.4 }),
+      docCitation({ chunk_id: 'v2', score: 0.05, relevance_score: 0.9 }),
+    ]);
+    assert.equal(summary.max_score, 0.9);
+    assert.deepEqual(summary.by_level, { high: 1, medium: 1, insufficient: 0 });
   });
 });
 

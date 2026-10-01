@@ -80,6 +80,13 @@ class Citation(BaseModel):
     kg_relation: str | None = None
     kg_hop: int | None = None
     kg_provenance: str | None = None
+    # BUG-（相关度展示）：relevance_score = BGE-M3 dense cosine。
+    # hit_to_evidence 已在 evidence dict 中写入，但 Citation Pydantic 未声明，
+    # /chat/ask 同步路径下 Pydantic 会静默丢弃该字段，前端只能拿到 ev.score
+    # （reranker sigmoid 0.03）导致「相关度 3%」。这里统一声明为可选字段，
+    # 缺失时（如历史消息 / 旧 fixture / 缺 dense 的命中）保持 None，前端
+    # EvidencePanel 自动 fallback 到 ev.score 展示，UI 行为不变（纯增量字段）。
+    relevance_score: float | None = None
 
 
 class Evidence(Citation):

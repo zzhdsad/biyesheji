@@ -128,6 +128,7 @@ export function MessageItem({ message }: { message: ChatMessage }) {
           // 阶段十：多来源证据分组展示（文档 / 中药 / 方剂 / 理论 / 文献）
           <EvidencePanel
             citations={message.citations}
+            groups={message.evidenceGroups}
             activeKey={activeKey}
             onChange={(keys) => setActiveKey(keys)}
           />

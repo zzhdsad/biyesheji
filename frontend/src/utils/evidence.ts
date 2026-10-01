@@ -43,6 +43,47 @@ export const EVIDENCE_LEVEL_LABEL: Record<EvidenceLevel, string> = {
   insufficient: 'Insufficient',
 };
 
+/**
+ * 用户可见的「相关度」展示字段。
+ *
+ * 与后端语义保持一致：
+ * - `relevance_score`：BGE-M3 dense cosine，用于相关性/Evidence Level，
+ *   是用户能直观理解的"检索相关性"百分比（0.85 → 85%）。
+ * - `score`：BGE-Reranker-v2-m3 sigmoid，继续用于 reranker 排序与内部语义，
+ *   但分布跨度大、绝对值偏小（如 0.0297），不适合直接当作"百分比"展示
+ *   （会出现「相关度 3%」这种与用户感受不一致的结果）。
+ *
+ * 边界：
+ * - `relevance_score` 为有限数 → 返回它；
+ * - 缺失（undefined/null/NaN/越界 → 1） → fallback 到 `score`；
+ * - 两者都缺失/非有限 → 返回 `null`，调用方应不展示 Tag（不出现 NaN%）。
+ */
+export function displayRelevanceScore(
+  ev: Pick<Citation, 'score' | 'relevance_score'>,
+): number | null {
+  const rel = ev.relevance_score;
+  if (typeof rel === 'number' && Number.isFinite(rel) && rel >= 0 && rel <= 1) {
+    return rel;
+  }
+  const sc = ev.score;
+  if (typeof sc === 'number' && Number.isFinite(sc) && sc >= 0 && sc <= 1) {
+    return sc;
+  }
+  return null;
+}
+
+/**
+ * source/group 聚合分（Evidence Level 同量纲）。
+ *
+ * 与后端 _group_score / evidence_level 阈值语义一致：Evidence Level 的
+ * 0.7 / 0.3 阈值按 BGE-M3 dense cosine（relevance_score）设计，聚合
+ * max_score 必须优先 relevance_score，缺失时回退 ev.score（reranker
+ * sigmoid），否则会出现「子证据 Medium 69%、分组 Insufficient」的矛盾。
+ */
+export function groupScore(ev: Pick<Citation, 'score' | 'relevance_score'>): number {
+  return displayRelevanceScore(ev) ?? 0;
+}
+
 /** 证据等级 → Tag 颜色。 */
 export const EVIDENCE_LEVEL_COLOR: Record<EvidenceLevel, string> = {
   high: 'success',
@@ -92,7 +133,9 @@ export function normalizeEvidence(citation: Citation): Citation {
     score,
     source_kind: isKg ? 'kg' : isResource ? 'resource' : 'document',
     resource_type: resourceType,
-    evidence_level: citation.evidence_level ?? evidenceLevel(score),
+    // 等级与后端 hit_to_evidence 同量纲：优先 relevance_score（dense），
+    // 缺失时回退 score（reranker）；避免同一证据 level 与分组/相关度矛盾
+    evidence_level: citation.evidence_level ?? evidenceLevel(groupScore(citation)),
     evidence_id: citation.evidence_id ?? citation.chunk_id,
     source_id: sourceId,
     source_name: sourceName,
@@ -177,9 +220,11 @@ export function buildEvidenceGroups(citations: Citation[]): EvidenceGroup[] {
 
   for (const group of orderedGroups) {
     for (const source of group.sources) {
+      // 排序仍按 e.score（reranker 位次是 LLM 看到的次序，与后端一致）
       source.evidences.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
       source.evidence_count = source.evidences.length;
-      source.max_score = source.evidences.reduce((m, e) => Math.max(m, e.score ?? 0), 0);
+      // max_score / evidence_level 用 groupScore：与 per-citation 同量纲（dense 优先）
+      source.max_score = source.evidences.reduce((m, e) => Math.max(m, groupScore(e)), 0);
       source.evidence_level = evidenceLevel(source.max_score);
     }
     group.sources.sort((a, b) => b.max_score - a.max_score);
@@ -215,6 +260,39 @@ export function resolveCitationKey(
   return availableSourceIndexes.includes(wanted) ? String(wanted) : null;
 }
 
+/**
+ * 归一化后端下发的 evidence_groups（/chat/ask-stream citations 事件携带）。
+ *
+ * 后端 group_evidence() 已按 relevance_score 量纲算好 max_score /
+ * evidence_level（与 per-citation 一致），前端**直接沿用、不重复计算**，
+ * 只对每条 evidence 应用 normalizeEvidence 补齐 source_label / evidence_text
+ * 等展示字段（历史消息 / 旧数据可能缺失）；组/来源层的 max_score 与
+ * evidence_level 缺失时按 groupScore 兜底重算（正常路径不会触发）。
+ */
+export function normalizeEvidenceGroups(groups: EvidenceGroup[]): EvidenceGroup[] {
+  return groups.map((g) => ({
+    ...g,
+    source_kind: g.source_kind ?? 'document',
+    source_label: g.source_label ?? SOURCE_KIND_LABEL[g.source_kind] ?? SOURCE_KIND_LABEL.document,
+    sources: (g.sources ?? []).map((s) => {
+      const evidences = (s.evidences ?? []).map(normalizeEvidence);
+      return {
+        ...s,
+        evidence_count: s.evidence_count ?? evidences.length,
+        // 正常路径后端已算好；缺失（防御）时按同量纲兜底重算
+        max_score:
+          typeof s.max_score === 'number' && Number.isFinite(s.max_score)
+            ? s.max_score
+            : evidences.reduce((m, e) => Math.max(m, groupScore(e)), 0),
+        evidence_level:
+          s.evidence_level ??
+          evidenceLevel(evidences.reduce((m, e) => Math.max(m, groupScore(e)), 0)),
+        evidences,
+      };
+    }),
+  }));
+}
+
 /** 证据汇总：证据数 / 来源数 / 分组数 / 各等级数量。 */
 export function summarizeEvidence(
   citations: Citation[],
@@ -223,13 +301,15 @@ export function summarizeEvidence(
   const evidence = citations.map(normalizeEvidence);
   const byLevel: Record<EvidenceLevel, number> = { high: 0, medium: 0, insufficient: 0 };
   for (const ev of evidence) {
-    byLevel[ev.evidence_level ?? evidenceLevel(ev.score ?? 0)] += 1;
+    byLevel[ev.evidence_level ?? evidenceLevel(groupScore(ev))] += 1;
   }
   return {
     evidence_count: evidence.length,
     source_count: groups.reduce((n, g) => n + g.source_count, 0),
     group_count: groups.length,
-    max_score: evidence.reduce((m, e) => Math.max(m, e.score ?? 0), 0),
+    // 与后端 summarize_evidence 同量纲：dense 优先（reranker ≈0.03 会把
+    // 全 medium 的证据汇总成 max_score=0.03，与 by_level 自相矛盾）
+    max_score: evidence.reduce((m, e) => Math.max(m, groupScore(e)), 0),
     by_level: byLevel,
   };
 }
