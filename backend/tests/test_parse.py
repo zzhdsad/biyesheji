@@ -10,8 +10,8 @@ from src.core.config import settings
 from tests.test_upload import PG_AVAILABLE
 
 
-def _make_kb(client) -> str:
-    resp = client.post("/api/v1/kb", json={"name": "解析集成测试库"})
+def _make_kb(client, visibility: str = "private") -> str:
+    resp = client.post("/api/v1/kb", json={"name": "解析集成测试库", "visibility": visibility})
     assert resp.status_code == 201, resp.text
     return resp.json()["id"]
 

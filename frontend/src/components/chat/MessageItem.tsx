@@ -4,6 +4,7 @@ import { useState, type ReactNode } from 'react';
 import { Avatar, Typography, theme } from 'antd';
 import {
   CheckCircleOutlined,
+  DownOutlined,
   LoadingOutlined,
   RobotOutlined,
   UserOutlined,
@@ -54,6 +55,8 @@ function ThinkingDots({ color }: { color: string }) {
  * - citations → 已找到 X 条相关证据（X = citations.length，来自真实检索结果）
  * - citations ~ 首个 delta 之间：正在整理相关资料
  * - 首个 delta 之后：步骤列表让位于流式正文（不遮挡回答）
+ *
+ * 问题2增强：步骤**逐条出现**——只展示当前已到达的阶段，后续阶段不预先显示。
  */
 function AnswerProcess({
   phase,
@@ -65,20 +68,54 @@ function AnswerProcess({
   token: ReturnType<typeof theme.useToken>['token'];
 }) {
   const found = phase === 'generating' ? evidenceCount : 0;
-  const steps: { label: string; state: 'done' | 'active' | 'pending' }[] = [
-    { label: '正在分析问题', state: phase === 'analyzing' ? 'active' : 'done' },
-    { label: '正在检索中医知识库', state: phase === 'searching' ? 'active' : 'done' },
+
+  // 步骤定义：key 为阶段标识，visibleFrom 表示从哪个 phase 开始可见
+  const allSteps: {
+    key: string;
+    label: string;
+    visibleFrom: 'analyzing' | 'searching' | 'generating';
+    state: 'done' | 'active' | 'pending';
+  }[] = [
     {
+      key: 'analyze',
+      label: '正在分析问题',
+      visibleFrom: 'analyzing',
+      state: phase === 'analyzing' ? 'active' : 'done',
+    },
+    {
+      key: 'search',
+      label: '正在检索中医知识库',
+      visibleFrom: 'searching',
+      state: phase === 'searching' ? 'active' : phase === 'generating' ? 'done' : 'pending',
+    },
+    {
+      key: 'found',
       label: found > 0 ? `已找到 ${found} 条相关证据` : '正在查找相关证据',
+      visibleFrom: 'generating',
       state: phase === 'generating' ? 'done' : 'pending',
     },
-    { label: '正在整理相关资料', state: phase === 'generating' ? 'active' : 'pending' },
+    {
+      key: 'generate',
+      label: '正在整理相关资料',
+      visibleFrom: 'generating',
+      state: phase === 'generating' ? 'active' : 'pending',
+    },
   ];
+
+  // 阶段顺序映射：analyzing(0) → searching(1) → generating(2)
+  const phaseOrder = { analyzing: 0, searching: 1, generating: 2 };
+  const currentOrder = phaseOrder[phase];
+
+  // 只显示已到达或已过的阶段（逐条出现）
+  const visibleSteps = allSteps.filter(
+    (step) => phaseOrder[step.visibleFrom] <= currentOrder,
+  );
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '4px 0' }}>
-      {steps.map((step) => (
+      {visibleSteps.map((step) => (
         <div
-          key={step.label}
+          key={step.key}
           style={{
             display: 'flex',
             alignItems: 'center',
@@ -90,6 +127,8 @@ function AnswerProcess({
                 : step.state === 'done'
                   ? token.colorTextSecondary
                   : token.colorText,
+            // 当前活动步骤更醒目
+            fontWeight: step.state === 'active' ? 500 : 400,
           }}
         >
           {step.state === 'done' ? (
@@ -103,6 +142,97 @@ function AnswerProcess({
           {step.state === 'active' && <ThinkingDots color={token.colorTextTertiary} />}
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * done 后的可折叠过程摘要（问题2）：回答顶部保留一行真实统计
+ * （证据数 / 来源数 / 用时均由真实 SSE 事件与时间差得出），
+ * 点击可展开查看已完成的步骤明细；默认收起，不遮挡正文。
+ */
+function ProcessSummary({
+  message,
+  token,
+}: {
+  message: ChatMessage;
+  token: ReturnType<typeof theme.useToken>['token'];
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const citations = message.citations ?? [];
+  const evidenceCount = message.evidenceSummary?.evidence_count ?? citations.length;
+  // 来源数优先取后端摘要；历史消息无摘要时按 source_index 去重兜底
+  const sourceCount =
+    message.evidenceSummary?.source_count ??
+    new Set(citations.map((c) => c.source_index)).size;
+  const duration = message.streamDuration;
+
+  const doneSteps = [
+    '分析问题',
+    '检索中医知识库',
+    evidenceCount > 0 ? `已找到 ${evidenceCount} 条相关证据` : '查找相关证据',
+    '整理相关资料',
+  ];
+
+  return (
+    <div style={{ marginBottom: 6 }}>
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => setExpanded((v) => !v)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') setExpanded((v) => !v);
+        }}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          fontSize: 12,
+          color: token.colorTextSecondary,
+          cursor: 'pointer',
+          userSelect: 'none',
+        }}
+        title={expanded ? '收起过程明细' : '展开过程明细'}
+      >
+        <CheckCircleOutlined style={{ color: token.colorSuccess }} />
+        <span>
+          已完成检索与整理 · {evidenceCount} 条证据 · {sourceCount} 个来源
+          {typeof duration === 'number' ? ` · 用时 ${duration.toFixed(1)} 秒` : ''}
+        </span>
+        <DownOutlined
+          style={{
+            fontSize: 10,
+            transition: 'transform 0.2s',
+            transform: expanded ? 'rotate(180deg)' : 'none',
+          }}
+        />
+      </div>
+      {expanded && (
+        <div
+          style={{
+            display: 'flex',
+            flexDirection: 'column',
+            gap: 4,
+            padding: '6px 0 2px 2px',
+          }}
+        >
+          {doneSteps.map((label) => (
+            <div
+              key={label}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                fontSize: 12,
+                color: token.colorTextSecondary,
+              }}
+            >
+              <CheckCircleOutlined style={{ color: token.colorSuccess, fontSize: 12 }} />
+              {label}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -222,10 +352,16 @@ export function MessageItem({ message }: { message: ChatMessage }) {
               token={token}
             />
           ) : (
-            <Paragraph style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
-              {/* BUG-053：历史脏数据 content=null 会让 renderAnswer 直接抛错（白屏） */}
-              {renderAnswer(message.content ?? '', onChip, sourceIndexes, token)}
-            </Paragraph>
+            <>
+              {/* 问题2：done 后在回答顶部保留一行可折叠过程摘要（真实统计） */}
+              {!message.streamPhase && typeof message.streamDuration === 'number' && (
+                <ProcessSummary message={message} token={token} />
+              )}
+              <Paragraph style={{ margin: 0, whiteSpace: 'pre-wrap' }}>
+                {/* BUG-053：历史脏数据 content=null 会让 renderAnswer 直接抛错（白屏） */}
+                {renderAnswer(message.content ?? '', onChip, sourceIndexes, token)}
+              </Paragraph>
+            </>
           )}
         </div>
         {/* BUG-057：后端 /feedbacks 已实现，但组件此前全项目无引用 → 接入助手消息 */}

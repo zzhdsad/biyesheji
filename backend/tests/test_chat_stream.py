@@ -12,6 +12,8 @@ import uuid
 
 import pytest
 
+from src.core import deps as deps_mod
+from src.domain.models import User
 from tests.test_chat import _upload_doc
 from tests.test_parse import _make_kb
 from tests.test_upload import PG_AVAILABLE
@@ -169,3 +171,81 @@ def test_ask_stream_unknown_conversation_returns_404(client):
         json={"question": "问题", "kb_ids": [kb_id], "conversation_id": str(uuid.uuid4())},
     )
     assert resp.status_code == 404
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_ask_stream_member_can_access_public_kb(client, monkeypatch):
+    """问题3回归：member 角色（员工）能访问 public 知识库并正常提问。"""
+    # 1. admin 创建 public 知识库
+    kb_id = _make_kb(client, visibility="public")
+
+    # 2. 在数据库中创建真实的 member 用户（员工）
+    import uuid as _uuid
+    from src.domain.models import User
+    member_id = _uuid.uuid4()
+    member_user = User(
+        id=member_id,
+        email=f"employee_{member_id.hex[:8]}@example.com",
+        username=f"employee_{member_id.hex[:8]}",
+        hashed_password="",
+        role="member",
+    )
+    # 通过 admin 接口创建用户（绕过外键约束）
+    resp = client.post("/api/v1/users", json={
+        "username": member_user.username,
+        "email": member_user.email,
+        "role": "member",
+    })
+    assert resp.status_code == 201, f"创建 member 用户失败: {resp.text}"
+    created_user_id = resp.json()["user"]["id"]
+
+    # 3. 将 TEST_USER 替换为真实的 member 用户
+    member_user.id = _uuid.UUID(created_user_id)
+    monkeypatch.setattr(deps_mod, "TEST_USER", member_user)
+
+    # 4. member 能看到 public 知识库
+    kbs = client.get("/api/v1/kb").json()
+    assert any(kb["id"] == kb_id for kb in kbs), "member 应看到 public 知识库"
+
+    # 5. member 能用该知识库提问（至少收到 start 事件）
+    events = _ask_stream(client, "测试问题", kb_id)
+    names = [e for e, _ in events]
+    assert names[0] == "start", f"member 提问失败: {events}"
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_ask_stream_member_cannot_access_private_kb(client, monkeypatch):
+    """member 角色无法访问未授权的 private 知识库。"""
+    kb_id = _make_kb(client, visibility="private")
+
+    # 创建真实的 member 用户
+    import uuid as _uuid
+    member_id = _uuid.uuid4()
+    resp = client.post("/api/v1/users", json={
+        "username": f"employee2_{member_id.hex[:8]}",
+        "email": f"employee2_{member_id.hex[:8]}@example.com",
+        "role": "member",
+    })
+    assert resp.status_code == 201, f"创建 member 用户失败: {resp.text}"
+    created_user_id = resp.json()["user"]["id"]
+
+    from src.domain.models import User
+    member_user = User(
+        id=_uuid.UUID(created_user_id),
+        email=f"employee2_{member_id.hex[:8]}@example.com",
+        username=f"employee2_{member_id.hex[:8]}",
+        hashed_password="",
+        role="member",
+    )
+    monkeypatch.setattr(deps_mod, "TEST_USER", member_user)
+
+    # member 看不到 private 知识库
+    kbs = client.get("/api/v1/kb").json()
+    assert not any(kb["id"] == kb_id for kb in kbs), "member 不应看到 private 知识库"
+
+    # member 用 private 知识库提问 → 403
+    resp = client.post(
+        "/api/v1/chat/ask-stream",
+        json={"question": "测试", "kb_ids": [kb_id]},
+    )
+    assert resp.status_code == 403, f"应返回 403: {resp.text}"

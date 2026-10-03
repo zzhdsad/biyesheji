@@ -202,6 +202,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     };
     // 预声明助手占位消息 id，便于流式增量更新（打字机效果）
     const assistantId = crypto.randomUUID();
+    // 问题2：记录流式开始时间，用于 done 后计算耗时
+    const streamStartTime = performance.now();
     set((s) => ({
       messages: [
         ...s.messages,
@@ -209,7 +211,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // streamPhase: 发送后立即进入「分析问题」阶段（问题分析 → 检索 → 生成
         // 均由真实 SSE 事件驱动：send→analyzing，start→searching，
         // citations→generating），给用户持续的阶段反馈，避免长时间空白
-        { id: assistantId, role: 'assistant', content: '', citations: [], streamPhase: 'analyzing' as const },
+        { id: assistantId, role: 'assistant', content: '', citations: [], streamPhase: 'analyzing' as const, streamStartTime },
       ],
       sending: true,
     }));
@@ -294,6 +296,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
                       ...(answer ? { content: answer } : {}),
                       ...(reflection ? { reflection } : {}),
                       streamPhase: undefined,
+                      // 问题2：记录真实耗时（send → done 的墙钟时间差），
+                      // 供回答顶部的可折叠过程摘要展示
+                      streamDuration: m.streamStartTime
+                        ? (performance.now() - m.streamStartTime) / 1000
+                        : undefined,
                     }
                   : m,
               ),

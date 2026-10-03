@@ -33,6 +33,8 @@ const PREFIX_TO_ROUTE_FILE: Record<string, string> = {
   literatures: 'literatures.py',
   users: 'users.py',
   admin: 'admin.py',
+  // admin/import/* 端点实际实现在 import_center.py（两段前缀优先匹配）
+  'admin/import': 'import_center.py',
   audit: 'audit.py',
   settings: 'settings.py',
   feedbacks: 'feedbacks.py',
@@ -136,8 +138,14 @@ function decoratorRegex(method: ApiCall['method'], pathKey: string): RegExp {
 }
 
 function findBackendRoute(call: ApiCall): { file: string; matched: boolean } {
-  const prefix = call.pathKey.split('/')[1] ?? '';
-  const target = PREFIX_TO_ROUTE_FILE[prefix];
+  const segments = call.pathKey.split('/');
+  // 两段前缀（如 admin/import）优先于单段前缀（admin），
+  // 用于端点分布在多个路由文件的场景（import_center.py vs admin.py）。
+  const prefix2 = segments.length > 2 ? `${segments[1]}/${segments[2]}` : '';
+  const prefix = segments[1] ?? '';
+  const target =
+    (prefix2 ? PREFIX_TO_ROUTE_FILE[prefix2] : undefined) ??
+    PREFIX_TO_ROUTE_FILE[prefix];
   const candidates = target
     ? ROUTE_FILES.filter((f) => f.file.endsWith(target))
     : ROUTE_FILES;

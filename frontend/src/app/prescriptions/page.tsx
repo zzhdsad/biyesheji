@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
@@ -51,6 +51,7 @@ import {
   updatePrescription,
 } from '@/services/api';
 import { AppLayout } from '@/components/layout/AppLayout';
+import { TranslatableField } from '@/components/common/TranslatableField';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
 import ResourceRecycleBin from '@/components/admin/ResourceRecycleBin';
 import { useUserStore } from '@/stores/userStore';
@@ -988,19 +989,19 @@ export default function PrescriptionsPage() {
                 {detail.category?.name ?? '—'}
               </Descriptions.Item>
               <Descriptions.Item label="功效">
-                {detail.efficacy || '—'}
+                <TranslatableField label="功效" value={detail.efficacy} />
               </Descriptions.Item>
               <Descriptions.Item label="主治">
-                {detail.indications || '—'}
+                <TranslatableField label="主治" value={detail.indications} />
               </Descriptions.Item>
               <Descriptions.Item label="用法">
-                {detail.usage_method || '—'}
+                <TranslatableField label="用法" value={detail.usage_method} />
               </Descriptions.Item>
               <Descriptions.Item label="来源">
-                {detail.source || '—'}
+                <TranslatableField label="来源" value={detail.source} />
               </Descriptions.Item>
               <Descriptions.Item label="描述">
-                {detail.description || '—'}
+                <TranslatableField label="描述" value={detail.description} />
               </Descriptions.Item>
               <Descriptions.Item label="标签">
                 <Space size={[4, 4]} wrap>

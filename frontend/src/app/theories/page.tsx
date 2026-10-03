@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -40,6 +40,7 @@ import {
   updateTheory,
 } from '@/services/api';
 import { AppLayout } from '@/components/layout/AppLayout';
+import { TranslatableField } from '@/components/common/TranslatableField';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
 import ResourceRecycleBin from '@/components/admin/ResourceRecycleBin';
 import { useUserStore } from '@/stores/userStore';
@@ -595,18 +596,10 @@ export default function TheoriesPage() {
               {detail.category?.name ?? '—'}
             </Descriptions.Item>
             <Descriptions.Item label="来源">
-              {detail.source || '—'}
+              <TranslatableField label="来源" value={detail.source} />
             </Descriptions.Item>
             <Descriptions.Item label="内容">
-              {detail.content ? (
-                <Typography.Paragraph
-                  style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}
-                >
-                  {detail.content}
-                </Typography.Paragraph>
-              ) : (
-                <Typography.Text type="secondary">—</Typography.Text>
-              )}
+              <TranslatableField label="内容" value={detail.content} />
             </Descriptions.Item>
             <Descriptions.Item label="标签">
               <Space size={[4, 4]} wrap>

@@ -82,6 +82,7 @@ export function ChatWelcome({
   onChange,
   onSend,
   disabled,
+  disabledHint,
   scopeLabel,
   onPickExample,
 }: {
@@ -90,6 +91,8 @@ export function ChatWelcome({
   onSend: () => void;
   /** 无可用知识库时禁用输入（与聊天页 footer 行为一致）。 */
   disabled: boolean;
+  /** 禁用时的提示文案（问题3：员工无知识库权限提示）。 */
+  disabledHint?: string;
   /** 当前知识范围展示文案（"全部知识库" / "已选 N 个知识库"）。 */
   scopeLabel: string;
   /** 点击示例问题：填入输入框，不自动发送。 */
@@ -180,7 +183,7 @@ export function ChatWelcome({
           <Space size={8}>
             {disabled && (
               <Text type="warning" style={{ fontSize: 13 }}>
-                暂无可用知识库，请先创建或上传文档
+                {disabledHint || '暂无可用知识库，请先创建或上传文档'}
               </Text>
             )}
             <button

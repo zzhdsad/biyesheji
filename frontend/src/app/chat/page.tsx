@@ -66,6 +66,11 @@ export default function ChatPage() {
 
   const canSend = hasKb && !sending;
 
+  // 问题3修复：员工角色若无可见知识库时给出明确提示，而不是静默不可用
+  const kbEmptyHint = !hasKb
+    ? '暂无可用的知识库，请联系管理员将你加入知识库或创建公开知识库'
+    : '';
+
   // 欢迎界面与聊天界面互斥（问题三）：没有消息 → AI 助手欢迎页（自带
   // 中央输入框，不渲染底部 footer）；有消息 → 正常聊天布局（footer 输入）。
   const isEmpty = messages.length === 0;
@@ -113,6 +118,7 @@ export default function ChatPage() {
       onChange={setInput}
       onSend={() => void handleSend()}
       disabled={!hasKb}
+      disabledHint={kbEmptyHint}
       scopeLabel={
         selectedKbIds.length === 0
           ? '全部知识库'
@@ -150,13 +156,18 @@ export default function ChatPage() {
               }
             }}
           />
-          <Tooltip title={!hasKb ? '请先创建知识库' : ''}>
+          <Tooltip title={!hasKb ? kbEmptyHint || '请先创建知识库' : ''}>
             <Button
               type="primary"
               icon={<SendOutlined />}
               onClick={() => void handleSend()}
               disabled={!canSend}
               loading={sending}
+              style={
+                !canSend
+                  ? { opacity: 0.45, cursor: 'not-allowed', boxShadow: 'none' }
+                  : undefined
+              }
             >
               发送
             </Button>

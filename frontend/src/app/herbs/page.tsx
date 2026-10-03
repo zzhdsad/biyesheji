@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -39,6 +39,7 @@ import {
   fetchTags,
   updateHerb,
 } from '@/services/api';
+import { TranslatableField } from '@/components/common/TranslatableField';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
 import ResourceRecycleBin from '@/components/admin/ResourceRecycleBin';
@@ -623,19 +624,19 @@ export default function HerbsPage() {
               {detail.category?.name ?? '—'}
             </Descriptions.Item>
             <Descriptions.Item label="性味">
-              {detail.properties || '—'}
+              <TranslatableField label="性味" value={detail.properties} />
             </Descriptions.Item>
             <Descriptions.Item label="归经">
               <TagList items={detail.channels} />
             </Descriptions.Item>
             <Descriptions.Item label="功效">
-              {detail.effects || '—'}
+              <TranslatableField label="功效" value={detail.effects} />
             </Descriptions.Item>
             <Descriptions.Item label="来源">
-              {detail.source || '—'}
+              <TranslatableField label="来源" value={detail.source} />
             </Descriptions.Item>
             <Descriptions.Item label="描述">
-              {detail.description || '—'}
+              <TranslatableField label="描述" value={detail.description} />
             </Descriptions.Item>
             <Descriptions.Item label="标签">
               <Space size={[4, 4]} wrap>

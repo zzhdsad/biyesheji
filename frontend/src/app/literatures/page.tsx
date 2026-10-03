@@ -42,6 +42,7 @@ import {
   updateLiterature,
 } from '@/services/api';
 import { AppLayout } from '@/components/layout/AppLayout';
+import { TranslatableField } from '@/components/common/TranslatableField';
 import { AdminHeaderRight } from '@/components/layout/AppSider';
 import ResourceRecycleBin from '@/components/admin/ResourceRecycleBin';
 import { useUserStore } from '@/stores/userStore';
@@ -657,40 +658,19 @@ export default function LiteraturesPage() {
                 {detail.category?.name ?? '—'}
               </Descriptions.Item>
               <Descriptions.Item label="作者">
-                <TextOrDash value={detail.author} />
+                <TranslatableField label="作者" value={detail.author} />
               </Descriptions.Item>
               <Descriptions.Item label="朝代">
-                <TextOrDash value={detail.dynasty} />
+                <TranslatableField label="朝代" value={detail.dynasty} />
               </Descriptions.Item>
               <Descriptions.Item label="摘要">
-                {detail.summary ? (
-                  <Typography.Paragraph
-                    style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}
-                  >
-                    {detail.summary}
-                  </Typography.Paragraph>
-                ) : (
-                  <Typography.Text type="secondary">—</Typography.Text>
-                )}
+                <TranslatableField label="摘要" value={detail.summary} />
               </Descriptions.Item>
               <Descriptions.Item label="正文">
-                {detail.content ? (
-                  <Typography.Paragraph
-                    style={{
-                      whiteSpace: 'pre-wrap',
-                      marginBottom: 0,
-                      maxHeight: 360,
-                      overflowY: 'auto',
-                    }}
-                  >
-                    {detail.content}
-                  </Typography.Paragraph>
-                ) : (
-                  <Typography.Text type="secondary">—</Typography.Text>
-                )}
+                <TranslatableField label="正文" value={detail.content} />
               </Descriptions.Item>
               <Descriptions.Item label="来源">
-                <TextOrDash value={detail.source} />
+                <TranslatableField label="来源" value={detail.source} />
               </Descriptions.Item>
               <Descriptions.Item label="标签">
                 <Space size={[4, 4]} wrap>

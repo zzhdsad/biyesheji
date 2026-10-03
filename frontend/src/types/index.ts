@@ -265,6 +265,10 @@ export interface ChatMessage {
   evidenceGate?: GateDecision;
   /** 阶段十五：自反思决策（流式由 done 事件下发） */
   reflection?: ReflectionDecision;
+  /** 流式回答耗时（秒）：done 时由前端记录（问题2：可折叠摘要） */
+  streamDuration?: number;
+  /** 流式开始时间戳（performance.now）：用于计算 streamDuration */
+  streamStartTime?: number;
 }
 
 export interface KnowledgeBase {
