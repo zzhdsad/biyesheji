@@ -70,7 +70,8 @@ const THEME_LABELS: Record<ThemeMode, string> = {
  * key 即路由路径。
  */
 const CORE_NAV_ITEMS: Required<MenuProps>['items'] = [
-  { key: '/', icon: <HomeOutlined />, label: '首页' },
+  // 问题6：/ 已改为重定向（未登录→/login，已登录→/chat），不再保留"首页"菜单项，
+  // 智能问答 /chat 即系统主界面
   // 智能问答沿用整页跳转（沿用旧行为：切换会话后 zustand 状态需整页重载，避免残留）
   // key 必须是 '/chat'（带斜杠）才能参与 matchNavKey 的路由高亮
   {
@@ -302,9 +303,9 @@ export function AppSider() {
         flexDirection: 'column',
       }}
     >
-      {/* 品牌区 */}
+      {/* 品牌区（问题6：/ 已重定向到 /chat，品牌点击直达主界面） */}
       <div
-        onClick={() => router.push('/')}
+        onClick={() => router.push('/chat')}
         style={{
           display: 'flex',
           alignItems: 'center',

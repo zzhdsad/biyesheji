@@ -1,7 +1,7 @@
 'use client';
 
 import { Suspense, useEffect } from 'react';
-import { useRouter, useSearchParams } from 'next/navigation';
+import { useSearchParams } from 'next/navigation';
 import { Alert, Button, Card, Form, Input, Typography } from 'antd';
 import { LockOutlined, UserOutlined } from '@ant-design/icons';
 import { useUserStore } from '@/stores/userStore';
@@ -29,21 +29,25 @@ function safeRedirect(raw: string | null | undefined): string {
 }
 
 function LoginForm() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const { login, loading, error, token } = useUserStore();
 
   // 已登录 → 直接跳目标页（避免登录页反复可访问）
   useEffect(() => {
     if (token) {
-      router.replace(safeRedirect(searchParams.get('redirect')));
+      window.location.assign(safeRedirect(searchParams.get('redirect')));
     }
-  }, [token, router, searchParams]);
+  }, [token, searchParams]);
 
   const onFinish = async (values: LoginFormValues) => {
     const ok = await login(values.username_or_email, values.password);
     if (ok) {
-      router.replace(safeRedirect(searchParams.get('redirect')));
+      // 问题5：登录成功后整页硬跳，而非 SPA 软导航。
+      // 软导航曾出现"点击登录进不去、刷新后才进去"的竞态：跳转瞬间新页面的
+      // 首个请求若赶在 token/cookie 完全生效前发出，401 会被拦截器弹回登录页。
+      // 硬跳让浏览器以全新生命周期加载目标页：middleware 读 cookie、AuthInit
+      // 读 localStorage 时 token 均已稳定落盘，点击一次即进入。
+      window.location.assign(safeRedirect(searchParams.get('redirect')));
     }
   };
 

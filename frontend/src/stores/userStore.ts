@@ -80,9 +80,17 @@ export const useUserStore = create<UserState>((set, get) => ({
       });
       return true;
     } catch (err) {
-      const detail =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ??
-        '登录失败，请稍后重试';
+      // 问题5：区分失败原因，给出可操作提示而不是笼统的"登录失败"卡住用户：
+      // - 无响应（网络断/后端宕机/超时）→ 明确提示连接问题
+      // - 5xx → 后端异常
+      // - 其他（401 凭证错误等）→ 后端返回的 detail
+      const resp = (err as { response?: { status?: number; data?: { detail?: string } } })
+        ?.response;
+      const detail = !resp
+        ? '无法连接服务器，请检查网络或稍后重试'
+        : (resp.status ?? 0) >= 500
+          ? `服务器异常（${resp.status}），请稍后重试`
+          : (resp.data?.detail ?? '登录失败，请稍后重试');
       set({ loading: false, error: detail });
       return false;
     }

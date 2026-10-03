@@ -26,6 +26,16 @@ export function middleware(req: NextRequest) {
   }
 
   const token = req.cookies.get(TOKEN_COOKIE_KEY)?.value;
+
+  // 问题6：根路径角色明确定义——已登录访问 / 直接进入主界面 /chat
+  // （未登录走下方统一拦截到 /login）
+  if (pathname === '/' && token) {
+    const chatUrl = req.nextUrl.clone();
+    chatUrl.pathname = '/chat';
+    chatUrl.search = '';
+    return NextResponse.redirect(chatUrl);
+  }
+
   if (token) {
     return NextResponse.next();
   }
