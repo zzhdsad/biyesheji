@@ -30,7 +30,6 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons';
 import type {
-  EmbeddingDependencyState,
   EmbeddingStatus,
   ModelConfig,
   RevectorizeJobStatus,
@@ -40,11 +39,12 @@ import { fetchModelConfig, testModelConnection, updateModelConfig, fetchSystemCo
 import {
   canCancelJob,
   canStartRevectorize,
-  dependencyColor,
-  dependencyLabel,
+  estimateRemaining,
   formatJobSummary,
   jobStatusLabel,
   shouldPollJob,
+  vectorHealth,
+  vectorHealthText,
 } from '@/utils/embeddingStatus';
 import { describeApiError } from '@/utils/apiError';
 import { AppLayout } from '@/components/layout/AppLayout';
@@ -105,9 +105,6 @@ export default function SettingsPage() {
   }, [loadEmbeddingStatus]);
 
   const jobStatus = embStatus?.job?.status ?? null;
-  // 依赖与模型权重随镜像内置，状态仅反映"是否在重新向量化"
-  const dependencyState: EmbeddingDependencyState =
-    embStatus?.overall_status === 'revectorizing' ? 'revectorizing' : 'ready';
 
   // 重新向量化进行中 → 轮询进度（结束后自动停止）
   useEffect(() => {
@@ -456,43 +453,93 @@ export default function SettingsPage() {
           </Row>
           <Divider style={{ margin: '12px 0' }} />
 
-          {/* 状态一览：当前模型 / 运行状态 / 存量向量模型 / 待重建数量 */}
-          <Space direction="vertical" size={8} style={{ width: '100%' }}>
-            <Space wrap size={8}>
-              <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-                当前模型：
-              </Typography.Text>
-              <Tag color="blue">{embStatus?.config.model_key ?? '—'}</Tag>
-              <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-                运行状态：
-              </Typography.Text>
-              <Tag color={dependencyColor(dependencyState)}>
-                {dependencyLabel(dependencyState)}
-              </Tag>
-              <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-                已有向量模型：
-              </Typography.Text>
-              <Tag>{embStatus?.vectors.stale_models?.length ? embStatus.vectors.stale_models.join('、') : embStatus?.config.model_key ?? '—'}</Tag>
-            </Space>
+          {/* 模块 B：知识库状态卡片（问题2）。口径如实分列展示，
+              不用文案掩盖数字差异（807 = legacy-import 标注数；
+              808 = 其中 Milvus 无向量的待重建文档数）。 */}
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            <Alert
+              // 三色总状态：红 = 存在旧模型向量；黄 = 部分文档等待生成；绿 = 全部就绪
+              type={vectorHealth(embStatus?.vectors)}
+              showIcon
+              message={`向量状态：${vectorHealthText(vectorHealth(embStatus?.vectors))}`}
+              description={
+                vectorHealth(embStatus?.vectors) === 'error'
+                  ? `其中 ${embStatus?.vectors.stale_with_vectors} 篇在向量库中仍是旧模型向量，检索时会被自动排除（不会产生错误结果，但这些文档暂时搜不到）。`
+                  : vectorHealth(embStatus?.vectors) === 'warning'
+                    ? '这些文档尚未生成向量（多为历史导入数据），检索时天然不会命中，不会产生错误结果。'
+                    : '知识库向量与当前模型一致，检索链路完整可用。'
+              }
+              action={
+                canStartRevectorize(embStatus?.vectors.stale_documents ?? 0, embStatus?.job) ? (
+                  <Button size="small" type="primary" loading={embBusy} onClick={handleRevectorize}>
+                    生成知识库向量
+                  </Button>
+                ) : undefined
+              }
+            />
 
-            {/* 存量旧模型向量：显示待重建数量 + 一键批量重建 */}
-            {(embStatus?.vectors.stale_documents ?? 0) > 0 && (
-              <Alert
-                type="warning"
-                showIcon
-                message={`检测到 ${embStatus?.vectors.stale_documents} 篇文档的向量由旧模型生成，需重新向量化后才能正常检索`}
-                description="旧模型向量与新模型不在同一向量空间，检索时会被自动排除；点击下方按钮可一次性后台重建。"
-                action={
-                  canStartRevectorize(embStatus?.vectors.stale_documents ?? 0, embStatus?.job) ? (
-                    <Button size="small" type="primary" loading={embBusy} onClick={handleRevectorize}>
-                      批量重新向量化
-                    </Button>
-                  ) : undefined
-                }
-              />
-            )}
+            {/* 状态明细：当前模型 / 文档总数 / 分项统计（口径如实分列） */}
+            <Row gutter={[12, 12]}>
+              <Col xs={24} md={8}>
+                <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                  ✅ 当前模型
+                </Typography.Text>
+                <div>
+                  <Tag color="green" style={{ marginTop: 4 }}>
+                    {embStatus?.config.model_key ?? '—'}
+                  </Tag>
+                </div>
+              </Col>
+              <Col xs={24} md={8}>
+                <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                  📚 文档数量
+                </Typography.Text>
+                <div>
+                  <Tag color="blue" style={{ marginTop: 4 }}>
+                    {embStatus?.vectors.total_documents ?? '—'} 篇
+                  </Tag>
+                </div>
+              </Col>
+              <Col xs={24} md={8}>
+                <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                  ⏳ 待处理文档
+                </Typography.Text>
+                <div>
+                  <Tag
+                    color={
+                      (embStatus?.vectors.stale_documents ?? 0) > 0 ? 'orange' : 'default'
+                    }
+                    style={{ marginTop: 4 }}
+                  >
+                    {embStatus?.vectors.stale_documents ?? 0} 篇
+                  </Tag>
+                </div>
+              </Col>
+            </Row>
 
-            {/* 任务进度：总数 / 已完成 / 处理中 / 失败数 / 进度条 */}
+            {/* 分项口径：旧模型向量 vs 尚未生成向量（数字不同 = 统计口径不同，
+                不是数据错误，见下方"为什么需要向量化"说明） */}
+            <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+              其中：旧模型向量{' '}
+              <Typography.Text strong type="warning">
+                {embStatus?.vectors.stale_with_vectors ?? 0}
+              </Typography.Text>{' '}
+              篇（向量库中存在，检索时自动排除）；尚未生成向量{' '}
+              <Typography.Text strong>
+                {embStatus?.vectors.unvectorized_documents ?? 0}
+              </Typography.Text>{' '}
+              篇（向量库中无向量，等待生成）。
+            </Typography.Text>
+
+            {/* 为什么需要向量化：给非技术用户的一句话解释 */}
+            <Alert
+              type="info"
+              showIcon
+              message="为什么需要向量化？"
+              description="不同 embedding 模型生成的向量空间不同，旧向量无法与当前模型进行准确匹配。系统检索时会自动排除旧模型向量以避免错误结果；点击「生成知识库向量」可在后台一次性重建，期间系统可正常使用，不影响已有问答。"
+            />
+
+            {/* 任务进度：总数 / 已完成 / 处理中 / 失败数 / 预计耗时 / 进度条 */}
             {embStatus?.job && (
               <div>
                 <Space wrap size={8} style={{ marginBottom: 6 }}>
@@ -502,6 +549,11 @@ export default function SettingsPage() {
                   <Typography.Text style={{ fontSize: 13 }}>
                     {formatJobSummary(embStatus.job)}
                   </Typography.Text>
+                  {estimateRemaining(embStatus.job) && (
+                    <Typography.Text type="secondary" style={{ fontSize: 13 }}>
+                      {estimateRemaining(embStatus.job)}
+                    </Typography.Text>
+                  )}
                   {embStatus.job.total > 0 && (
                     <Typography.Text type="secondary" style={{ fontSize: 13 }}>
                       处理中 {embStatus.job.processing}

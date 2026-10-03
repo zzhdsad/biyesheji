@@ -23,7 +23,7 @@ NULL 语义：本字段上线前已入库、未标注的文档为 NULL（legacy�
 
 import uuid
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
@@ -96,6 +96,16 @@ async def stale_models(db: AsyncSession, current_key: str) -> list[str]:
     )
     rows = (await db.scalars(stmt)).all()
     return [r for r in rows if r]
+
+
+async def active_document_count(db: AsyncSession) -> int:
+    """统计"仍在使用中"的文档总数（未软删除 + 非回收站知识库）。
+
+    只读统计（设置页知识库状态卡片的总数分母），口径与 stale_doc_ids /
+    stale_models 完全一致（同一套 _active_doc_filters），不修改任何业务数据。
+    """
+    stmt = select(func.count()).select_from(Document).where(*_active_doc_filters())
+    return int((await db.scalar(stmt)) or 0)
 
 
 async def pending_doc_ids(

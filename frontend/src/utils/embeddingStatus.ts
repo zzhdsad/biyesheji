@@ -1,4 +1,8 @@
-import type { EmbeddingDependencyState, RevectorizeJobStatus } from '@/services/api';
+import type {
+  EmbeddingDependencyState,
+  EmbeddingStatus,
+  RevectorizeJobStatus,
+} from '@/services/api';
 
 /**
  * Embedding 状态展示工具（纯函数，便于单测）。
@@ -82,4 +86,59 @@ export function canStartRevectorize(
   if (staleDocuments > 0) return true;
   // 上一轮有失败项时可继续重试
   return Boolean(job && job.failed > 0);
+}
+
+// ── 模块 B：知识库状态卡片（问题2）──────────────────────────────────────────
+
+/** 向量健康总状态：红 = 存在旧模型向量；黄 = 部分文档等待生成；绿 = 全部就绪。 */
+export type VectorHealth = 'error' | 'warning' | 'success';
+
+/**
+ * 三色状态判定（口径与后端一致，不做任何业务决策）：
+ * - error（红）：stale_with_vectors > 0 —— Milvus 中仍存在旧模型向量，
+ *   检索时被排除，这些文档需要重新生成向量后才能恢复参与检索；
+ * - warning（黄）：仅 unvectorized_documents > 0 —— 从未真正向量化
+ *   （检索天然不命中，不会产生错误结果），等待生成即可；
+ * - success（绿）：stale_documents === 0 —— 无待处理文档。
+ */
+export function vectorHealth(
+  vectors: Pick<
+    EmbeddingStatus['vectors'],
+    'stale_documents' | 'stale_with_vectors' | 'unvectorized_documents'
+  > | null | undefined,
+): VectorHealth {
+  if (!vectors) return 'success';
+  if ((vectors.stale_with_vectors ?? 0) > 0) return 'error';
+  if ((vectors.stale_documents ?? 0) > 0 || (vectors.unvectorized_documents ?? 0) > 0) {
+    return 'warning';
+  }
+  return 'success';
+}
+
+/** 三色状态 → 状态一句话文案（Antd Alert/Badge type 同名）。 */
+export function vectorHealthText(health: VectorHealth): string {
+  switch (health) {
+    case 'error':
+      return '存在旧模型向量，需要重新生成';
+    case 'warning':
+      return '部分文档等待生成向量';
+    default:
+      return '全部文档已完成向量化';
+  }
+}
+
+/** 任务进行中 → 基于已处理进度估算剩余时间；信息不足返回 null。 */
+export function estimateRemaining(job: RevectorizeJobStatus | null | undefined): string | null {
+  if (!job || !shouldPollJob(job.status) || job.processed <= 0) return null;
+  const startedAt = job.created_at ? Date.parse(job.created_at) : NaN;
+  if (!Number.isFinite(startedAt)) return null;
+  const elapsedMs = Date.now() - startedAt;
+  if (elapsedMs <= 0) return null;
+  const remainingDocs = Math.max(0, job.total - job.processed);
+  const msPerDoc = elapsedMs / job.processed;
+  const remainingMs = remainingDocs * msPerDoc;
+  if (!Number.isFinite(remainingMs) || remainingMs < 1000) return null;
+  const minutes = Math.floor(remainingMs / 60_000);
+  const seconds = Math.round((remainingMs % 60_000) / 1000);
+  return minutes > 0 ? `预计剩余约 ${minutes} 分钟` : `预计剩余约 ${seconds} 秒`;
 }

@@ -208,6 +208,50 @@ def test_mismatch_is_detected(client):
     assert LEGACY_KEY in data["vectors"]["stale_models"]
 
 
+def test_stale_split_by_vector_presence(client, vector_store):
+    """stale 拆分口径：Milvus 有向量（真旧模型向量）vs 无向量（从未向量化）。
+
+    复现"807 篇旧模型向量"提示的误导：历史导入文档被标注为 legacy 但
+    向量库中并没有向量——这类文档不应被描述为"旧模型向量"，而是
+    "尚未生成向量"。拆分后：
+    - stale_with_vectors：标注旧模型且向量仍存在（检索时被主动排除）；
+    - unvectorized_documents：标注旧模型且无向量（检索天然不命中）；
+    - stale_documents：两者之和（兼容旧语义）。
+    """
+    kb_id = _make_kb(client)
+    doc_a = _upload_doc(client, kb_id, "真旧向量.txt")  # 上传即向量化（mock）
+    doc_b = _upload_doc(client, kb_id, "无向量.txt")  # 上传后删除其向量
+    _set_vector_model(doc_a, LEGACY_KEY)
+    _set_vector_model(doc_b, LEGACY_KEY)
+    vector_store.delete_by_doc(doc_b)  # 模拟"从未真正向量化"的历史导入文档
+
+    vectors = _embedding_status(client)["vectors"]
+    assert vectors["stale_with_vectors"] >= 1, "有向量的旧模型文档计入 stale_with_vectors"
+    assert vectors["unvectorized_documents"] >= 1, "无向量文档计入 unvectorized_documents"
+    assert (
+        vectors["stale_documents"]
+        == vectors["stale_with_vectors"] + vectors["unvectorized_documents"]
+    ), "总数 = 有向量 + 无向量（兼容旧语义）"
+
+
+def test_total_documents_counts_active_docs(client):
+    """total_documents（B-2 只读字段）：仍在使用中的文档总数。
+
+    口径与 stale 统计同一套过滤（未软删除 + 非回收站知识库），仅作设置页
+    状态卡片的分母，不参与业务判定：
+    - 上传新文档后总数 +1；
+    - 恒有 total_documents >= stale_documents（stale 是其子集）。
+    """
+    kb_id = _make_kb(client)
+    baseline = _embedding_status(client)["vectors"]
+
+    _upload_doc(client, kb_id, "总数统计.txt")
+
+    after = _embedding_status(client)["vectors"]
+    assert after["total_documents"] == baseline["total_documents"] + 1
+    assert after["total_documents"] >= after["stale_documents"]
+
+
 # ── 3. 批量重新向量化 ────────────────────────────────────────────────────────
 
 

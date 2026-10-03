@@ -7,9 +7,12 @@ import {
   canStartRevectorize,
   dependencyColor,
   dependencyLabel,
+  estimateRemaining,
   formatJobSummary,
   jobStatusLabel,
   shouldPollJob,
+  vectorHealth,
+  vectorHealthText,
 } from './embeddingStatus';
 
 test('运行状态标签覆盖全部产品状态', () => {
@@ -87,4 +90,50 @@ test('存在旧模型向量时可发起批量重建；任务进行中不可重�
   // 上一轮有失败项：即使没有新的旧模型向量，也允许继续处理
   assert.equal(canStartRevectorize(0, { ...baseJob, status: 'partial', failed: 2 }), true);
   assert.equal(canStartRevectorize(0, { ...baseJob, status: 'succeeded', failed: 0 }), false);
+});
+
+// ── 模块 B：知识库状态卡片 ───────────────────────────────────────────────────
+
+test('向量健康三色判定：红 = 旧模型向量，黄 = 仅未生成，绿 = 全就绪', () => {
+  // 红：Milvus 中仍存在旧模型向量（stale_with_vectors > 0）
+  assert.equal(
+    vectorHealth({ stale_documents: 827, stale_with_vectors: 19, unvectorized_documents: 808 }),
+    'error',
+  );
+  // 黄：只有"从未向量化"的文档，无旧向量混检风险
+  assert.equal(
+    vectorHealth({ stale_documents: 808, stale_with_vectors: 0, unvectorized_documents: 808 }),
+    'warning',
+  );
+  // 绿：无待处理文档
+  assert.equal(
+    vectorHealth({ stale_documents: 0, stale_with_vectors: 0, unvectorized_documents: 0 }),
+    'success',
+  );
+  // 状态缺失按绿处理（不惊吓用户）
+  assert.equal(vectorHealth(null), 'success');
+  assert.equal(vectorHealth(undefined), 'success');
+});
+
+test('向量健康三色文案非空且互不相同', () => {
+  const texts = [
+    vectorHealthText('error'),
+    vectorHealthText('warning'),
+    vectorHealthText('success'),
+  ];
+  for (const t of texts) assert.ok(t && t.trim(), `文案为空：${t}`);
+  assert.equal(new Set(texts).size, 3, '三种状态文案不得重复');
+});
+
+test('剩余时间估算：信息不足返回 null，进行中按速率外推', () => {
+  // 无任务 / 已结束 / 未处理任何文档 → null
+  assert.equal(estimateRemaining(null), null);
+  assert.equal(estimateRemaining({ ...baseJob, status: 'succeeded' }), null);
+  assert.equal(estimateRemaining({ ...baseJob, processed: 0 }), null);
+  // created_at 缺失 → null
+  assert.equal(estimateRemaining({ ...baseJob, created_at: null }), null);
+  // 进行中且有起点：已处理 8/20，按速率外推出"预计剩余"字样
+  const started = new Date(Date.now() - 80_000).toISOString();
+  const text = estimateRemaining({ ...baseJob, created_at: started });
+  assert.ok(text === null || /^预计剩余约/.test(text), `返回值异常：${text}`);
 });

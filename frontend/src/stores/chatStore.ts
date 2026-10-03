@@ -206,7 +206,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       messages: [
         ...s.messages,
         userMsg,
-        { id: assistantId, role: 'assistant', content: '', citations: [] },
+        // streamPhase: 发送后立即进入「分析问题」阶段（问题分析 → 检索 → 生成
+        // 均由真实 SSE 事件驱动：send→analyzing，start→searching，
+        // citations→generating），给用户持续的阶段反馈，避免长时间空白
+        { id: assistantId, role: 'assistant', content: '', citations: [], streamPhase: 'analyzing' as const },
       ],
       sending: true,
     }));
@@ -222,22 +225,24 @@ export const useChatStore = create<ChatState>((set, get) => ({
         {
           onStart: ({ conversation_id, query_analysis, router_decision }) => {
             // 阶段十一/十二：start 事件携带 Query 分析与路由决策（仅展示，不影响请求行为）
+            // 过程状态：问题分析完成 → 后端开始检索知识库（searching）
             set((s) => ({
               currentConversationId: conversationSeq.isLatest(viewId)
                 ? conversation_id
                 : s.currentConversationId,
-              messages:
-                query_analysis || router_decision
-                  ? s.messages.map((m) =>
-                      m.id === assistantId
-                        ? {
-                            ...m,
-                            ...(query_analysis ? { queryAnalysis: query_analysis } : {}),
-                            ...(router_decision ? { routerDecision: router_decision } : {}),
-                          }
-                        : m,
-                    )
-                  : s.messages,
+              messages: s.messages.map((m) =>
+                m.id === assistantId
+                  ? {
+                      ...m,
+                      ...(query_analysis ? { queryAnalysis: query_analysis } : {}),
+                      ...(router_decision ? { routerDecision: router_decision } : {}),
+                      // 仅在仍处于 analyzing 时推进（防御乱序事件回拨阶段）
+                      ...(m.streamPhase === 'analyzing'
+                        ? { streamPhase: 'searching' as const }
+                        : {}),
+                    }
+                  : m,
+              ),
             }));
           },
           onCitations: ({
@@ -251,6 +256,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             // 引用卡片在生成前实时展示；阶段十：同时保存多来源证据分组
             // 阶段十三：保存 KG 证据切片（与 citations 同源，供后续区分展示）
             // 阶段十四：附带保存 Evidence Gate 决策（暂不展示，仅留待后续阶段）
+            // 流式阶段：检索完成（citations 已下发）→ 即将开始生成
             set((s) => ({
               messages: s.messages.map((m) =>
                 m.id === assistantId
@@ -262,13 +268,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
                       evidenceSummary: evidence_summary,
                       ...(kg_evidence ? { kgEvidence: kg_evidence } : {}),
                       ...(evidence_gate ? { evidenceGate: evidence_gate } : {}),
+                      streamPhase: 'generating' as const,
                     }
                   : m,
               ),
             }));
           },
           onDelta: ({ content }) => {
-            // 逐 chunk 追加内容，形成打字机效果
+            // 逐 chunk 追加内容，形成打字机效果（首个 delta 后阶段提示自然被正文替代）
             set((s) => ({
               messages: s.messages.map((m) =>
                 m.id === assistantId ? { ...m, content: m.content + content } : m,
@@ -286,6 +293,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                       // done 事件带回最终权威文本（后端已按该文本持久化）
                       ...(answer ? { content: answer } : {}),
                       ...(reflection ? { reflection } : {}),
+                      streamPhase: undefined,
                     }
                   : m,
               ),
@@ -301,7 +309,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
             set((s) => ({
               messages: s.messages.map((m) =>
                 m.id === assistantId
-                  ? { ...m, content: m.content || `生成失败：${message}` }
+                  ? { ...m, content: m.content || `生成失败：${message}`, streamPhase: undefined }
                   : m,
               ),
               sending: false,
@@ -314,7 +322,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       set((s) => ({
         messages: s.messages.map((m) =>
           m.id === assistantId
-            ? { ...m, content: m.content || '请求失败，请稍后重试。' }
+            ? { ...m, content: m.content || '请求失败，请稍后重试。', streamPhase: undefined }
             : m,
         ),
         sending: false,

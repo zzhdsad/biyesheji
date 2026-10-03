@@ -44,6 +44,18 @@ export const EVIDENCE_LEVEL_LABEL: Record<EvidenceLevel, string> = {
 };
 
 /**
+ * 证据等级 → 面向普通用户的解释文案（Tooltip 用）。
+ *
+ * 只做展示辅助，不改变后端 level 判定（阈值仍为 0.7 / 0.3，
+ * 与后端 src/application/evidence.py 保持一致）。
+ */
+export const EVIDENCE_LEVEL_DESCRIPTION: Record<EvidenceLevel, string> = {
+  high: '表示当前回答有较高可信度来源支持',
+  medium: '表示存在相关资料支持，但信息完整度一般',
+  insufficient: '表示当前资料不足，仅作为参考',
+};
+
+/**
  * 用户可见的「相关度」展示字段。
  *
  * 与后端语义保持一致：
@@ -240,7 +252,7 @@ export function buildEvidenceGroups(citations: Citation[]): EvidenceGroup[] {
 }
 
 /**
- * 把答案内联引用标记 `[citation: n]` 的编号 n 映射到 Collapse 面板 key（BUG-058）。
+ * 把 chip 的来源编号映射到 Collapse 面板 key（BUG-058）。
  *
  * 面板 key 是证据的 `source_index`（后端下发，即展示位次），而内联编号由 LLM
  * 生成——模型可能引用越界编号（只有 3 条来源却写 `[citation: 5]`）。旧实现直接
@@ -258,6 +270,53 @@ export function resolveCitationKey(
   if (!Number.isFinite(chipIndex)) return null;
   const wanted = Math.trunc(chipIndex);
   return availableSourceIndexes.includes(wanted) ? String(wanted) : null;
+}
+
+/** 正文解析产物：纯文本段 或 内联引用标记。 */
+export type AnswerSegment =
+  | { type: 'text'; text: string }
+  | { type: 'citation'; index: number; page: number | null };
+
+/**
+ * 解析回答正文中的内联引用标记 `[citation: 编号, 页码?]`（引用 0 修复）。
+ *
+ * 与后端 rag_service._CITATION_PATTERN 同一语法（页码可选，兼容有无空格）：
+ * - `[citation: 3]` → { index: 3, page: null }；
+ * - `[citation: 1, 5]` → { index: 1, page: 5 }；
+ * - `[citation: 1, 0]` → page=0（后端 Prompt 旧约定"无页码填 0"，展示层不得
+ *   把 0 当编号显示——chip 一律显示 [index]）。
+ *
+ * 该函数只做解析（纯函数，可独立测试）；编号是否有效（能否定位证据卡片）
+ * 由调用方结合 source_index 集合判断（见 resolveCitationKey）。
+ */
+export function parseCitationMarkers(content: string): AnswerSegment[] {
+  const segments: AnswerSegment[] = [];
+  const re = /\[citation:\s*(\d+)(?:,\s*(-?\d+))?\]/g;
+  let last = 0;
+  for (let m = re.exec(content); m !== null; m = re.exec(content)) {
+    const at = m.index;
+    if (at > last) segments.push({ type: 'text', text: content.slice(last, at) });
+    const page = m[2] != null ? Number(m[2]) : null;
+    segments.push({ type: 'citation', index: Number(m[1]), page });
+    last = at + m[0].length;
+  }
+  if (last < content.length) segments.push({ type: 'text', text: content.slice(last) });
+  return segments;
+}
+
+/**
+ * 来源名展示（问题6：文件名产品化）：
+ * - "普济本事方.txt" → 《普济本事方》（去扩展名 + 书名号，去掉数据库文件感）；
+ * - 已经是《》包裹或纯资源名（中药/方剂，如"丹参"）原样返回；
+ * - "《伤寒论》校注本.pdf" 这类含书名号的也去扩展名处理。
+ */
+export function formatSourceName(raw: string | null | undefined): string {
+  const name = (raw ?? '').trim();
+  if (!name) return '未知来源';
+  const stripped = name.replace(/\.(txt|pdf|md|docx?|json|csv)$/i, '').trim();
+  if (!stripped) return name;
+  if (stripped.startsWith('《') && stripped.endsWith('》')) return stripped;
+  return `《${stripped}》`;
 }
 
 /**

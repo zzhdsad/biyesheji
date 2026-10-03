@@ -1,11 +1,12 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { App, Empty, Input, Space, Tooltip, Typography, Button, Select, Tag } from 'antd';
+import { App, Input, Space, Tag, Tooltip, Typography, Button, Select } from 'antd';
 import { SendOutlined } from '@ant-design/icons';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { ChatHeaderRight } from '@/components/layout/AppSider';
 import { MessageItem } from '@/components/chat/MessageItem';
+import { ChatWelcome } from '@/components/chat/ChatWelcome';
 import { useChatStore } from '@/stores/chatStore';
 
 /** 与后端 chat.py `ChatAskRequest.question` 的 max_length=2000 保持一致（BUG-052）。 */
@@ -35,6 +36,17 @@ export default function ChatPage() {
     void loadConversations();
   }, [loadKnowledgeBases, loadConversations]);
 
+  // 模块 C：承接首页「即问」入口——读取 ?q= 预填输入框（不自动发送，
+  // 避免误触发长耗时检索），随后清除 URL 参数避免刷新时重复带入。
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const q = params.get('q');
+    if (q) {
+      setInput(q.slice(0, QUESTION_MAX_LENGTH));
+      window.history.replaceState(null, '', '/chat');
+    }
+  }, []);
+
   // 新消息时自动滚动到底部
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -54,99 +66,103 @@ export default function ChatPage() {
 
   const canSend = hasKb && !sending;
 
+  // 欢迎界面与聊天界面互斥（问题三）：没有消息 → AI 助手欢迎页（自带
+  // 中央输入框，不渲染底部 footer）；有消息 → 正常聊天布局（footer 输入）。
+  const isEmpty = messages.length === 0;
+
+  // 产品化 Header（问题五）：左 = 标题；右 = 知识库选择器 + 用户菜单
+  // （系统状态已弱化到用户菜单内部，不再作为主要视觉元素）。
   const headerLeft = (
-    <>
-      <Typography.Title level={4} style={{ margin: 0 }}>
-        智能问答
-      </Typography.Title>
-      <Space size={8} align="center">
-        <Typography.Text type="secondary" style={{ fontSize: 13 }}>
-          知识库
-        </Typography.Text>
-        <Select
-          mode="multiple"
-          maxTagCount="responsive"
-          size="small"
-          style={{ minWidth: 220, maxWidth: 400 }}
-          placeholder="默认全部知识库"
-          value={selectedKbIds}
-          onChange={setSelectedKbIds}
-          options={knowledgeBases.map((kb) => ({ label: kb.name, value: kb.id }))}
-          notFoundContent="暂无知识库"
-          suffixIcon={
-            selectedKbIds.length === 0 ? (
-              <Tag color="blue" style={{ margin: 0, fontSize: 12 }}>全部</Tag>
-            ) : null
-          }
-        />
-        {selectedKbIds.length > 0 && (
-          <Button size="small" type="link" onClick={resetKbSelection}>
-            重置
-          </Button>
-        )}
-      </Space>
-    </>
+    <Typography.Title level={4} style={{ margin: 0 }}>
+      智能问答
+    </Typography.Title>
   );
 
-  const headerRight = <ChatHeaderRight />;
-
-  const content = (
-    <>
-      {messages.length === 0 ? (
-        <Empty
-          description={
-            hasKb
-              ? '基于所选知识库回答，答案附引用来源'
-              : '暂无可用知识库，请先创建或上传文档'
-          }
-          style={{ marginTop: 120 }}
-        />
-      ) : (
-        <div style={{ maxWidth: 900, margin: '0 auto' }}>
-          {messages.map((m) => (
-            <MessageItem key={m.id} message={m} />
-          ))}
-          <div ref={bottomRef} />
-        </div>
-      )}
-    </>
-  );
-
-  const footer = (
-    <div style={{ maxWidth: 900, margin: '0 auto', display: 'flex', gap: 12 }}>
-      <Input.TextArea
-        value={input}
-        onChange={(e) => setInput(e.target.value)}
-        placeholder={
-          hasKb
-            ? '输入问题，Enter 发送，Shift+Enter 换行'
-            : '请先创建知识库并上传文档'
+  const headerRight = (
+    <Space size={12} align="center">
+      <Select
+        mode="multiple"
+        maxTagCount="responsive"
+        size="small"
+        style={{ minWidth: 200, maxWidth: 360 }}
+        placeholder="知识范围：全部知识库"
+        value={selectedKbIds}
+        onChange={setSelectedKbIds}
+        options={knowledgeBases.map((kb) => ({ label: kb.name, value: kb.id }))}
+        notFoundContent="暂无知识库"
+        suffixIcon={
+          selectedKbIds.length === 0 ? (
+            <Tag color="blue" style={{ margin: 0, fontSize: 12 }}>
+              全部
+            </Tag>
+          ) : null
         }
-        autoSize={{ minRows: 1, maxRows: 4 }}
-        disabled={!hasKb}
-        // BUG-052：与后端 max_length 对齐，输入即限长（并显示计数）
-        maxLength={QUESTION_MAX_LENGTH}
-        showCount
-        onPressEnter={(e) => {
-          if (!e.shiftKey) {
-            e.preventDefault();
-            void handleSend();
-          }
-        }}
       />
-      <Tooltip title={!hasKb ? '请先创建知识库' : ''}>
-        <Button
-          type="primary"
-          icon={<SendOutlined />}
-          onClick={() => void handleSend()}
-          disabled={!canSend}
-          loading={sending}
-        >
-          发送
+      {selectedKbIds.length > 0 && (
+        <Button size="small" type="link" onClick={resetKbSelection}>
+          重置
         </Button>
-      </Tooltip>
+      )}
+      <ChatHeaderRight />
+    </Space>
+  );
+
+  const content = isEmpty ? (
+    <ChatWelcome
+      value={input}
+      onChange={setInput}
+      onSend={() => void handleSend()}
+      disabled={!hasKb}
+      scopeLabel={
+        selectedKbIds.length === 0
+          ? '全部知识库'
+          : `已选 ${selectedKbIds.length} 个知识库`
+      }
+      onPickExample={(q) => setInput(q)}
+    />
+  ) : (
+    <div style={{ maxWidth: 900, margin: '0 auto' }}>
+      {messages.map((m) => (
+        <MessageItem key={m.id} message={m} />
+      ))}
+      <div ref={bottomRef} />
     </div>
   );
+
+  // footer 输入区仅在聊天模式渲染；欢迎界面自带中央输入框，二者不同时存在
+  const footer = isEmpty
+    ? undefined
+    : (() => (
+        <div style={{ maxWidth: 900, margin: '0 auto', display: 'flex', gap: 12 }}>
+          <Input.TextArea
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="输入问题，Enter 发送，Shift+Enter 换行"
+            autoSize={{ minRows: 1, maxRows: 4 }}
+            disabled={!hasKb}
+            // BUG-052：与后端 max_length 对齐，输入即限长（并显示计数）
+            maxLength={QUESTION_MAX_LENGTH}
+            showCount
+            onPressEnter={(e) => {
+              if (!e.shiftKey) {
+                e.preventDefault();
+                void handleSend();
+              }
+            }}
+          />
+          <Tooltip title={!hasKb ? '请先创建知识库' : ''}>
+            <Button
+              type="primary"
+              icon={<SendOutlined />}
+              onClick={() => void handleSend()}
+              disabled={!canSend}
+              loading={sending}
+            >
+              发送
+            </Button>
+          </Tooltip>
+        </div>
+      ))();
 
   return (
     <AppLayout
@@ -159,3 +175,4 @@ export default function ChatPage() {
     </AppLayout>
   );
 }
+

@@ -264,6 +264,77 @@ describe('阶段十六：chatStore 正常问答链路', () => {
     assert.equal(assistantMessages()[0].content, '甲乙丙丁');
   });
 
+  it('回答过程状态机：发送后 analyzing → start 后 searching → citations 后 generating → done 清理', async () => {
+    const events: [string, unknown][] = [
+      ['start', { conversation_id: 'conv-1' }],
+      [
+        'citations',
+        { citations: [CITATION_DOC], evidence: [CITATION_DOC] },
+      ],
+      ['delta', { content: '答' }],
+      ['done', { conversation_id: 'conv-1', message_id: 'msg-1', answer: '答' }],
+    ];
+    const snapshots: (string | undefined)[] = [];
+    const phaseAt = () =>
+      chatStore.getState().messages.find((m) => m.role === 'assistant')?.streamPhase;
+
+    // 发送瞬间（fetch 尚未返回任何事件前）：应处于 analyzing（正在分析问题）
+    const sendPromise = (async () => {
+      globalAny.fetch = async () => ({
+        ok: true,
+        status: 200,
+        body: new ReadableStream<Uint8Array>({
+          async start(controller) {
+            for (const [name, data] of events) {
+              controller.enqueue(
+                new TextEncoder().encode(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`),
+              );
+              // 让事件循环消费完该事件，再记录 store 当前阶段
+              await new Promise((resolve) => setTimeout(resolve, 0));
+              snapshots.push(phaseAt());
+            }
+            controller.close();
+          },
+        }),
+      });
+      await chatStore.getState().sendMessage('问题');
+    })();
+
+    await sendPromise;
+    // 事件序列：start（searching）→ citations（generating）→ delta（generating）→ done（清理）
+    assert.equal(snapshots[0], 'searching');
+    assert.equal(snapshots[1], 'generating');
+    assert.equal(snapshots[2], 'generating');
+    assert.equal(snapshots[3], undefined);
+    // 结束后正文已落地，不再显示阶段占位
+    const assistant = assistantMessages()[0];
+    assert.equal(assistant.content, '答');
+    assert.equal(assistant.streamPhase, undefined);
+  });
+
+  it('发送瞬间（无任何事件返回前）处于 analyzing 阶段（正在分析问题）', async () => {
+    // 闸门：让 fetch 一直不返回事件，验证发送后的初始阶段
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const events: [string, unknown][] = [['done', { conversation_id: 'c1', message_id: 'm1', answer: '答' }]];
+    (globalThis as unknown as { fetch: unknown }).fetch = async () => {
+      await gate;
+      return { ok: true, status: 200, body: sseStream(flow(events)) };
+    };
+
+    const sending = chatStore.getState().sendMessage('问题');
+    const phaseDuringSend = chatStore.getState().messages.find(
+      (m) => m.role === 'assistant',
+    )?.streamPhase;
+    release();
+    await sending;
+
+    assert.equal(phaseDuringSend, 'analyzing', '发送后、start 事件前应显示"正在分析问题"');
+    assert.equal(assistantMessages()[0].streamPhase, undefined);
+  });
+
   it('请求体带上 kb_ids 与 conversation_id', async () => {
     mockFetch(standardFlow());
     await chatStore.getState().sendMessage('问题');

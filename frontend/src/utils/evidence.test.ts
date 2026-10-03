@@ -12,15 +12,19 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 
 import {
+  EVIDENCE_LEVEL_DESCRIPTION,
+  EVIDENCE_LEVEL_LABEL,
   buildEvidenceGroups,
   displayRelevanceScore,
   evidenceLevel,
+  formatSourceName,
   normalizeEvidence,
   normalizeEvidenceGroups,
+  parseCitationMarkers,
   resolveCitationKey,
   summarizeEvidence,
 } from './evidence.ts';
-import type { Citation, EvidenceGroup } from '@/types';
+import type { Citation, EvidenceGroup, EvidenceLevel } from '@/types';
 
 function docCitation(overrides: Partial<Citation> = {}): Citation {
   return {
@@ -62,6 +66,87 @@ describe('evidenceLevel', () => {
     assert.equal(evidenceLevel(0.69), 'medium');
     assert.equal(evidenceLevel(0.3), 'medium');
     assert.equal(evidenceLevel(0.29), 'insufficient');
+  });
+
+  it('模块 D：每个等级都有非空的 tooltip 解释文案', () => {
+    const levels: EvidenceLevel[] = ['high', 'medium', 'insufficient'];
+    for (const level of levels) {
+      assert.ok(
+        EVIDENCE_LEVEL_DESCRIPTION[level]?.trim(),
+        `等级 ${level} 缺少解释文案`,
+      );
+      assert.ok(EVIDENCE_LEVEL_LABEL[level]?.trim(), `等级 ${level} 缺少展示文案`);
+    }
+  });
+});
+
+// ── 引用 0 修复：parseCitationMarkers（正文 → 文本/引用标记序列）─────────────
+
+describe('parseCitationMarkers（引用编号解析）', () => {
+  it('citation 1 / 2 / 6：编号与页码（含旧约定页码 0）正确解析', () => {
+    const segs = parseCitationMarkers('太阳中风 [citation: 1, 0] 阳浮而阴弱 [citation: 2, 5]');
+    assert.deepEqual(segs, [
+      { type: 'text', text: '太阳中风 ' },
+      { type: 'citation', index: 1, page: 0 },
+      { type: 'text', text: ' 阳浮而阴弱 ' },
+      { type: 'citation', index: 2, page: 5 },
+    ]);
+
+    const segs6 = parseCitationMarkers('多来源 [citation: 6]');
+    assert.deepEqual(segs6, [
+      { type: 'text', text: '多来源 ' },
+      { type: 'citation', index: 6, page: null },
+    ]);
+  });
+
+  it('同一句多引用连续标注（[1][3] 形式）全部解析', () => {
+    const segs = parseCitationMarkers('桂枝汤主治 [citation: 1, 3][citation: 3, 0]。');
+    const cites = segs.filter((s) => s.type === 'citation');
+    assert.equal(cites.length, 2);
+    assert.deepEqual(
+      cites.map((c) => (c.type === 'citation' ? c.index : -1)),
+      [1, 3],
+    );
+  });
+
+  it('citation 越界 / 无效编号也按 citation 段解析（有效性由 sourceIndexes 判定）', () => {
+    const segs = parseCitationMarkers('引用 [citation: 9] 与 [citation: 0] 均为标记');
+    const cites = segs.filter((s) => s.type === 'citation');
+    assert.equal(cites.length, 2);
+    // 越界 9 与无效 0：解析层不丢弃，渲染层降级为普通文本（resolveCitationKey 返回 null）
+    assert.equal(resolveCitationKey(9, [1, 2, 3]), null);
+    assert.equal(resolveCitationKey(0, [1, 2, 3]), null);
+  });
+
+  it('无引用标记：整段作为纯文本返回', () => {
+    assert.deepEqual(parseCitationMarkers('普通回答，无引用'), [
+      { type: 'text', text: '普通回答，无引用' },
+    ]);
+  });
+
+  it('映射失败的编号不产生可定位 key，有效编号精确命中（含 stream 与非 stream 共用口径）', () => {
+    const indexes = [1, 2, 3, 4, 5, 6];
+    assert.equal(resolveCitationKey(1, indexes), '1');
+    assert.equal(resolveCitationKey(6, indexes), '6');
+    assert.equal(resolveCitationKey(7, indexes), null);
+    assert.equal(resolveCitationKey(Number.NaN, indexes), null);
+  });
+});
+
+// ── 问题6：来源名产品化 ─────────────────────────────────────────────────────
+
+describe('formatSourceName（来源名书名号化）', () => {
+  it('文件名 → 去扩展名 + 书名号（普济本事方.txt → 《普济本事方》）', () => {
+    assert.equal(formatSourceName('普济本事方.txt'), '《普济本事方》');
+    assert.equal(formatSourceName('伤寒论.pdf'), '《伤寒论》');
+    assert.equal(formatSourceName('金匮要略.md'), '《金匮要略》');
+  });
+
+  it('已含书名号 / 纯资源名原样保留（去扩展名后）', () => {
+    assert.equal(formatSourceName('《普济本事方》'), '《普济本事方》');
+    assert.equal(formatSourceName('丹参'), '《丹参》'); // 资源名也统一书名号展示
+    assert.equal(formatSourceName(''), '未知来源');
+    assert.equal(formatSourceName(null), '未知来源');
   });
 });
 

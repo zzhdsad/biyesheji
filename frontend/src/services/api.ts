@@ -107,6 +107,26 @@ export async function askQuestion(payload: {
   return data;
 }
 
+/**
+ * 证据原文 → AI 中文翻译（POST /chat/evidence/translate）。
+ *
+ * 纯展示辅助接口：复用现有 LLM 配置，不触碰检索链路；后端带缓存，
+ * 同一段原文重复请求直接命中。原文已为中文时返回 is_chinese=true 且
+ * 不调用模型。
+ */
+export async function translateEvidence(text: string): Promise<{
+  translation: string | null;
+  is_chinese: boolean;
+  cached?: boolean;
+}> {
+  const { data } = await api.post<{
+    translation: string | null;
+    is_chinese: boolean;
+    cached?: boolean;
+  }>('/chat/evidence/translate', { text });
+  return data;
+}
+
 /** 知识库列表（侧边栏数据源）。 */
 export async function fetchKnowledgeBases(): Promise<KnowledgeBase[]> {
   const { data } = await api.get<KnowledgeBase[]>('/kb');
@@ -456,7 +476,14 @@ export interface EmbeddingStatus {
   };
   vectors: {
     current_model_key: string;
+    /** 仍在使用中的文档总数（B-2：未软删除 + 非回收站知识库，仅作状态卡片分母） */
+    total_documents: number;
+    /** 待重新向量化总数（= stale_with_vectors + unvectorized_documents） */
     stale_documents: number;
+    /** 真正的旧模型向量（Milvus 中仍存在，检索时被自动排除） */
+    stale_with_vectors: number;
+    /** 从未真正向量化（Milvus 中无向量，如历史导入占位标记） */
+    unvectorized_documents: number;
     stale_models: string[];
   };
   job: RevectorizeJobStatus | null;

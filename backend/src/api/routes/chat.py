@@ -512,6 +512,104 @@ async def ask_stream(
     )
 
 
+# ── 证据原文翻译（问答展示辅助，不触碰检索链路）───────────────────────────────
+
+class EvidenceTranslateRequest(BaseModel):
+    """证据原文翻译请求（原文必须由前端原样携带，服务端不改写）。"""
+
+    text: str = Field(min_length=1, max_length=8000)
+
+
+class EvidenceTranslateResponse(BaseModel):
+    """翻译结果。translation 明确为 AI 生成（前端标注"AI 翻译"，不冒充原文）。"""
+
+    translation: str | None = None
+    is_chinese: bool = False
+    cached: bool = False
+
+
+# 模块级缓存：sha256(原文) → 译文。进程内有效（重启丢失可接受：纯展示辅助，
+# 重复展开同一条证据时会重新翻译一次）。容量上限防止长文本无限累积。
+_TRANSLATION_CACHE: dict[str, str] = {}
+_TRANSLATION_CACHE_MAX = 512
+
+_TRANSLATION_SYSTEM_PROMPT = (
+    "你是专业的中医文献翻译助手。请将用户提供的证据原文翻译为简体中文：\n"
+    "1. 忠实原意，不添加、不删减、不做解释或评论；\n"
+    "2. 仅输出译文本身，不要输出任何前缀（如\"译文：\"）或备注；\n"
+    "3. 专业术语（如中药名、方剂名、证型）使用规范中医术语表达；\n"
+    "4. 原文中的引用编号（如 [citation: 1, 0]）原样保留。"
+)
+
+
+def _is_mostly_chinese(text: str) -> bool:
+    """原文是否以中文为主（拉丁字母未过半视为不需要翻译）。
+
+    与前端 utils/translation.ts 的 needsTranslation 口径一致（阈值 0.5）：
+    少量英文术语的中文原文不做整段翻译（避免"翻译成奇怪的中文"）。
+    """
+    latin = sum(1 for ch in text if ch.isascii() and ch.isalpha())
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    total = latin + cjk
+    if total == 0 or latin == 0:
+        return True
+    return latin / total < 0.5
+
+
+@router.post("/evidence/translate", response_model=EvidenceTranslateResponse)
+async def translate_evidence(
+    payload: EvidenceTranslateRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> EvidenceTranslateResponse:
+    """证据原文 → AI 中文翻译（纯展示辅助）。
+
+    - 原文以中文为主 → 不调用 LLM，直接返回 is_chinese=True；
+    - 命中缓存 → 直接返回（cached=True）；
+    - 复用现有 LLM 运行时配置（不新建模型服务）；
+    - 模型未配置 / 生成失败 → 503，前端显示统一 fallback 文案；
+    - 不修改任何证据数据、不触碰检索链路。
+    """
+    import hashlib
+
+    from src.application.model_config_service import get_effective_config_cached
+    from src.core.exceptions import AppException
+    from src.infrastructure.llm import LLMError, get_llm
+
+    text = payload.text
+
+    if _is_mostly_chinese(text):
+        return EvidenceTranslateResponse(translation=None, is_chinese=True)
+
+    key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    cached = _TRANSLATION_CACHE.get(key)
+    if cached is not None:
+        return EvidenceTranslateResponse(translation=cached, is_chinese=False, cached=True)
+
+    await _check_model_configured(db)
+
+    config = await get_effective_config_cached(db)
+    llm = get_llm(config)
+    try:
+        messages = [
+            {"role": "system", "content": _TRANSLATION_SYSTEM_PROMPT},
+            {"role": "user", "content": text},
+        ]
+        translation = (await llm.chat(messages)).strip()
+    except LLMError as exc:
+        logger.warning(f"证据翻译失败（原文 {len(text)} 字）: {exc}")
+        raise AppException(503, "暂时无法生成中文翻译，请查看原文。") from exc
+
+    if not translation:
+        return EvidenceTranslateResponse(translation=None, is_chinese=False)
+
+    # 简单 FIFO 容量控制（不引入新依赖）
+    if len(_TRANSLATION_CACHE) >= _TRANSLATION_CACHE_MAX:
+        _TRANSLATION_CACHE.pop(next(iter(_TRANSLATION_CACHE)))
+    _TRANSLATION_CACHE[key] = translation
+    return EvidenceTranslateResponse(translation=translation, is_chinese=False)
+
+
 @router.get("/conversations", response_model=list[ConversationOut])
 async def list_conversations(
     request: Request,

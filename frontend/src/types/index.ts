@@ -242,6 +242,15 @@ export interface ChatMessage {
   role: Role;
   content: string;
   citations?: Citation[];
+  /**
+   * 流式问答的当前阶段（仅发送中的 assistant 占位消息使用），
+   * 全部由真实 SSE 事件驱动（不伪造状态）：
+   * - analyzing：已发出问题，后端正在分析问题（Query Analyzer / 路由决策）；
+   * - searching：start 事件已到，正在检索知识库（RAG 检索耗时较长）；
+   * - generating：citations 事件已到（已找到 X 条证据），LLM 正在流式生成。
+   * 生成结束（done/error）后移除；历史消息不携带该字段。
+   */
+  streamPhase?: 'analyzing' | 'searching' | 'generating';
   /** 阶段十：多来源证据（流式由 citations 事件下发；历史消息由 citations 推导） */
   evidence?: Evidence[];
   evidenceGroups?: EvidenceGroup[];

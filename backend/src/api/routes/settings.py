@@ -20,6 +20,7 @@ from src.application.model_config_service import (
     invalidate_config_cache,
 )
 from src.application.vector_model import (
+    active_document_count,
     key_from_config,
     stamp_legacy_documents,
     stale_doc_ids,
@@ -28,6 +29,7 @@ from src.application.vector_model import (
 from src.core.deps import get_current_user, get_db, require_admin
 from src.core import runtime_config
 from src.infrastructure.llm import OpenAICompatibleLLM
+from src.infrastructure.milvus_store import VectorStoreError, get_vector_store
 from src.utils.net import assert_safe_public_url
 
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -170,6 +172,19 @@ async def embedding_status(
     """Embedding 运行状态总览（依赖 / 存量向量模型 / 待重建数量 / 任务进度）。
 
     只读接口，登录用户可查看（不含任何密钥）。
+
+    stale_documents 拆分口径（避免"807 篇旧模型向量"的误导性提示）：
+    - unvectorized_documents：vector_model ≠ 当前模型 **且 Milvus 中无任何向量**
+      的文档（历史导入占位标记，如 legacy-import；从未真正向量化，检索
+      天然搜不到，不构成"旧模型向量混检"风险）；
+    - stale_with_vectors：vector_model ≠ 当前模型 **且 Milvus 中仍存在向量**
+      的文档（真正的旧模型向量，检索时会被 _stale_doc_ids 主动排除，
+      需要重新向量化后才能恢复参与检索）；
+    - stale_documents：以上两者之和（待重新向量化总数，语义不变，
+      兼容旧前端）；
+    - total_documents：仍在使用中的文档总数（未软删除 + 非回收站知识库，
+      与 stale 统计同一套过滤条件），仅作设置页状态卡片的分母展示，
+      不参与任何业务判定。
     """
     # 与检索/向量化同源：读缓存后的生效配置，保证"当前模型"判定一致
     cfg = await get_effective_config_cached(db)
@@ -178,6 +193,18 @@ async def embedding_status(
     stale_ids = await stale_doc_ids(db, current_key)
     models = await stale_models(db, current_key)
     job = await revectorize_service.latest_job(db)
+
+    # 拆分：stale 中"Milvus 有向量"（真旧模型向量）与"无向量"（从未向量化）。
+    # vectorized_doc_ids 为批量只读查询；失败按"全部有向量"降级——宁可多提示
+    # 重建，也不把真实存在的旧向量静默当成无向量。
+    stale_with_vectors = len(stale_ids)
+    try:
+        if stale_ids:
+            vectorized = get_vector_store().vectorized_doc_ids([str(i) for i in stale_ids])
+            stale_with_vectors = len(vectorized & {str(i) for i in stale_ids})
+    except VectorStoreError as exc:
+        logger.warning(f"embedding_status 向量存在性核查失败（按全部待重建降级）：{exc}")
+    unvectorized = len(stale_ids) - stale_with_vectors
 
     # 依赖（FlagEmbedding + 模型权重）随镜像内置，不再有"待安装/初始化中"状态：
     # 状态只由重新向量化任务决定（running → revectorizing，否则 ready）。
@@ -191,7 +218,10 @@ async def embedding_status(
         },
         "vectors": {
             "current_model_key": current_key,
+            "total_documents": await active_document_count(db),
             "stale_documents": len(stale_ids),
+            "stale_with_vectors": stale_with_vectors,
+            "unvectorized_documents": unvectorized,
             "stale_models": models,
         },
         "job": revectorize_service.job_to_dict(job),
