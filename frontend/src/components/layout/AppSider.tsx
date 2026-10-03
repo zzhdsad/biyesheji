@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import {
   App,
@@ -172,6 +172,70 @@ export function matchNavKey(pathname: string | null | undefined): string {
   return best || '/';
 }
 
+/**
+ * 问题8：管理中心子菜单展开状态持久化。
+ *
+ * 根因：各页面的 AppLayout 在路由切换时整体重挂载，AppSider 随之重建，
+ * 主导航 Menu 此前为非受控模式，SubMenu 展开状态随实例销毁丢失——
+ * 用户点开「管理中心 → 数据导入中心」后，管理中心分组看起来"收起"了。
+ *
+ * 修复：openKeys 受控 + localStorage 持久化（模块级缓存做 SPA 内同步恢复，
+ * 避免路由切换瞬间"先收起再展开"的闪动）。
+ */
+const NAV_OPEN_KEYS_STORAGE = 'kp_sider_open_keys';
+
+/** 模块级缓存：SPA 生命周期内保留（模块只加载一次，组件重挂载不丢失）。 */
+let cachedNavOpenKeys: string[] | null = null;
+
+function readStoredNavOpenKeys(): string[] {
+  if (cachedNavOpenKeys) return cachedNavOpenKeys;
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = window.localStorage.getItem(NAV_OPEN_KEYS_STORAGE);
+      if (raw) {
+        const keys = JSON.parse(raw);
+        if (Array.isArray(keys)) {
+          cachedNavOpenKeys = keys.filter((k) => typeof k === 'string');
+          return cachedNavOpenKeys;
+        }
+      }
+    } catch {
+      // localStorage 不可用或数据损坏，忽略
+    }
+  }
+  return [];
+}
+
+function storeNavOpenKeys(keys: string[]): void {
+  cachedNavOpenKeys = keys;
+  if (typeof window !== 'undefined') {
+    try {
+      window.localStorage.setItem(NAV_OPEN_KEYS_STORAGE, JSON.stringify(keys));
+    } catch {
+      // 忽略写入失败
+    }
+  }
+}
+
+/** 当前路由所属父级菜单（首次访问无持久化记录时的默认展开项）。 */
+function defaultOpenKeysFor(pathname: string | null | undefined): string[] {
+  const path = pathname ?? '';
+  const keys: string[] = [];
+  const ADMIN_CHILDREN = ['/kb', '/documents', '/taxonomy', '/admin', '/evaluation', '/users', '/audit', '/settings'];
+  if (ADMIN_CHILDREN.some((p) => path === p || path.startsWith(`${p}/`))) {
+    keys.push('admin-center');
+  }
+  const DATA_MGMT_CHILDREN = ['/documents', '/taxonomy', '/admin/import', '/evaluation'];
+  if (DATA_MGMT_CHILDREN.some((p) => path === p || path.startsWith(`${p}/`))) {
+    keys.push('data-mgmt');
+  }
+  const SYSTEM_MGMT_CHILDREN = ['/audit', '/settings'];
+  if (path === '/admin' || SYSTEM_MGMT_CHILDREN.some((p) => path === p || path.startsWith(`${p}/`))) {
+    keys.push('system-mgmt');
+  }
+  return keys;
+}
+
 /** 右上角用户菜单：头像 + 用户名，下拉（含弱化的系统状态项）+ 登出。 */
 function UserMenu() {
   const { user, logout } = useUserStore();
@@ -288,6 +352,22 @@ export function AppSider() {
   // 当前在哪个管理页？（统一最长前缀匹配，见 matchNavKey 注释）
   const selectedNavKeys: string[] = [matchNavKey(pathname)];
 
+  // 问题8：子菜单展开状态受控并持久化（AppSider 随路由切换重挂载，
+  // 非受控模式下"管理中心"分组会收起；详见 NAV_OPEN_KEYS_STORAGE 注释）。
+  // 初始值同步读模块级缓存（SPA 内重挂载无闪动）；localStorage 在挂载后补读（SSR 安全）。
+  const [navOpenKeys, setNavOpenKeys] = useState<string[]>(() => readStoredNavOpenKeys());
+  useEffect(() => {
+    const stored = readStoredNavOpenKeys();
+    // 首次访问（无持久化记录）→ 默认展开当前路由所属父级，避免进入子页时分组收起
+    setNavOpenKeys(stored.length > 0 ? stored : defaultOpenKeysFor(pathname));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const onNavOpenChange: MenuProps['onOpenChange'] = (keys) => {
+    const next = keys.map(String);
+    setNavOpenKeys(next);
+    storeNavOpenKeys(next);
+  };
+
   return (
     <Sider
       width={272}
@@ -330,10 +410,12 @@ export function AppSider() {
         </div>
       </div>
 
-      {/* 主导航：首页/智能问答 + 知识资源 + 管理中心（仅 admin） */}
+      {/* 主导航：智能问答 + 知识资源 + 管理中心（仅 admin） */}
       <Menu
         mode="inline"
         selectedKeys={selectedNavKeys}
+        openKeys={navOpenKeys}
+        onOpenChange={onNavOpenChange}
         items={[
           ...(CORE_NAV_ITEMS ?? []),
           ...(RESOURCE_NAV_ITEMS ?? []),
