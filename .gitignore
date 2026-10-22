@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+logs/
+uploads/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+next-env.d.ts
+
+# 构建产物与运行期日志（BUG-073）
+# 说明：这些文件历史上曾被提交；Batch 6 已用 `git rm --cached` 移出索引
+# （本地文件保留，不影响运行），此后由本文件持续忽略。
+*.tsbuildinfo
+*.log
+
+# 临时诊断脚本 / 一次性校验脚本（BUG-073，同样已 git rm --cached）
+# 约定：仓库根目录下的 _diag* / _tmp* 与 backend/_tmp* 均为排查用一次性脚本，不入库。
+/_diag*.py
+/_tmp*.py
+backend/_tmp*.py
+backend/tests/_debug_*.py
+
+# 环境变量（保留 .env.example 模板）
+.env
+.env.local
+
+# IDE / 系统文件
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# AI 模型权重与下载缓存（体积巨大，经 ModelScope/HF 下载，不入库）
+# .env 中 EMBEDDING_MODEL/RERANK_MODEL 指向这些本地路径；重新部署用 download_models_ms.py 下载
+models/
+.modelscope/
+.cache/
+*.incomplete
+*.safetensors
+*.bin
+backend/models/
+backend/.modelscope/
+
+# Docker 构建用：本机预置模型权重（4.3GB，由脚本从 HF 缓存整理）
+backend/prebuilt-models/
+# 构建日志
+*.log

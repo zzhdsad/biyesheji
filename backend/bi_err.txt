@@ -1,0 +1,17 @@
+[32m2026-09-28 16:07:57.367[0m | [1mINFO    [0m | [36msrc.infrastructure.embedding[0m:[36m__init__[0m:[36m57[0m - [1m加载 BGE-M3 模型（device=cpu, model=C:\bi ye she ji\backend\prebuilt-models\bge-m3）…[0m
+Loading weights:   0%|          | 0/391 [00:00<?, ?it/s]Loading weights: 100%|██████████| 391/391 [00:00<00:00, 28283.20it/s]
+[32m2026-09-28 16:08:01.148[0m | [1mINFO    [0m | [36msrc.infrastructure.hyde[0m:[36m_get_client[0m:[36m101[0m - [1mHyDE 客户端就绪 model=deepseek-chat base_url=https://api.deepseek.com/v1[0m
+[32m2026-09-28 16:08:03.191[0m | [1mINFO    [0m | [36msrc.application.rag_service[0m:[36m_retrieve[0m:[36m376[0m - [1mHyDE 改写: 丹参有什么功效？... -> 丹参具有活血祛瘀、通经止痛、清心除烦、凉血消痈的功效。常用于胸痹心痛、脘腹胁痛、癥瘕积聚、热痹疼痛、...[0m
+C:\bi ye she ji\backend\venv\Lib\site-packages\pymilvus\client\__init__.py:6: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+  from pkg_resources import DistributionNotFound, get_distribution
+[32m2026-09-28 16:08:05.056[0m | [1mINFO    [0m | [36msrc.application.rag_service[0m:[36m_retrieve[0m:[36m422[0m - [1m已排除旧模型向量文档 1082 篇（避免新旧模型混检）[0m
+[32m2026-09-28 16:08:05.057[0m | [1mINFO    [0m | [36msrc.infrastructure.rerank[0m:[36m_get_model[0m:[36m117[0m - [1mReranker 首次加载中（本地路径=C:\bi ye she ji\backend\prebuilt-models\bge-reranker-v2-m3, device=cpu, use_fp16=False）…[0m
+Loading weights:   0%|          | 0/393 [00:00<?, ?it/s]Loading weights: 100%|██████████| 393/393 [00:00<00:00, 5216.25it/s]
+[32m2026-09-28 16:08:13.812[0m | [1mINFO    [0m | [36msrc.infrastructure.rerank[0m:[36m_get_model[0m:[36m125[0m - [1mReranker 加载完成：BAAI/bge-reranker-v2-m3[0m
+[32m2026-09-28 16:09:06.538[0m | [1mINFO    [0m | [36msrc.application.rag_service[0m:[36m_retrieve[0m:[36m487[0m - [1m[RAG] q='丹参有什么功效？' model=flagembedding:BAAI/bge-m3 strategy=baseline_hybrid kb=1 dense=10(best=0.7759) sparse=10 fused=10 reranked=3(best=0.9827) kg=0[0m
+[32m2026-09-28 16:09:07.780[0m | [1mINFO    [0m | [36msrc.application.rag_service[0m:[36m_retrieve[0m:[36m376[0m - [1mHyDE 改写: 广藿香归哪些经？... -> 广藿香归脾、胃、肺经。其性微温，味辛，芳香化浊，和中止呕，发表解暑。在方剂配伍中，常借其归脾胃经之性...[0m
+[32m2026-09-28 16:09:08.706[0m | [1mINFO    [0m | [36msrc.application.rag_service[0m:[36m_retrieve[0m:[36m422[0m - [1m已排除旧模型向量文档 1082 篇（避免新旧模型混检）[0m
+[32m2026-09-28 16:10:00.609[0m | [1mINFO    [0m | [36msrc.application.rag_service[0m:[36m_retrieve[0m:[36m487[0m - [1m[RAG] q='广藿香归哪些经？' model=flagembedding:BAAI/bge-m3 strategy=baseline_hybrid kb=1 dense=10(best=0.6647) sparse=10 fused=10 reranked=3(best=0.9873) kg=0[0m
+[32m2026-09-28 16:10:01.914[0m | [1mINFO    [0m | [36msrc.application.rag_service[0m:[36m_retrieve[0m:[36m376[0m - [1mHyDE 改写: 郁金的性味是什么？... -> 郁金性味辛、苦，寒。归肝、心、肺经。其辛能行散，苦能泄降，寒能清热，故具有活血止痛、行气解郁、清心凉...[0m
+[32m2026-09-28 16:10:03.265[0m | [1mINFO    [0m | [36msrc.application.rag_service[0m:[36m_retrieve[0m:[36m422[0m - [1m已排除旧模型向量文档 1082 篇（避免新旧模型混检）[0m
+[32m2026-09-28 16:10:55.259[0m | [1mINFO    [0m | [36msrc.application.rag_service[0m:[36m_retrieve[0m:[36m487[0m - [1m[RAG] q='郁金的性味是什么？' model=flagembedding:BAAI/bge-m3 strategy=baseline_hybrid kb=1 dense=10(best=0.6534) sparse=10 fused=10 reranked=3(best=0.0039) kg=0[0m

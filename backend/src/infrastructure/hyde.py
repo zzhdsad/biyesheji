@@ -1,0 +1,188 @@
+"""HyDE（Hypothetical Document Embeddings）查询改写抽象层。
+
+TECH_DESIGN：检索前用小模型（Qwen2.5-1.5B）根据用户问题生成一段"假设答案"，
+用假设答案替换原问题进行向量检索（假设答案与真实文档的分布更接近，召回更准）。
+
+要点：
+- 仅改写"检索用的查询文本"，最终送 LLM 的 Prompt 仍用原始问题。
+- 默认开启（``HYDE_ENABLED=True``），且默认**复用主 LLM** 的模型与地址：
+  未单独配置 hyde_model / hyde_base_url 时回落 LLM_MODEL / LLM_BASE_URL。
+- 可经后台「模型配置」开关；关闭时工厂返回 None，RagService 跳过改写。
+- 失败回退原问题（不阻断主流程）。
+"""
+
+from __future__ import annotations
+
+from loguru import logger
+
+from src.core.config import settings
+
+
+class HyDEError(Exception):
+    """HyDE 改写失败。"""
+
+
+# HyDE 引导 Prompt（用户需求 §4.5：基于问题生成"可能出现在技术文档中的答案片段"）
+# 工程约束：限制字数 + 只输出文档内容、不解释反问，避免模型输出无关闲聊
+_HYDE_PROMPT = (
+    "请根据以下问题，写一段可能出现在技术文档中的答案片段：{question}\n"
+    "要求：80-150字；只输出文档内容，不要解释、不要反问。\n"
+)
+
+
+class BaseHyDE:
+    """HyDE 抽象：根据问题生成假设答案（供向量检索用）。"""
+
+    def generate(self, question: str) -> str:
+        raise NotImplementedError
+
+
+class MockHyDE(BaseHyDE):
+    """确定性伪改写：**仅供单元测试**（不依赖真实模型服务）。
+
+    生产侧不存在该选项：DB 默认值 / API 校验 / 前端下拉均为 openai（复用主 LLM），
+    存量 mock 配置由 ``ModelConfigService.normalize_backends`` 规范化；工厂里保留
+    mock 分支只是环境级逃生舱（与 llm/rerank/embedding 一致，仅供测试）。
+    """
+
+    def generate(self, question: str) -> str:
+        # 模拟一段假设答案（与真实文档分布更接近），引入"规定/流程/要求"等检索友好的词
+        return (
+            f"（假设性回答）关于{question}，根据企业知识库相关规定，"
+            f"通常需要遵循以下流程与要求：员工须按制度执行，"
+            f"具体以公司正式文件为准。"
+        )
+
+
+class QwenHyDE(BaseHyDE):
+    """Qwen2.5-1.5B（或同等小模型）假设答案生成，走 OpenAI 兼容接口。
+
+    部署方式（任选其一，通过 HYDE_BASE_URL 配置）：
+    - **vLLM**：``vllm serve Qwen/Qwen2.5-1.5B-Instruct --port 8001``
+      → ``HYDE_BASE_URL=http://localhost:8001/v1``
+    - **Ollama**：先 ``ollama pull qwen2.5:1.5b``，再 ``ollama serve``
+      → ``HYDE_BASE_URL=http://localhost:11434/v1``（Ollama ≥0.1.x 兼容 OpenAI /v1）
+      → ``HYDE_MODEL=qwen2.5:1.5b``
+    - 未设置 ``HYDE_BASE_URL`` 时复用 ``LLM_BASE_URL``（与主 LLM 同一服务）。
+
+    依赖：``pip install openai``
+    """
+
+    def __init__(
+        self,
+        model: str | None = None,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        llm_model: str | None = None,
+        llm_base_url: str | None = None,
+    ) -> None:
+        # 用户需求：HyDE 默认复用主 LLM——未单独指定时依次回落到 LLM 的模型/地址
+        self._model = model or llm_model or settings.HYDE_MODEL or settings.LLM_MODEL
+        # 优先用 HYDE_BASE_URL；为空则回退 LLM_BASE_URL（与主 LLM 同服务，节省部署）
+        self._base_url = (
+            base_url or settings.HYDE_BASE_URL or llm_base_url or settings.LLM_BASE_URL
+        )
+        self._api_key = api_key if api_key is not None else settings.LLM_API_KEY
+        self._client = None  # 实例级缓存，进程内只创建一次 OpenAI client
+        # 对外只读视图（日志/排障用，避免访问私有属性）
+        self.model_name = self._model
+        self.base_url = self._base_url
+
+    def _get_client(self):
+        if self._client is None:
+            try:
+                from openai import OpenAI
+            except ImportError as exc:
+                raise HyDEError("未安装 openai：pip install openai") from exc
+            try:
+                # 复用主 LLM 的 API Key（DeepSeek 等需要鉴权；本地 Ollama 传 "none" 也兼容）
+                api_key = self._api_key or "none"
+                self._client = OpenAI(base_url=self._base_url, api_key=api_key)
+                logger.info(
+                    f"HyDE 客户端就绪 model={self._model} base_url={self._base_url}"
+                )
+            except Exception as exc:
+                raise HyDEError(f"HyDE 客户端初始化失败：{exc}") from exc
+        return self._client
+
+    def generate(self, question: str) -> str:
+        """调用小模型生成假设答案，作为检索 Query 替代原问题。
+
+        Args:
+            question: 用户原始问题
+
+        Returns:
+            str — 假设答案文本（80-150 字，与真实文档分布更接近）
+
+        Raises:
+            HyDEError: 客户端未就绪 / 模型返回空 / 调用异常
+        """
+        client = self._get_client()
+        try:
+            resp = client.chat.completions.create(
+                model=self._model,
+                messages=[
+                    {"role": "user", "content": _HYDE_PROMPT.format(question=question)}
+                ],
+                temperature=0.3,  # 低温度保证假设答案稳定，避免漂移
+                max_tokens=200,
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            if not text:
+                raise HyDEError("HyDE 模型返回空内容")
+            return text
+        except HyDEError:
+            raise
+        except Exception as exc:
+            raise HyDEError(f"HyDE 生成失败：{exc}") from exc
+
+
+# 别名：语义上接口是通用的 OpenAI 兼容，不仅限于 Qwen
+OpenAIHyDE = QwenHyDE
+
+
+_hyde: BaseHyDE | None = None
+
+
+def get_hyde(config: dict | None = None) -> BaseHyDE | None:
+    """工厂：``HYDE_ENABLED`` 关闭时返回 None；开启时走 OpenAI 兼容实现。
+
+    默认复用主 LLM（用户需求）：未单独指定 hyde_model / hyde_base_url 时，
+    依次回落到主 LLM 的模型与地址；``HYDE_BACKEND`` 若为历史残留的 mock，
+    同样按 openai（真实实现）处理。
+
+    Args:
+        config: 运行时配置（DB），含 hyde_enabled/hyde_backend/hyde_model/
+                hyde_base_url/llm_api_key/llm_model/llm_base_url
+    """
+    global _hyde
+    if config is None:
+        if _hyde is not None:
+            return _hyde
+        if not settings.HYDE_ENABLED:
+            return None
+        if settings.HYDE_BACKEND.lower() == "mock":
+            # 仅测试/环境级逃生舱：产品默认值与 UI 均为 openai（复用主 LLM）
+            _hyde = MockHyDE()
+            return _hyde
+        _hyde = QwenHyDE()
+        logger.info(f"HyDE 就绪（model={_hyde.model_name}, base_url={_hyde.base_url}）")
+        return _hyde
+
+    if not config.get("hyde_enabled", True):
+        return None
+    if str(config.get("hyde_backend") or "").lower() == "mock":
+        return MockHyDE()
+    return QwenHyDE(
+        model=config.get("hyde_model"),
+        base_url=config.get("hyde_base_url"),
+        api_key=config.get("llm_api_key"),
+        llm_model=config.get("llm_model"),
+        llm_base_url=config.get("llm_base_url"),
+    )
+
+
+def set_hyde(hyde: BaseHyDE | None) -> None:
+    """注入 HyDE（测试用）。传 None 可禁用。"""
+    global _hyde
+    _hyde = hyde

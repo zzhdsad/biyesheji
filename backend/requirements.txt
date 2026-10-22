@@ -1,0 +1,40 @@
+# ===== 核心运行时依赖（启动 API 所需）=====
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+# EmailStr 校验（注册接口邮箱格式校验依赖，缺失会导致应用启动失败）
+email-validator>=2.1
+
+# 数据库 / 缓存 / 向量库
+sqlalchemy[asyncio]>=2.0
+asyncpg>=0.30
+greenlet>=3.0
+alembic>=1.13
+redis>=5.0
+pymilvus>=2.4,<2.5
+# pymilvus 2.4 依赖 pkg_resources，setuptools>=81 已移除该模块
+setuptools<81
+
+# 安全（JWT 鉴权）
+pyjwt>=2.8
+bcrypt>=4.1
+
+# 工具
+loguru>=0.7
+python-multipart>=0.0.9
+httpx>=0.27
+minio>=7.2
+pypdf>=4.0
+python-docx>=1.1
+
+# AI 依赖
+# openai：HyDE 假设答案生成走 OpenAI 兼容 SDK（DeepSeek/Qwen/Ollama 等）
+openai>=1.40
+# FlagEmbedding（BGE-M3 向量化 + BGE-Reranker 精排）按需安装：
+# pip install FlagEmbedding（约 2.3GB 模型，首次运行自动下载）
+# 安装后在设置页将 Embedding/Rerank 后端切换为 flagembedding/flagreranker
+
+# 测试
+pytest>=8.2
+pytest-asyncio>=0.23

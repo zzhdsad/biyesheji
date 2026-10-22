@@ -1,0 +1,349 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── 主题 CSS 变量（Tailwind darkMode: 'class' 适配）─────────────────────────
+   值与 antd 算法对齐：亮色取 defaultAlgorithm 默认 token，暗色取 darkAlgorithm
+   的经典暗底（#141414 页面 / #1f1f1f 容器），保证 antd 组件与自定义样式一致 */
+:root {
+  --bg-page: #eef7ff;
+  --bg-surface: #ffffff;
+  --text-primary: rgba(8, 32, 56, 0.9);
+  --text-secondary: rgba(15, 62, 94, 0.68);
+  --border-app: #dbeafe;
+  --sci-primary: #0891b2;
+  --sci-glow: rgba(8, 145, 178, 0.22);
+  --sci-grid: rgba(8, 145, 178, 0.08);
+}
+
+.dark {
+  --bg-page: #050b18;
+  --bg-surface: #0a1428;
+  --text-primary: rgba(226, 244, 255, 0.94);
+  --text-secondary: rgba(165, 210, 235, 0.72);
+  --border-app: rgba(56, 189, 248, 0.16);
+  --sci-primary: #22d3ee;
+  --sci-glow: rgba(34, 211, 238, 0.28);
+  --sci-grid: rgba(34, 211, 238, 0.07);
+}
+
+html {
+  /* 跟随主题的浏览器原生控件（滚动条/表单自动填充），值由 JS 维护 */
+  color-scheme: light;
+}
+
+body {
+  min-height: 100vh;
+  color: var(--text-primary);
+  transition: background-color 0.2s ease, color 0.2s ease;
+  background-color: var(--bg-page);
+  background-image:
+    radial-gradient(circle at 12% 8%, var(--sci-glow), transparent 28%),
+    radial-gradient(circle at 88% 0%, rgba(56, 189, 248, 0.12), transparent 32%),
+    linear-gradient(var(--sci-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--sci-grid) 1px, transparent 1px);
+  background-size: auto, auto, 44px 44px, 44px 44px;
+  background-attachment: fixed;
+}
+
+/* ── 科幻风全局表面 ─────────────────────────────────────────────────────── */
+.app-shell {
+  min-height: 100vh;
+  position: relative;
+}
+
+.app-zoom-layer {
+  min-height: 100vh;
+  transform-origin: top left;
+}
+
+.sci-app-layout {
+  background: transparent !important;
+}
+
+.sci-header {
+  background: color-mix(in srgb, var(--bg-surface) 78%, transparent) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 1px 0 rgba(56, 189, 248, 0.08), 0 8px 26px rgba(0, 0, 0, 0.12);
+}
+
+.ant-layout-sider {
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.ant-card,
+.ant-modal-content,
+.ant-table-wrapper,
+.ant-descriptions-view {
+  border-color: var(--border-app) !important;
+}
+
+.ant-card {
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.12);
+}
+
+.dark .ant-card {
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.34);
+}
+
+/* ── 回答内容排版 ───────────────────────────────────────────────────────── */
+.answer-content {
+  font-size: 15px;
+  line-height: 1.9;
+  letter-spacing: 0.01em;
+  color: var(--text-primary);
+}
+
+.answer-content > :first-child {
+  margin-top: 0;
+}
+
+.answer-content > :last-child {
+  margin-bottom: 0;
+}
+
+.answer-heading {
+  margin: 18px 0 8px;
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--text-primary);
+  letter-spacing: 0.02em;
+}
+
+.answer-paragraph {
+  margin: 0 0 10px;
+  white-space: pre-wrap;
+}
+
+.answer-list {
+  margin: 6px 0 12px;
+  padding-left: 1.35em;
+}
+
+.answer-list li {
+  margin: 4px 0;
+  padding-left: 0.2em;
+}
+
+.answer-list li::marker {
+  color: var(--sci-primary);
+}
+
+.answer-quote {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border-left: 2px solid var(--sci-primary);
+  background: color-mix(in srgb, var(--sci-primary) 7%, transparent);
+  border-radius: 0 8px 8px 0;
+}
+
+.answer-unsupported {
+  margin: 8px 0;
+  padding: 8px 12px;
+  border: 1px solid rgba(251, 191, 36, 0.35);
+  border-radius: 8px;
+  background: rgba(251, 191, 36, 0.08);
+  color: #fbbf24;
+  font-size: 14px;
+}
+
+.answer-spacer {
+  height: 6px;
+}
+
+.answer-cursor {
+  display: inline-block;
+  width: 0.55em;
+  color: var(--sci-primary);
+  animation: answer-blink 0.9s steps(1) infinite;
+}
+
+@keyframes answer-blink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0; }
+}
+
+/* ── 欢迎页科幻风 ───────────────────────────────────────────────────────── */
+.chat-welcome {
+  animation: welcome-in 0.7s ease-out both;
+}
+
+.welcome-orb {
+  border: 1px solid var(--border-app);
+  box-shadow: 0 0 28px var(--sci-glow), inset 0 0 18px var(--sci-glow);
+  animation: welcome-orb-float 4s ease-in-out infinite;
+}
+
+.welcome-title {
+  text-shadow: 0 0 24px var(--sci-glow);
+  letter-spacing: 0.04em;
+}
+
+@keyframes welcome-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes welcome-orb-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-4px); }
+}
+
+/* ── 缩放控件 ───────────────────────────────────────────────────────────── */
+.ui-zoom-controls {
+  position: fixed;
+  right: 20px;
+  bottom: 84px;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border-app);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-surface) 82%, transparent);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16), 0 0 20px var(--sci-glow);
+}
+
+/* ── 入口过场动画 ───────────────────────────────────────────────────────── */
+.entry-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 45%, rgba(34, 211, 238, 0.16), transparent 30%),
+    rgba(3, 9, 20, 0.96);
+  color: #d9f6ff;
+  pointer-events: none;
+  animation: entry-fade 1.9s ease-in-out both;
+}
+
+.entry-grid {
+  position: absolute;
+  inset: -20%;
+  background-image:
+    linear-gradient(rgba(56, 189, 248, 0.12) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(56, 189, 248, 0.12) 1px, transparent 1px);
+  background-size: 52px 52px;
+  transform: perspective(500px) rotateX(58deg) translateY(16%);
+  opacity: 0.55;
+  animation: entry-grid-move 1.9s linear both;
+}
+
+.entry-core {
+  position: relative;
+  width: 150px;
+  height: 150px;
+  display: grid;
+  place-items: center;
+}
+
+.entry-ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 1px solid rgba(34, 211, 238, 0.65);
+  box-shadow: 0 0 28px rgba(34, 211, 238, 0.35), inset 0 0 20px rgba(34, 211, 238, 0.16);
+}
+
+.entry-ring-outer {
+  inset: 0;
+  border-style: dashed;
+  animation: entry-spin 4s linear infinite;
+}
+
+.entry-ring-inner {
+  inset: 24px;
+  animation: entry-spin-reverse 2.6s linear infinite;
+}
+
+.entry-mark {
+  width: 58px;
+  height: 58px;
+  display: grid;
+  place-items: center;
+  border-radius: 16px;
+  font-size: 26px;
+  font-weight: 700;
+  color: #04101d;
+  background: linear-gradient(135deg, #67e8f9, #22d3ee 55%, #0891b2);
+  box-shadow: 0 0 42px rgba(34, 211, 238, 0.55);
+}
+
+.entry-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+  animation: entry-copy-in 1.6s ease-out both;
+}
+
+.entry-kicker {
+  font-size: 10px;
+  letter-spacing: 0.34em;
+  color: rgba(103, 232, 249, 0.75);
+}
+
+.entry-title {
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-shadow: 0 0 24px rgba(34, 211, 238, 0.65);
+}
+
+.entry-status {
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  color: rgba(165, 243, 252, 0.62);
+}
+
+.entry-scanline {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -10%;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(103, 232, 249, 0.9), transparent);
+  box-shadow: 0 0 18px rgba(34, 211, 238, 0.8);
+  animation: entry-scan 1.8s linear both;
+}
+
+@keyframes entry-fade {
+  0% { opacity: 1; }
+  78% { opacity: 1; }
+  100% { opacity: 0; visibility: hidden; }
+}
+
+@keyframes entry-copy-in {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes entry-grid-move {
+  from { transform: perspective(500px) rotateX(58deg) translateY(22%); }
+  to { transform: perspective(500px) rotateX(58deg) translateY(14%); }
+}
+
+@keyframes entry-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes entry-spin-reverse {
+  to { transform: rotate(-360deg); }
+}
+
+@keyframes entry-scan {
+  from { top: -5%; }
+  to { top: 105%; }
+}
+

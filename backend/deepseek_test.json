@@ -1,0 +1,1 @@
+{"model":"deepseek-chat","messages":[{"role":"user","content":"只回答两个字：你好"}],"max_tokens":20,"temperature":0}

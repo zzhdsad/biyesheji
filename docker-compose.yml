@@ -1,0 +1,131 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: kp-postgres
+    # 问题9：异常退出/宿主机重启后自动拉起，避免"数据库宕掉后系统永久不可用"
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-knowledge_platform}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: kp-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.14
+    container_name: kp-etcd
+    restart: always
+    environment:
+      ETCD_AUTO_COMPACTION_MODE: revision
+      ETCD_AUTO_COMPACTION_RETENTION: "1000"
+      ETCD_QUOTA_BACKEND_BYTES: "4294967296"
+    command: >-
+      etcd
+      -advertise-client-urls=http://etcd:2379
+      -listen-client-urls=http://0.0.0.0:2379
+      --data-dir=/etcd
+    volumes:
+      - etcd_data:/etcd
+
+  minio:
+    image: minio/minio:RELEASE.2024-05-28T17-19-04Z
+    container_name: kp-minio
+    restart: always
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    command: minio server /minio_data
+    ports:
+      - "9000:9000"
+    volumes:
+      - minio_data:/minio_data
+
+  milvus:
+    image: milvusdb/milvus:v2.4.15
+    container_name: kp-milvus
+    restart: always
+    command: ["milvus", "run", "standalone"]
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    depends_on:
+      - etcd
+      - minio
+    ports:
+      - "19530:19530"
+      - "9091:9091"
+    volumes:
+      - milvus_data:/var/lib/milvus
+
+  backend:
+    build: ./backend
+    container_name: kp-backend
+    restart: always
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-knowledge_platform}
+      REDIS_URL: redis://redis:6379/0
+      MILVUS_URI: http://milvus:19530
+      # 模型权重在构建镜像时已下载到 /app/models（见 backend/Dockerfile），
+      # 容器运行时不再联网拉模型；HF_ENDPOINT 仅作为兜底，不需要用户侧下载
+      HF_ENDPOINT: https://hf-mirror.com
+      EMBEDDING_MODEL_PATH: /app/models/bge-m3
+      RERANK_MODEL_PATH: /app/models/bge-reranker-v2-m3
+      # CPU 编码限流：默认会用满容器内可见核数（实测 ~400% CPU，持续满载会饿死
+      # etcd 心跳导致 Milvus 退出）。限制为 2 线程，给 etcd/Milvus 留出 CPU。
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - uploads_data:/app/uploads
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # rewrites 在 next build 阶段内联，必须构建时注入（容器网络服务名）
+        BACKEND_URL: http://backend:8000
+    container_name: kp-frontend
+    restart: always
+    environment:
+      # 运行时保留（供 server 端其他运行时代码读取；rewrites 已在构建时固化）
+      BACKEND_URL: http://backend:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  redis_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  uploads_data:

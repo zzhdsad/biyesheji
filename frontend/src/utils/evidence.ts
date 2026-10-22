@@ -1,0 +1,374 @@
+/**
+ * 阶段十：多源证据（Evidence）前端逻辑。
+ *
+ * 与后端 src/application/evidence.py 语义保持一致：
+ * - 证据等级沿用既有规则：score >= 0.7 → high，>= 0.3 → medium，否则 insufficient；
+ * - Document 与 Resource（herb / prescription / theory / literature）统一为同一
+ *   Evidence 结构，不为四种资源各建一套结构；
+ * - 分组顺序：先按 source_kind（+ 细分类型），组内再按具体来源聚合，均按最高分降序。
+ *
+ * 该模块只依赖类型（import type），无运行时依赖，便于独立测试。
+ */
+import type {
+  Citation,
+  EvidenceGroup,
+  EvidenceLevel,
+  EvidenceSource,
+  EvidenceSummary,
+} from '@/types';
+
+/** 证据等级阈值（与后端一致，不在前端自行改动）。 */
+export const EVIDENCE_HIGH_THRESHOLD = 0.7;
+export const EVIDENCE_MEDIUM_THRESHOLD = 0.3;
+
+/** 来源类别 → 中文标签（阶段十三：kg 与后端 SOURCE_KIND_LABELS 对齐）。 */
+export const SOURCE_KIND_LABEL: Record<string, string> = {
+  document: '文档',
+  resource: '资源',
+  kg: '知识图谱',
+};
+
+/** Resource 细分类型 → 中文标签（与后端 RESOURCE_TYPE_LABELS 一致）。 */
+export const RESOURCE_TYPE_LABEL: Record<string, string> = {
+  herb: '中药',
+  prescription: '方剂',
+  theory: '理论',
+  literature: '文献',
+};
+
+/** 证据等级 → 展示文案。 */
+export const EVIDENCE_LEVEL_LABEL: Record<EvidenceLevel, string> = {
+  high: 'High',
+  medium: 'Medium',
+  insufficient: 'Insufficient',
+};
+
+/**
+ * 证据等级 → 面向普通用户的解释文案（Tooltip 用）。
+ *
+ * 只做展示辅助，不改变后端 level 判定（阈值仍为 0.7 / 0.3，
+ * 与后端 src/application/evidence.py 保持一致）。
+ */
+export const EVIDENCE_LEVEL_DESCRIPTION: Record<EvidenceLevel, string> = {
+  high: '表示当前回答有较高可信度来源支持',
+  medium: '表示存在相关资料支持，但信息完整度一般',
+  insufficient: '表示当前资料不足，仅作为参考',
+};
+
+/**
+ * 用户可见的「相关度」展示字段。
+ *
+ * 与后端语义保持一致：
+ * - `relevance_score`：BGE-M3 dense cosine，用于相关性/Evidence Level，
+ *   是用户能直观理解的"检索相关性"百分比（0.85 → 85%）。
+ * - `score`：BGE-Reranker-v2-m3 sigmoid，继续用于 reranker 排序与内部语义，
+ *   但分布跨度大、绝对值偏小（如 0.0297），不适合直接当作"百分比"展示
+ *   （会出现「相关度 3%」这种与用户感受不一致的结果）。
+ *
+ * 边界：
+ * - `relevance_score` 为有限数 → 返回它；
+ * - 缺失（undefined/null/NaN/越界 → 1） → fallback 到 `score`；
+ * - 两者都缺失/非有限 → 返回 `null`，调用方应不展示 Tag（不出现 NaN%）。
+ */
+export function displayRelevanceScore(
+  ev: Pick<Citation, 'score' | 'relevance_score'>,
+): number | null {
+  const rel = ev.relevance_score;
+  if (typeof rel === 'number' && Number.isFinite(rel) && rel >= 0 && rel <= 1) {
+    return rel;
+  }
+  const sc = ev.score;
+  if (typeof sc === 'number' && Number.isFinite(sc) && sc >= 0 && sc <= 1) {
+    return sc;
+  }
+  return null;
+}
+
+/**
+ * source/group 聚合分（Evidence Level 同量纲）。
+ *
+ * 与后端 _group_score / evidence_level 阈值语义一致：Evidence Level 的
+ * 0.7 / 0.3 阈值按 BGE-M3 dense cosine（relevance_score）设计，聚合
+ * max_score 必须优先 relevance_score，缺失时回退 ev.score（reranker
+ * sigmoid），否则会出现「子证据 Medium 69%、分组 Insufficient」的矛盾。
+ */
+export function groupScore(ev: Pick<Citation, 'score' | 'relevance_score'>): number {
+  return displayRelevanceScore(ev) ?? 0;
+}
+
+/** 证据等级 → Tag 颜色。 */
+export const EVIDENCE_LEVEL_COLOR: Record<EvidenceLevel, string> = {
+  high: 'success',
+  medium: 'warning',
+  insufficient: 'default',
+};
+
+/** 按分数推导证据等级（与后端 evidence_level 一致）。 */
+export function evidenceLevel(score: number): EvidenceLevel {
+  if (score >= EVIDENCE_HIGH_THRESHOLD) return 'high';
+  if (score >= EVIDENCE_MEDIUM_THRESHOLD) return 'medium';
+  return 'insufficient';
+}
+
+/**
+ * 归一化为统一 Evidence：补齐 source_kind / source_id / source_name /
+ * source_label / evidence_text / evidence_level。
+ *
+ * 历史消息（阶段十之前持久化）缺少这些字段，归一化后可与新数据同样分组展示。
+ */
+export function normalizeEvidence(citation: Citation): Citation {
+  const score = citation.score ?? 0;
+  // 阶段十三：KG 证据后端同时带 source_kind='kg' 与 resource_type，必须与 resource
+  // 区分开（后端 group_evidence 把 KG 单独成组 kg:<type>，标签为「知识图谱·中药」）。
+  const isKg = citation.source_kind === 'kg';
+  const isResource =
+    !isKg && (citation.source_kind === 'resource' || Boolean(citation.resource_type));
+  const resourceType = isKg || isResource ? citation.resource_type ?? null : null;
+
+  const sourceId = isKg || isResource
+    ? citation.resource_id ?? citation.source_id ?? citation.doc_id
+    : citation.source_id ?? citation.doc_id;
+  // 阶段十六：名称取值用 ||（而非 ??），空字符串按缺失处理，
+  // 避免出现「来源名称为空」的空白证据卡片。
+  const sourceName = isKg || isResource
+    ? citation.resource_name || citation.source_name || citation.doc_name || '资源'
+    : citation.source_name || citation.doc_name || '未知文档';
+  // 优先沿用后端下发的 source_label（后端对 KG 已标注「图谱·中药」），缺失时本地推导
+  const fallbackLabel = isKg
+    ? `${SOURCE_KIND_LABEL.kg}·${resourceType ? RESOURCE_TYPE_LABEL[resourceType] ?? resourceType : SOURCE_KIND_LABEL.kg}`
+    : isResource
+      ? (resourceType ? RESOURCE_TYPE_LABEL[resourceType] ?? resourceType : SOURCE_KIND_LABEL.resource)
+      : SOURCE_KIND_LABEL.document;
+
+  return {
+    ...citation,
+    score,
+    source_kind: isKg ? 'kg' : isResource ? 'resource' : 'document',
+    resource_type: resourceType,
+    // 等级与后端 hit_to_evidence 同量纲：优先 relevance_score（dense），
+    // 缺失时回退 score（reranker）；避免同一证据 level 与分组/相关度矛盾
+    evidence_level: citation.evidence_level ?? evidenceLevel(groupScore(citation)),
+    evidence_id: citation.evidence_id ?? citation.chunk_id,
+    source_id: sourceId,
+    source_name: sourceName,
+    source_label: citation.source_label ?? fallbackLabel,
+    evidence_text: citation.evidence_text ?? citation.content,
+  };
+}
+
+function groupKeyOf(evidence: Citation): { groupKey: string; label: string; subtype: string | null } {
+  // 阶段十三：KG 证据独立成组 kg:<type>（与后端 group_evidence 口径一致），
+  // 避免 Knowledge Graph 关系证据被混进同名 Resource 组。
+  if (evidence.source_kind === 'kg') {
+    const subtype = evidence.resource_type ?? 'kg';
+    return {
+      groupKey: `kg:${subtype}`,
+      label: `${SOURCE_KIND_LABEL.kg}·${RESOURCE_TYPE_LABEL[subtype] ?? subtype}`,
+      subtype,
+    };
+  }
+  if (evidence.source_kind === 'resource') {
+    const subtype = evidence.resource_type ?? 'resource';
+    return {
+      groupKey: `resource:${subtype}`,
+      label: RESOURCE_TYPE_LABEL[subtype] ?? subtype,
+      subtype,
+    };
+  }
+  return { groupKey: 'document', label: SOURCE_KIND_LABEL.document, subtype: null };
+}
+
+/**
+ * 多来源证据分组：先按来源类别（+ 细分类型），组内再按具体来源聚合。
+ *
+ * 例：中药组下可同时有「金银花」「连翘」两个来源，每个来源下有多条证据。
+ */
+export function buildEvidenceGroups(citations: Citation[]): EvidenceGroup[] {
+  const evidence = citations.map(normalizeEvidence);
+  const groupMap = new Map<string, EvidenceGroup>();
+  const orderedGroups: EvidenceGroup[] = [];
+  const sourceIndex = new Map<string, EvidenceSource[]>();
+
+  for (const ev of evidence) {
+    const { groupKey, label, subtype } = groupKeyOf(ev);
+    let group = groupMap.get(groupKey);
+    if (!group) {
+      group = {
+        group_key: groupKey,
+        source_kind: ev.source_kind ?? 'document',
+        source_type: subtype,
+        source_label: label,
+        source_count: 0,
+        evidence_count: 0,
+        max_score: 0,
+        evidence_level: 'insufficient',
+        sources: [],
+      };
+      groupMap.set(groupKey, group);
+      orderedGroups.push(group);
+      sourceIndex.set(groupKey, []);
+    }
+    const sources = sourceIndex.get(groupKey) as EvidenceSource[];
+    const sid = ev.source_id ?? ev.source_name ?? groupKey;
+    let source = sources.find((s) => (s.source_id ?? s.source_name) === sid);
+    if (!source) {
+      source = {
+        source_id: ev.source_id ?? null,
+        // 阶段十六：空字符串同样按缺失处理，避免展示空名来源
+        source_name: ev.source_name || '未知来源',
+        source_kind: ev.source_kind ?? 'document',
+        source_type: subtype,
+        source_label: label,
+        evidence_count: 0,
+        max_score: 0,
+        evidence_level: 'insufficient',
+        evidences: [],
+      };
+      sources.push(source);
+      group.sources.push(source);
+    }
+    source.evidences.push(ev);
+  }
+
+  for (const group of orderedGroups) {
+    for (const source of group.sources) {
+      // 排序仍按 e.score（reranker 位次是 LLM 看到的次序，与后端一致）
+      source.evidences.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+      source.evidence_count = source.evidences.length;
+      // max_score / evidence_level 用 groupScore：与 per-citation 同量纲（dense 优先）
+      source.max_score = source.evidences.reduce((m, e) => Math.max(m, groupScore(e)), 0);
+      source.evidence_level = evidenceLevel(source.max_score);
+    }
+    group.sources.sort((a, b) => b.max_score - a.max_score);
+    group.source_count = group.sources.length;
+    group.evidence_count = group.sources.reduce((n, s) => n + s.evidence_count, 0);
+    group.max_score = group.sources.reduce((m, s) => Math.max(m, s.max_score), 0);
+    group.evidence_level = evidenceLevel(group.max_score);
+  }
+
+  // 组间按最高分降序（同分保持首次出现顺序）
+  orderedGroups.sort((a, b) => b.max_score - a.max_score);
+  return orderedGroups;
+}
+
+/**
+ * 把 chip 的来源编号映射到 Collapse 面板 key（BUG-058）。
+ *
+ * 面板 key 是证据的 `source_index`（后端下发，即展示位次），而内联编号由 LLM
+ * 生成——模型可能引用越界编号（只有 3 条来源却写 `[citation: 5]`）。旧实现直接
+ * 把 n 当 key：越界编号点不出任何面板（且再点也不会收起已展开项）。
+ *
+ * 映射规则：
+ * - 命中现有 `source_index` → 返回 key = String(n)；
+ * - 越界（无对应来源）→ 返回 null，调用方应忽略本次点击（不展开、不报错）；
+ * - 编号重复/缺失时按现有集合精确匹配，绝不臆造来源。
+ */
+export function resolveCitationKey(
+  chipIndex: number,
+  availableSourceIndexes: number[],
+): string | null {
+  if (!Number.isFinite(chipIndex)) return null;
+  const wanted = Math.trunc(chipIndex);
+  return availableSourceIndexes.includes(wanted) ? String(wanted) : null;
+}
+
+/** 正文解析产物：纯文本段 或 内联引用标记。 */
+export type AnswerSegment =
+  | { type: 'text'; text: string }
+  | { type: 'citation'; index: number; page: number | null };
+
+/**
+ * 解析回答正文中的内联引用标记 `[citation: 编号, 页码?]`（引用 0 修复）。
+ *
+ * 与后端 rag_service._CITATION_PATTERN 同一语法（页码可选，兼容有无空格）：
+ * - `[citation: 3]` → { index: 3, page: null }；
+ * - `[citation: 1, 5]` → { index: 1, page: 5 }；
+ * - `[citation: 1, 0]` → page=0（后端 Prompt 旧约定"无页码填 0"，展示层不得
+ *   把 0 当编号显示——chip 一律显示 [index]）。
+ *
+ * 该函数只做解析（纯函数，可独立测试）；编号是否有效（能否定位证据卡片）
+ * 由调用方结合 source_index 集合判断（见 resolveCitationKey）。
+ */
+export function parseCitationMarkers(content: string): AnswerSegment[] {
+  const segments: AnswerSegment[] = [];
+  const re = /\[citation:\s*(\d+)(?:,\s*(-?\d+))?\]/g;
+  let last = 0;
+  for (let m = re.exec(content); m !== null; m = re.exec(content)) {
+    const at = m.index;
+    if (at > last) segments.push({ type: 'text', text: content.slice(last, at) });
+    const page = m[2] != null ? Number(m[2]) : null;
+    segments.push({ type: 'citation', index: Number(m[1]), page });
+    last = at + m[0].length;
+  }
+  if (last < content.length) segments.push({ type: 'text', text: content.slice(last) });
+  return segments;
+}
+
+/**
+ * 来源名展示（问题6：文件名产品化）：
+ * - "普济本事方.txt" → 《普济本事方》（去扩展名 + 书名号，去掉数据库文件感）；
+ * - 已经是《》包裹或纯资源名（中药/方剂，如"丹参"）原样返回；
+ * - "《伤寒论》校注本.pdf" 这类含书名号的也去扩展名处理。
+ */
+export function formatSourceName(raw: string | null | undefined): string {
+  const name = (raw ?? '').trim();
+  if (!name) return '未知来源';
+  const stripped = name.replace(/\.(txt|pdf|md|docx?|json|csv)$/i, '').trim();
+  if (!stripped) return name;
+  if (stripped.startsWith('《') && stripped.endsWith('》')) return stripped;
+  return `《${stripped}》`;
+}
+
+/**
+ * 归一化后端下发的 evidence_groups（/chat/ask-stream citations 事件携带）。
+ *
+ * 后端 group_evidence() 已按 relevance_score 量纲算好 max_score /
+ * evidence_level（与 per-citation 一致），前端**直接沿用、不重复计算**，
+ * 只对每条 evidence 应用 normalizeEvidence 补齐 source_label / evidence_text
+ * 等展示字段（历史消息 / 旧数据可能缺失）；组/来源层的 max_score 与
+ * evidence_level 缺失时按 groupScore 兜底重算（正常路径不会触发）。
+ */
+export function normalizeEvidenceGroups(groups: EvidenceGroup[]): EvidenceGroup[] {
+  return groups.map((g) => ({
+    ...g,
+    source_kind: g.source_kind ?? 'document',
+    source_label: g.source_label ?? SOURCE_KIND_LABEL[g.source_kind] ?? SOURCE_KIND_LABEL.document,
+    sources: (g.sources ?? []).map((s) => {
+      const evidences = (s.evidences ?? []).map(normalizeEvidence);
+      return {
+        ...s,
+        evidence_count: s.evidence_count ?? evidences.length,
+        // 正常路径后端已算好；缺失（防御）时按同量纲兜底重算
+        max_score:
+          typeof s.max_score === 'number' && Number.isFinite(s.max_score)
+            ? s.max_score
+            : evidences.reduce((m, e) => Math.max(m, groupScore(e)), 0),
+        evidence_level:
+          s.evidence_level ??
+          evidenceLevel(evidences.reduce((m, e) => Math.max(m, groupScore(e)), 0)),
+        evidences,
+      };
+    }),
+  }));
+}
+
+/** 证据汇总：证据数 / 来源数 / 分组数 / 各等级数量。 */
+export function summarizeEvidence(
+  citations: Citation[],
+  groups: EvidenceGroup[] = buildEvidenceGroups(citations),
+): EvidenceSummary {
+  const evidence = citations.map(normalizeEvidence);
+  const byLevel: Record<EvidenceLevel, number> = { high: 0, medium: 0, insufficient: 0 };
+  for (const ev of evidence) {
+    byLevel[ev.evidence_level ?? evidenceLevel(groupScore(ev))] += 1;
+  }
+  return {
+    evidence_count: evidence.length,
+    source_count: groups.reduce((n, g) => n + g.source_count, 0),
+    group_count: groups.length,
+    // 与后端 summarize_evidence 同量纲：dense 优先（reranker ≈0.03 会把
+    // 全 medium 的证据汇总成 max_score=0.03，与 by_level 自相矛盾）
+    max_score: evidence.reduce((m, e) => Math.max(m, groupScore(e)), 0),
+    by_level: byLevel,
+  };
+}

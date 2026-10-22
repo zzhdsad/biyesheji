@@ -1,0 +1,39 @@
+PICK herb=不凋木 rx=八子补肾胶囊 theory=通因通用 literature=None
+======================================================================
+[herb] Q: 不凋木有哪些功效？
+  hits=6 dense=6 sparse=0 rrf=0 rerank=6 kinds={'resource': 2, 'document': 4}
+  best_dense=0.6535 best_rerank=0.4138
+  evidence=6 sources=['资源', '资源', '褚氏遗书.txt', '普济本事方.txt']
+  gate=accept reason=multiple_medium_evidence accepted=6
+  LLM elapsed=384.3s reflection=accept
+  citations_in_answer=0 []
+  ANSWER: 根据现有资料，我无法回答该问题。
+======================================================================
+[prescription] Q: 八子补肾胶囊的组成和主治是什么？
+  hits=8 dense=4 sparse=0 rrf=0 rerank=8 kinds={'resource': 3, 'document': 5}
+  best_dense=0.5515 best_rerank=0.5548
+  evidence=5 sources=['资源', '严氏济生方.txt', '普济本事方.txt', '普济本事方.txt']
+  gate=accept reason=multiple_medium_evidence accepted=5
+  LLM elapsed=392.0s reflection=accept
+  citations_in_answer=2 ['[citation: 1, 0]', '[citation: 2, 0]']
+  ANSWER: 根据现有资料，我无法回答该问题。
+
+现有资料中，编号[1]仅记录了八子补肾胶囊的方名、用法（口服）和出处，并未列出其具体组成药物和主治病症 [citation: 1, 0]；编号[2]为宋代《严氏济生方》中十补丸、鹿茸丸、冷补丸等方剂的内容，与八子补肾胶囊并非同一方剂，无法作为其组成和主治的依据 [citation: 2, 0]。因此，关于八子补肾胶囊的组成和主治，资料中没有可直接回答的信息。
+======================================================================
+[theory] Q: 什么是通因通用？
+  hits=3 dense=2 sparse=0 rrf=0 rerank=3 kinds={'resource': 3}
+  best_dense=0.6681 best_rerank=0.8352
+  evidence=2 sources=['资源', '资源']
+  gate=accept reason=multiple_medium_evidence accepted=2
+  LLM elapsed=94.0s reflection=accept
+  citations_in_answer=1 ['[citation: 1, 0]']
+  ANSWER: 根据现有资料，我只能确认「通因通用」是一个中医理论术语，其出处标注为 D1_TCM_terminology.tsv:TCMT00021 [citation: 1, 0]。资料中未给出该术语的具体定义或解释，因此无法进一步说明其含义。
+======================================================================
+[none] Q: 量子计算机如何用Python训练神经网络？
+  hits=6 dense=4 sparse=0 rrf=0 rerank=6 kinds={'document': 6}
+  best_dense=0.3300 best_rerank=0.0010
+  evidence=0 sources=[]
+  gate=insufficient reason=no_evidence accepted=0
+  LLM elapsed=370.1s reflection=accept
+  citations_in_answer=0 []
+  ANSWER: 根据现有资料，我无法回答该问题。

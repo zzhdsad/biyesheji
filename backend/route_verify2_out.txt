@@ -1,0 +1,28 @@
+==========================================================================
+[A-中药] Q: 丹参有什么功效？
+ Analyzer: qtype=herb rtypes=['herb'] unanswerable_candidate=False
+ Router  : strategy=herb_focused filter={'resource_types': ['herb'], 'include_document': True, 'enabled': True} recall=60 hyde=True
+ Retrieve: hyde=ON(ok=True) dense=60{'resource': 10, 'document': 50} sparse=60 rrf[60, 60]->60 rerank 60->6
+ Result  : hits=6 {'resource': 4, 'document': 2} best_dense=0.7802 best_rerank=0.9827 evidence=6 gate=accept/has_high_evidence citations=3
+ Sources : ['丹参', '肘后备急方.txt', '云南丹参', '资源', '三对叶丹参', '严氏济生方.txt']
+ ANSWER  : 丹参的功效为活血化瘀（activating blood flow and removing blood stasis）[citation: 1, 0]。其四气为寒，五味为苦，归心、肝经 [citation: 1, 0]。
+
+《肘后备急方》中记载：治寒疝，小腹及阴中相引痛、自汗出，以丹参一两，杵为散，每服热酒调下二钱匕 [citation: 2, 0]。
+==========================================================================
+[A-中药] Q: 广藿香归哪些经？
+ Analyzer: qtype=herb rtypes=['herb'] unanswerable_candidate=False
+ Router  : strategy=herb_focused filter={'resource_types': ['herb'], 'include_document': True, 'enabled': True} recall=60 hyde=True
+ Retrieve: hyde=ON(ok=True) dense=60{'resource': 8, 'document': 52} sparse=60 rrf[60, 60]->60 rerank 60->6
+ Result  : hits=6 {'resource': 5, 'document': 1} best_dense=0.7892 best_rerank=0.9873 evidence=6 gate=accept/has_high_evidence citations=3
+ Sources : ['广藿香', '八角茴香', '九里香', '小茴香', '川楝子', '严氏济生方.txt']
+ ANSWER  : 广藿香归脾、胃、肺三经 [citation: 1, 0]。
+
+其归经在资料中记录为 spleen（脾）、stomach（胃）、lung（肺）[citation: 1, 0]。此外，广藿香性温、味辛，功效为化湿（dissipating dampness）[citation: 1, 0]。
+==========================================================================
+[E-无关] Q: 量子计算机如何用Python训练神经网络？
+ Analyzer: qtype=unanswerable rtypes=[] unanswerable_candidate=True
+ Router  : strategy=baseline_hybrid filter={'resource_types': [], 'include_document': True, 'enabled': False} recall=None hyde=True
+ Retrieve: hyde=ON(ok=True) dense=10{'resource': 10} sparse=10 rrf[10, 10]->10 rerank 10->3
+ Result  : hits=3 {'document': 3} best_dense=0.0000 best_rerank=0.0004 evidence=0 gate=insufficient/no_evidence citations=0
+ Sources : ['塘医话.txt', '严氏济生方.txt', '严氏济生方.txt']
+ ANSWER  : 根据现有资料，我无法回答该问题。当前检索到的证据不足以支撑可靠回答（已换用其他检索策略重试仍未获得充分证据），请补充相关资料或调整提问方式。

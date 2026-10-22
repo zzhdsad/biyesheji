@@ -1,0 +1,897 @@
+"""向量库抽象：Milvus（TECH_DESIGN document_chunks 集合）/ 内存实现可切换（依赖倒置）。
+
+Collection: document_chunks
+- 标量：id(PK), doc_id, kb_id, chunk_index, content, page_num, title_path
+- dense_vector (FLOAT_VECTOR, 1024d) → HNSW/COSINE
+- sparse_vector (SPARSE_FLOAT_VECTOR) → SPARSE_INVERTED_INDEX/IP
+- 动态标量（enable_dynamic_field=True 的集合）：source_type(VARCHAR)、
+  credibility_level(INT64)，来源可信度标注随向量写入、检索带回；
+  老集合（未开启动态字段）自动降级：不写/不取这两个字段，由 PG enrichment 兜底
+"""
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+
+from loguru import logger
+
+from src.core.config import settings
+
+
+class VectorStoreError(Exception):
+    """向量库层异常。"""
+
+
+# 批量删除 / 批量查询时的 id 分片大小：单次表达式过长会被 Milvus 拒绝
+_BULK_ID_CHUNK = 200
+# 批量查询时单次最多返回的实体数（Milvus query limit 上限 16384）
+_BULK_QUERY_LIMIT = 4096
+
+
+def _chunked(items: list[str], size: int) -> list[list[str]]:
+    """把 id 列表切成固定大小的分片（控制 Milvus 表达式长度）。"""
+    return [items[i : i + size] for i in range(0, len(items), size)] or []
+
+
+@dataclass
+class VectorRow:
+    """Milvus 插入行（与 chunks 表字段对齐 + 双路向量）。
+
+    Task-008 Stage 4-2 扩展：resource_type/resource_id/resource_name/era 用于
+    传统资源（Herb/Prescription/Theory/Literature）向量行携带资源元数据；
+    均为可选字段，默认 None，Document 向量化路径不填这些字段，向后兼容。
+    Stage 4-3 将扩展 Milvus insert() 把这些字段作为动态字段写入；本阶段不写入。
+    """
+
+    id: str
+    doc_id: str
+    kb_id: str
+    chunk_index: int
+    content: str
+    page_num: int | None
+    title_path: str | None
+    dense_vector: list[float]
+    sparse_vector: dict[int, float] = field(default_factory=dict)
+    # 来源可信度（动态字段；None/0 表示该文档未标注，写入时降级为缺省值）
+    source_type: str | None = None
+    credibility_level: int | None = None
+    # 资源元数据（Stage 4-2 扩展；Document 向量行不填，保持 None）
+    resource_type: str | None = None
+    resource_id: str | None = None
+    resource_name: str | None = None
+    era: str | None = None
+    # 生成该向量的 embedding 模型标识（`backend:model`，如 `flagembedding:BAAI/bge-m3`）。
+    # 随向量一起写入 Milvus 动态字段，使得"存量向量由哪个模型生成"可追溯，
+    # 切换模型后可用于识别旧模型向量，避免新旧向量混检。
+    embedding_model: str | None = None
+
+
+class BaseVectorStore(ABC):
+    """向量库接口：集合管理、幂等写入、按文档删除。"""
+
+    @abstractmethod
+    def ensure_collection(self) -> None:
+        """确保集合与索引存在（幂等）。"""
+
+    @abstractmethod
+    def insert(self, rows: list[VectorRow]) -> int:
+        """批量插入向量，返回成功条数。"""
+
+    @abstractmethod
+    def delete_by_doc(self, doc_id: str) -> None:
+        """删除指定文档的全部向量（重新向量化前调用，幂等）。"""
+
+    @abstractmethod
+    def count_by_doc(self, doc_id: str) -> int:
+        """统计指定文档的向量条数（验证入库结果）。"""
+
+    @abstractmethod
+    def ids_by_doc(self, doc_id: str) -> list[str]:
+        """列出指定文档现有向量的 id（幂等替换前识别"旧分片"用）。"""
+
+    @abstractmethod
+    def delete_by_ids(self, ids: list[str]) -> None:
+        """按主键批量删除向量（幂等；空列表直接返回）。"""
+
+    @abstractmethod
+    def delete_by_kb(self, kb_id: str) -> None:
+        """删除指定知识库的全部向量（Document + Resource，KB purge 用）。"""
+
+    def replace_doc(self, doc_id: str, rows: list[VectorRow]) -> int:
+        """整体替换某文档的向量：**先写新、再清旧**（BUG-046）。
+
+        旧实现是"先 delete_by_doc 再 insert"：两步之间任一失败都会让该文档
+        向量全灭，且没有自动重建入口。新顺序：
+
+        1. 记录旧向量 id（stale 候选）；
+        2. 写入新向量（同主键覆盖，尾部新增）；
+        3. 只删除「旧 id 中不在新 id 集合里」的多余分片；
+        4. 校验条数：若出现重复行（底层不支持同主键覆盖）则回退为
+           "清旧写新"，保证最终状态正确。
+
+        任一写入步骤失败时旧向量仍在，不会留下空窗。
+        """
+        if not rows:
+            return 0
+        self.ensure_collection()
+        keep = {r.id for r in rows}
+        stale = [i for i in self.ids_by_doc(doc_id) if i not in keep]
+
+        inserted = self.insert(rows)
+        if inserted != len(rows):
+            raise VectorStoreError(
+                f"向量入库不完整：期望 {len(rows)} 条，实际 {inserted} 条"
+            )
+        if stale:
+            self.delete_by_ids(stale)
+
+        if self.count_by_doc(doc_id) != len(rows):
+            # 极端情况：底层把同主键行当成新行插入（重复）→ 重建该文档向量
+            logger.warning(
+                f"向量替换后条数不一致 doc_id={doc_id}，回退为清旧写新"
+            )
+            self.delete_by_doc(doc_id)
+            inserted = self.insert(rows)
+            if inserted != len(rows):
+                raise VectorStoreError(
+                    f"向量入库不完整：期望 {len(rows)} 条，实际 {inserted} 条"
+                )
+        return inserted
+
+    # ── 批量写入（供批量向量化任务使用，不改变单篇写入语义）────────────────
+    # 单篇路径 replace_doc 每调用一次就 flush 一次 Milvus；批量任务里
+    # "每批 flush 一次" 即可，避免 N 篇文档触发 N 次落盘。
+
+    def insert_batch(self, rows: list[VectorRow], *, flush: bool = True) -> int:
+        """批量写入向量；``flush=False`` 时由调用方在整批结束后统一落盘。
+
+        默认实现转调 ``insert``（立即落盘，行为不变）；子类可重写为
+        "可延迟落盘的批量写入"，未重写的实现仍完全可用。
+        """
+        return self.insert(rows)
+
+    def flush(self) -> None:
+        """把已写入/删除的数据落盘（默认 no-op：内存实现无需落盘）。
+
+        为什么需要：Milvus 的 **删除在 flush 之前对查询不可见**，
+        若"写入 → 删除过期分片 → 立即校验条数"就会读到旧行、误判为重复。
+        """
+        return None
+
+    def ids_by_docs(self, doc_ids: list[str]) -> dict[str, list[str]]:
+        """批量列出多个文档现有向量的 id（默认逐个查询，子类可重写为单次查询）。"""
+        return {d: self.ids_by_doc(d) for d in doc_ids}
+
+    def count_by_docs(self, doc_ids: list[str]) -> dict[str, int]:
+        """批量统计多个文档的向量条数（默认逐个统计，子类可重写）。"""
+        return {d: self.count_by_doc(d) for d in doc_ids}
+
+    def vectorized_doc_ids(
+        self, doc_ids: list[str], embedding_model: str | None = None
+    ) -> set[str]:
+        """返回这些 doc_id 中"已存在有效向量"的子集（幂等判断用）。
+
+        ``embedding_model`` 非 None 时只统计该模型生成的向量，用于判断
+        "是否已是当前模型向量"（避免重复向量化，也便于旧模型向量重建）。
+        默认实现按条数判断，子类可重写为单次批量查询。
+        """
+        result: set[str] = set()
+        for doc_id in doc_ids:
+            try:
+                if self.count_by_doc(doc_id) > 0:
+                    result.add(doc_id)
+            except Exception:  # noqa: BLE001 - 幂等判断失败不得阻断任务
+                continue
+        return result
+
+    def replace_docs_bulk(self, rows: list[VectorRow], *, flush: bool = True) -> int:
+        """批量整体替换**多个文档**的向量（新写 → 删旧 → 校验）。
+
+        与 ``replace_doc`` 同语义（BUG-046：先写新再清旧，任何时刻都不会出现
+        "该文档向量全灭"的空窗），只是把 N 个文档合并成：
+
+        - 1 次（分批的）insert，而不是 N 次；
+        - 1 次 flush（``flush=True`` 时），而不是 N 次；
+        - 批量查询旧 id / 批量删除过期 id，而不是逐篇往返。
+
+        失败时抛 VectorStoreError，由调用方降级为逐篇处理以精确定位失败项。
+        """
+        if not rows:
+            return 0
+        self.ensure_collection()
+        by_doc: dict[str, list[VectorRow]] = {}
+        for r in rows:
+            by_doc.setdefault(r.doc_id, []).append(r)
+        keep = {r.id for r in rows}
+        old_ids = self.ids_by_docs(list(by_doc))
+        stale = [i for ids in old_ids.values() for i in ids if i not in keep]
+
+        # 写入不落盘 → 删除过期分片 → 统一 flush → 校验：
+        # 顺序很重要，删除在 flush 前对查询不可见，先校验会误判"重复"。
+        inserted = self.insert_batch(rows, flush=False)
+        if inserted != len(rows):
+            raise VectorStoreError(
+                f"向量入库不完整：期望 {len(rows)} 条，实际 {inserted} 条"
+            )
+        for i in range(0, len(stale), _BULK_ID_CHUNK):
+            self.delete_by_ids(stale[i : i + _BULK_ID_CHUNK])
+        if flush:
+            self.flush()
+
+        expected = {d: len(rs) for d, rs in by_doc.items()}
+        actual = self.count_by_docs(list(expected))
+        broken = [d for d, n in expected.items() if actual.get(d, 0) != n]
+        for doc_id in broken:
+            # 极端情况：底层把同主键行当成新行插入（重复）→ 该篇重建
+            logger.warning(f"批量替换后条数不一致 doc_id={doc_id}，回退为该篇清旧写新")
+            self.delete_by_doc(doc_id)
+            written = self.insert_batch(by_doc[doc_id], flush=flush)
+            if written != len(by_doc[doc_id]):
+                raise VectorStoreError(
+                    f"向量入库不完整：期望 {len(by_doc[doc_id])} 条，实际 {written} 条"
+                )
+        return inserted
+
+    @abstractmethod
+    def search(
+        self,
+        query_vector: list[float],
+        kb_ids: list[str],
+        top_k: int,
+        resource_types: list[str] | None = None,
+        include_document: bool = True,
+    ) -> list[dict]:
+        """稠密向量检索（强制 kb_id 过滤，TECH_DESIGN 权限隔离）。
+
+        Args:
+            query_vector: 稠密查询向量
+            kb_ids: 允许的知识库（强制过滤，禁止越权）
+            top_k: 返回条数
+            resource_types: 阶段十二 Dynamic Router 的资源类型过滤。
+                None = 不限制（默认，与阶段十一及之前行为一致）；
+                非空 = 只返回这些 resource_type 的命中
+            include_document: 资源过滤生效时是否保留 Document 命中
+                （resource_type 为空的行）
+
+        Returns:
+            [{id, doc_id, kb_id, chunk_index, content, page_num, title_path, score}]，
+            score 为相似度（越大越相关），按 score 降序。
+        """
+
+    @abstractmethod
+    def search_sparse(
+        self,
+        query_sparse: dict,
+        kb_ids: list[str],
+        top_k: int,
+        resource_types: list[str] | None = None,
+        include_document: bool = True,
+    ) -> list[dict]:
+        """稀疏向量检索（BM25 关键词召回，强制 kb_id 过滤）。
+
+        query_sparse 为 BGE-M3 lexical weights（{token_id: weight}）。
+        返回结构同 search（score 为稀疏内点积，越大越相关）。
+        resource_types / include_document 语义同 search。
+        """
+
+
+class MilvusStore(BaseVectorStore):
+    """Milvus 2.4 实现（MilvusClient API）。连接惰性建立，失败抛 VectorStoreError。"""
+
+    COLLECTION = settings.MILVUS_COLLECTION
+
+    def __init__(self, uri: str | None = None) -> None:
+        self._uri = uri or settings.MILVUS_URI
+        self._client = None
+        # 动态字段能力缓存：None=未探测 / True=已开启 / False=老集合不支持
+        self._dynamic_enabled: bool | None = None
+
+    def _supports_dynamic_fields(self) -> bool:
+        """探测集合是否开启动态字段（老集合无法事后加列，需降级）。结果缓存。"""
+        if self._dynamic_enabled is not None:
+            return self._dynamic_enabled
+        client = self._get_client()
+        try:
+            if not client.has_collection(self.COLLECTION):
+                # 集合不存在：ensure_collection 会以动态字段方式创建
+                self._dynamic_enabled = True
+            else:
+                desc = client.describe_collection(self.COLLECTION)
+                self._dynamic_enabled = bool(desc.get("enable_dynamic_field", False))
+        except Exception as exc:
+            logger.warning(f"Milvus 动态字段能力探测失败，按不支持降级：{exc}")
+            self._dynamic_enabled = False
+        return self._dynamic_enabled
+
+    def _get_client(self):
+        if self._client is None:
+            try:
+                from pymilvus import MilvusClient
+            except ImportError as exc:
+                raise VectorStoreError("未安装 pymilvus：pip install pymilvus") from exc
+            try:
+                self._client = MilvusClient(uri=self._uri)
+            except Exception as exc:
+                raise VectorStoreError(f"Milvus 连接失败（{self._uri}）：{exc}") from exc
+        return self._client
+
+    def ensure_collection(self) -> None:
+        client = self._get_client()
+        if client.has_collection(self.COLLECTION):
+            self._supports_dynamic_fields()
+            return
+        try:
+            from pymilvus import DataType
+
+            # 动态字段开启：来源可信度标量（source_type/credibility_level）
+            # 直接随实体写入，无需显式建列，避免后续加字段时重建集合
+            schema = client.create_schema(auto_id=False, enable_dynamic_field=True)
+            schema.add_field("id", DataType.VARCHAR, is_primary=True, max_length=64)
+            schema.add_field("doc_id", DataType.VARCHAR, max_length=64)
+            schema.add_field("kb_id", DataType.VARCHAR, max_length=64)
+            schema.add_field("chunk_index", DataType.INT64)
+            schema.add_field("content", DataType.VARCHAR, max_length=32768)
+            # 注：不用 nullable 字段（pymilvus 2.4 插入 None 兼容性差），
+            # page_num=0 表示暂无页码，title_path="" 表示无标题路径
+            schema.add_field("page_num", DataType.INT64)
+            schema.add_field("title_path", DataType.VARCHAR, max_length=1024)
+            schema.add_field("dense_vector", DataType.FLOAT_VECTOR, dim=settings.MILVUS_DIM)
+            schema.add_field("sparse_vector", DataType.SPARSE_FLOAT_VECTOR)
+
+            index_params = client.prepare_index_params()
+            index_params.add_index(
+                field_name="dense_vector",
+                index_type="HNSW",
+                metric_type="COSINE",
+                params={"M": 16, "efConstruction": 200},
+            )
+            index_params.add_index(
+                field_name="sparse_vector",
+                index_type="SPARSE_INVERTED_INDEX",
+                metric_type="IP",
+            )
+            client.create_collection(
+                collection_name=self.COLLECTION, schema=schema, index_params=index_params
+            )
+            self._dynamic_enabled = True
+            logger.info(
+                f"Milvus 集合已创建：{self.COLLECTION}（dense HNSW + sparse 倒排 + 动态字段）"
+            )
+        except Exception as exc:
+            raise VectorStoreError(f"创建 Milvus 集合失败：{exc}") from exc
+
+    def insert(self, rows: list[VectorRow]) -> int:
+        """插入向量并立即落盘（单篇写入路径，行为与历史一致）。"""
+        return self.insert_batch(rows, flush=True)
+
+    def insert_batch(self, rows: list[VectorRow], *, flush: bool = True) -> int:  # noqa: D102
+        if not rows:
+            return 0
+        client = self._get_client()
+        # 老集合（未开启动态字段）无法写入来源标量：降级跳过，来源信息由 PG 兜底
+        dynamic = self._supports_dynamic_fields()
+        data = []
+        for r in rows:
+            item = {
+                "id": r.id,
+                "doc_id": r.doc_id,
+                "kb_id": r.kb_id,
+                "chunk_index": r.chunk_index,
+                "content": r.content,
+                "page_num": r.page_num or 0,
+                "title_path": r.title_path or "",
+                "dense_vector": r.dense_vector,
+                "sparse_vector": r.sparse_vector,
+            }
+            if dynamic:
+                # 动态字段缺省值与 page_num 约定一致："" / 0 表示未标注
+                item["source_type"] = r.source_type or ""
+                item["credibility_level"] = r.credibility_level or 0
+                # TASK-008 Stage 4-3：Resource 元数据作为动态字段写入
+                # Document 向量行 resource_* 均为 None → 写入空串，与 source_type 约定一致
+                item["resource_type"] = r.resource_type or ""
+                item["resource_id"] = r.resource_id or ""
+                item["resource_name"] = r.resource_name or ""
+                item["era"] = r.era or ""
+                # 向量来源模型（空串表示未标注/legacy，与 source_type 约定一致）
+                item["embedding_model"] = r.embedding_model or ""
+            data.append(item)
+        try:
+            # 分批插入，避免超大 payload
+            total = 0
+            batch = settings.VECTORIZE_BATCH_SIZE
+            for i in range(0, len(data), batch):
+                res = client.insert(collection_name=self.COLLECTION, data=data[i : i + batch])
+                total += res.get("insert_count", 0)
+            # 批量任务可延迟落盘：整批结束后由调用方统一 flush（少 N-1 次落盘）
+            if flush:
+                # 立即落盘，保证后续查询可见（growing segment 有可见性延迟）
+                client.flush(self.COLLECTION)
+            return total
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus 插入失败：{exc}") from exc
+
+    def flush(self) -> None:  # noqa: D102
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION):
+            return
+        try:
+            client.flush(self.COLLECTION)
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus flush 失败：{exc}") from exc
+
+    def query_rows(self, doc_id: str) -> list[dict]:
+        """查询指定文档的全部向量行（标准化为 dict，供校验与调试）。"""
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION):
+            return []
+        output_fields = [
+            "id",
+            "doc_id",
+            "kb_id",
+            "chunk_index",
+            "content",
+            "page_num",
+            "title_path",
+            "dense_vector",
+            "sparse_vector",
+        ]
+        if self._supports_dynamic_fields():
+            output_fields += [
+                "source_type",
+                "credibility_level",
+                "resource_type",
+                "resource_id",
+                "resource_name",
+                "era",
+            ]
+        rows = client.query(
+            collection_name=self.COLLECTION,
+            filter=f'doc_id == "{doc_id}"',
+            output_fields=output_fields,
+            limit=16384,
+        )
+        return [
+            {
+                "id": r["id"],
+                "doc_id": r["doc_id"],
+                "kb_id": r["kb_id"],
+                "chunk_index": r["chunk_index"],
+                "content": r["content"],
+                "page_num": r["page_num"],
+                "title_path": r["title_path"],
+                "source_type": r.get("source_type") or None,
+                "credibility_level": r.get("credibility_level") or None,
+                "resource_type": r.get("resource_type") or None,
+                "resource_id": r.get("resource_id") or None,
+                "resource_name": r.get("resource_name") or None,
+                "era": r.get("era") or None,
+                "dense_vector": [float(x) for x in r["dense_vector"]],
+                "sparse_vector": {int(k): float(v) for k, v in r["sparse_vector"].items()},
+            }
+            for r in rows
+        ]
+
+    def delete_by_doc(self, doc_id: str) -> None:
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION):
+            return
+        try:
+            client.delete(collection_name=self.COLLECTION, filter=f'doc_id == "{doc_id}"')
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus 删除失败 doc_id={doc_id}：{exc}") from exc
+
+    def count_by_doc(self, doc_id: str) -> int:
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION):
+            return 0
+        try:
+            rows = client.query(
+                collection_name=self.COLLECTION,
+                filter=f'doc_id == "{doc_id}"',
+                output_fields=["count(*)"],
+            )
+            return int(rows[0]["count(*)"]) if rows else 0
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus 查询失败 doc_id={doc_id}：{exc}") from exc
+
+    def ids_by_doc(self, doc_id: str) -> list[str]:
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION):
+            return []
+        try:
+            rows = client.query(
+                collection_name=self.COLLECTION,
+                filter=f'doc_id == "{doc_id}"',
+                output_fields=["id"],
+                limit=16384,
+            )
+            return [str(r["id"]) for r in rows if r.get("id") is not None]
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus 查询失败 doc_id={doc_id}：{exc}") from exc
+
+    def delete_by_ids(self, ids: list[str]) -> None:
+        if not ids:
+            return
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION):
+            return
+        quoted = ", ".join(f'"{i}"' for i in ids)
+        try:
+            client.delete(collection_name=self.COLLECTION, filter=f"id in [{quoted}]")
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus 批量删除失败 ids={len(ids)}：{exc}") from exc
+
+    def delete_by_kb(self, kb_id: str) -> None:
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION):
+            return
+        try:
+            client.delete(collection_name=self.COLLECTION, filter=f'kb_id == "{kb_id}"')
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus 删除失败 kb_id={kb_id}：{exc}") from exc
+
+    # ── 批量查询（批量向量化任务用）：单次 RPC 取代逐篇往返 ────────────────
+
+    def ids_by_docs(self, doc_ids: list[str]) -> dict[str, list[str]]:  # noqa: D102
+        result: dict[str, list[str]] = {d: [] for d in doc_ids}
+        for chunk in _chunked(doc_ids, _BULK_ID_CHUNK):
+            for row in self._query_doc_chunk(chunk, ["id", "doc_id"]):
+                doc_id = str(row.get("doc_id"))
+                if doc_id in result and row.get("id") is not None:
+                    result[doc_id].append(str(row["id"]))
+        return result
+
+    def vectorized_doc_ids(  # noqa: D102
+        self, doc_ids: list[str], embedding_model: str | None = None
+    ) -> set[str]:
+        if embedding_model and not self._supports_dynamic_fields():
+            # 老集合未开启动态字段：embedding_model 不会随向量落盘，按模型过滤
+            # 必然为空。此处退化为"有向量即视为已向量化"，
+            # 否则批量任务每轮都会把已完成的条目重做一遍（幂等性被破坏）。
+            embedding_model = None
+        result: set[str] = set()
+        for chunk in _chunked(doc_ids, _BULK_ID_CHUNK):
+            expr = "doc_id in [" + ", ".join(f'"{d}"' for d in chunk) + "]"
+            if embedding_model:
+                expr += f' and embedding_model == "{embedding_model}"'
+            for row in self._query_by_expr(expr, ["doc_id"]):
+                if row.get("doc_id") is not None:
+                    result.add(str(row["doc_id"]))
+        return result
+
+    def _query_doc_chunk(self, doc_ids: list[str], output_fields: list[str]) -> list[dict]:
+        """按 doc_id 分片做一次 query（集合不存在返回空）。"""
+        expr = "doc_id in [" + ", ".join(f'"{d}"' for d in doc_ids) + "]"
+        return self._query_by_expr(expr, output_fields)
+
+    def _query_by_expr(self, expr: str, output_fields: list[str]) -> list[dict]:
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION):
+            return []
+        try:
+            return client.query(
+                collection_name=self.COLLECTION,
+                filter=expr,
+                output_fields=output_fields,
+                limit=_BULK_QUERY_LIMIT,
+            )
+        except Exception as exc:
+            # 幂等/校验类查询失败不得成为任务单点故障：交由调用方按"未向量化"处理
+            logger.warning(f"Milvus 批量查询失败（按空结果降级）：{exc}")
+            return []
+
+    def _build_filter(
+        self,
+        kb_ids: list[str],
+        resource_types: list[str] | None,
+        include_document: bool,
+    ) -> str:
+        """构造检索过滤表达式：kb_id 必过滤 + 可选资源类型过滤。
+
+        阶段十二：Dynamic Router 的聚焦策略通过资源类型谓词限定召回范围。
+        老集合未开启动态字段时无法过滤 resource_type（列不存在），此时降级为
+        仅 kb_id 过滤，由 RagService 的后置过滤兜底，保证行为一致且不报错。
+        """
+        # 强制 kb_id 过滤（TECH_DESIGN：所有检索加 kb_id 过滤，禁止越权访问）
+        expr = "kb_id in [" + ", ".join(f'"{k}"' for k in kb_ids) + "]"
+        if resource_types and self._supports_dynamic_fields():
+            allowed = ", ".join(f'"{t}"' for t in resource_types)
+            parts = [f"resource_type in [{allowed}]"]
+            if include_document:
+                # Document 行写入时 resource_type 写为空串（见 insert 注释）
+                parts.append('resource_type == ""')
+            expr = f"{expr} and ({' or '.join(parts)})"
+        elif resource_types:
+            logger.warning(
+                "集合未开启动态字段，无法按 resource_type 过滤，降级为仅 kb_id 过滤"
+            )
+        return expr
+
+    def search(
+        self,
+        query_vector: list[float],
+        kb_ids: list[str],
+        top_k: int,
+        resource_types: list[str] | None = None,
+        include_document: bool = True,
+    ) -> list[dict]:
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION) or not kb_ids:
+            return []
+        kb_filter = self._build_filter(kb_ids, resource_types, include_document)
+        output_fields = [
+            "id",
+            "doc_id",
+            "kb_id",
+            "chunk_index",
+            "content",
+            "page_num",
+            "title_path",
+        ]
+        if self._supports_dynamic_fields():
+            output_fields += [
+                "source_type",
+                "credibility_level",
+                "resource_type",
+                "resource_id",
+                "resource_name",
+                "era",
+            ]
+        try:
+            results = client.search(
+                collection_name=self.COLLECTION,
+                data=[query_vector],
+                anns_field="dense_vector",
+                limit=top_k,
+                filter=kb_filter,
+                output_fields=output_fields,
+            )[0]
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus 检索失败：{exc}") from exc
+        return [self._parse_hit(hit) for hit in results]
+
+    def search_sparse(
+        self,
+        query_sparse: dict,
+        kb_ids: list[str],
+        top_k: int,
+        resource_types: list[str] | None = None,
+        include_document: bool = True,
+    ) -> list[dict]:
+        """稀疏向量检索（BM25 关键词召回，SPARSE_INVERTED_INDEX + IP）。"""
+        client = self._get_client()
+        if not client.has_collection(self.COLLECTION) or not kb_ids or not query_sparse:
+            return []
+        kb_filter = self._build_filter(kb_ids, resource_types, include_document)
+        output_fields = [
+            "id",
+            "doc_id",
+            "kb_id",
+            "chunk_index",
+            "content",
+            "page_num",
+            "title_path",
+        ]
+        if self._supports_dynamic_fields():
+            output_fields += [
+                "source_type",
+                "credibility_level",
+                "resource_type",
+                "resource_id",
+                "resource_name",
+                "era",
+            ]
+        try:
+            results = client.search(
+                collection_name=self.COLLECTION,
+                data=[query_sparse],
+                anns_field="sparse_vector",
+                limit=top_k,
+                filter=kb_filter,
+                output_fields=output_fields,
+            )[0]
+        except Exception as exc:
+            raise VectorStoreError(f"Milvus 稀疏检索失败：{exc}") from exc
+        return [self._parse_hit(hit) for hit in results]
+
+    @staticmethod
+    def _parse_hit(hit: dict) -> dict:
+        """标准化检索命中：page_num=0/source 缺省值还原为 None。"""
+        entity = hit.get("entity", {})
+        page_num = entity.get("page_num")
+        source_type = entity.get("source_type")
+        credibility_level = entity.get("credibility_level")
+        return {
+            "id": entity.get("id"),
+            "doc_id": entity.get("doc_id"),
+            "kb_id": entity.get("kb_id"),
+            "chunk_index": entity.get("chunk_index"),
+            "content": entity.get("content", ""),
+            # page_num=0 表示暂无页码（见 insert 注释），对调用方还原为 None
+            "page_num": page_num if page_num else None,
+            "title_path": entity.get("title_path") or None,
+            # 动态字段缺省值 "" / 0 同样还原为 None（未标注）
+            "source_type": source_type or None,
+            "credibility_level": credibility_level or None,
+            # TASK-008 Stage 4-3：Resource 元数据带回（空串还原为 None）
+            "resource_type": entity.get("resource_type") or None,
+            "resource_id": entity.get("resource_id") or None,
+            "resource_name": entity.get("resource_name") or None,
+            "era": entity.get("era") or None,
+            "score": float(hit.get("distance", 0.0)),
+        }
+
+
+class InMemoryVectorStore(BaseVectorStore):
+    """内存实现：开发/单元测试用（无 Milvus 服务时验证全流程）。"""
+
+    def __init__(self) -> None:
+        self._rows: dict[str, VectorRow] = {}
+
+    def ensure_collection(self) -> None:  # noqa: D102
+        pass
+
+    def insert(self, rows: list[VectorRow]) -> int:  # noqa: D102
+        for r in rows:
+            self._rows[r.id] = r
+        return len(rows)
+
+    def delete_by_doc(self, doc_id: str) -> None:  # noqa: D102
+        self._rows = {k: v for k, v in self._rows.items() if v.doc_id != doc_id}
+
+    def count_by_doc(self, doc_id: str) -> int:  # noqa: D102
+        return sum(1 for v in self._rows.values() if v.doc_id == doc_id)
+
+    def ids_by_doc(self, doc_id: str) -> list[str]:  # noqa: D102
+        return [r.id for r in self._rows.values() if r.doc_id == doc_id]
+
+    def delete_by_ids(self, ids: list[str]) -> None:  # noqa: D102
+        if not ids:
+            return
+        drop = set(ids)
+        self._rows = {k: v for k, v in self._rows.items() if k not in drop}
+
+    def delete_by_kb(self, kb_id: str) -> None:  # noqa: D102
+        self._rows = {k: v for k, v in self._rows.items() if v.kb_id != kb_id}
+
+    @staticmethod
+    def _match_resource(
+        row: VectorRow, resource_types: list[str] | None, include_document: bool
+    ) -> bool:
+        """阶段十二：资源类型谓词（Document 行 resource_type 为空）。"""
+        if not resource_types:
+            return True
+        if row.resource_type:
+            return row.resource_type in resource_types
+        return include_document
+
+    def search(  # noqa: D102
+        self,
+        query_vector: list[float],
+        kb_ids: list[str],
+        top_k: int,
+        resource_types: list[str] | None = None,
+        include_document: bool = True,
+    ) -> list[dict]:
+        kb_set = set(kb_ids)
+
+        def _cosine(a: list[float], b: list[float]) -> float:
+            dot = sum(x * y for x, y in zip(a, b))
+            na = sum(x * x for x in a) ** 0.5
+            nb = sum(y * y for y in b) ** 0.5
+            return dot / (na * nb) if na and nb else 0.0
+
+        scored = [
+            (_cosine(query_vector, v.dense_vector), v)
+            for v in self._rows.values()
+            if v.kb_id in kb_set
+            and self._match_resource(v, resource_types, include_document)
+        ]
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return [
+            {
+                "id": v.id,
+                "doc_id": v.doc_id,
+                "kb_id": v.kb_id,
+                "chunk_index": v.chunk_index,
+                "content": v.content,
+                "page_num": v.page_num,
+                "title_path": v.title_path,
+                "source_type": v.source_type,
+                "credibility_level": v.credibility_level,
+                "resource_type": v.resource_type,
+                "resource_id": v.resource_id,
+                "resource_name": v.resource_name,
+                "era": v.era,
+                "score": round(score, 6),
+            }
+            for score, v in scored[:top_k]
+        ]
+
+    def search_sparse(  # noqa: D102
+        self,
+        query_sparse: dict,
+        kb_ids: list[str],
+        top_k: int,
+        resource_types: list[str] | None = None,
+        include_document: bool = True,
+    ) -> list[dict]:
+        kb_set = set(kb_ids)
+        if not query_sparse:
+            return []
+
+        def _ip(q: dict, d: dict) -> float:
+            # 稀疏内点积：仅对 query 中出现的 token 求和（匹配 Milvus IP 度量）
+            return sum(w * d.get(t, 0.0) for t, w in q.items())
+
+        scored = [
+            (_ip(query_sparse, v.sparse_vector), v)
+            for v in self._rows.values()
+            if v.kb_id in kb_set
+            and v.sparse_vector
+            and self._match_resource(v, resource_types, include_document)
+        ]
+        scored = [(s, v) for s, v in scored if s > 0]
+        scored.sort(key=lambda t: t[0], reverse=True)
+        return [
+            {
+                "id": v.id,
+                "doc_id": v.doc_id,
+                "kb_id": v.kb_id,
+                "chunk_index": v.chunk_index,
+                "content": v.content,
+                "page_num": v.page_num,
+                "title_path": v.title_path,
+                "source_type": v.source_type,
+                "credibility_level": v.credibility_level,
+                "resource_type": v.resource_type,
+                "resource_id": v.resource_id,
+                "resource_name": v.resource_name,
+                "era": v.era,
+                "score": round(score, 6),
+            }
+            for score, v in scored[:top_k]
+        ]
+
+    def query_rows(self, doc_id: str) -> list[dict]:  # noqa: D102
+        return [
+            {
+                "id": r.id,
+                "doc_id": r.doc_id,
+                "kb_id": r.kb_id,
+                "chunk_index": r.chunk_index,
+                "content": r.content,
+                "page_num": r.page_num,
+                "title_path": r.title_path,
+                "source_type": r.source_type,
+                "credibility_level": r.credibility_level,
+                "resource_type": r.resource_type,
+                "resource_id": r.resource_id,
+                "resource_name": r.resource_name,
+                "era": r.era,
+                "dense_vector": list(r.dense_vector),
+                "sparse_vector": dict(r.sparse_vector),
+            }
+            for r in self._rows.values()
+            if r.doc_id == doc_id
+        ]
+
+    def all_rows(self) -> list[VectorRow]:
+        return list(self._rows.values())
+
+
+_store: BaseVectorStore | None = None
+
+
+def get_vector_store() -> BaseVectorStore:
+    """向量库工厂（进程级单例）。"""
+    global _store
+    if _store is None:
+        _store = MilvusStore()
+    return _store
+
+
+def set_vector_store(store: BaseVectorStore) -> None:
+    """替换全局向量库实现（测试注入用）。"""
+    global _store
+    _store = store

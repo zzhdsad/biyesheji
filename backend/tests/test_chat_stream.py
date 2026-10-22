@@ -1,0 +1,279 @@
+"""SSE 流式问答测试。
+
+覆盖：
+- MockLLM.chat_stream 切片拼接等价于 chat()
+- _hits_to_citations 全量来源、1-based 编号
+- /chat/ask-stream 事件序列 start → citations → delta×N → done
+- kb_ids 为空返回 422；空知识库走防幻觉路径（无法回答 + 无引用）
+"""
+
+import json
+import uuid
+
+import pytest
+
+from src.core import deps as deps_mod
+from src.domain.models import User
+from tests.test_chat import _upload_doc
+from tests.test_parse import _make_kb
+from tests.test_upload import PG_AVAILABLE
+
+
+def _parse_sse(text: str) -> list[tuple[str, dict]]:
+    """解析 SSE 文本流为 [(event, data_dict), ...]。"""
+    events: list[tuple[str, dict]] = []
+    event = ""
+    data = ""
+    for line in text.split("\n"):
+        if line.startswith("event: "):
+            event = line[7:].strip()
+        elif line.startswith("data: "):
+            data += line[6:]
+        elif line == "":
+            if event and data:
+                events.append((event, json.loads(data)))
+            event = ""
+            data = ""
+    return events
+
+
+def _ask_stream(client, question: str, kb_id: str, conversation_id: str | None = None):
+    payload = {"question": question, "kb_ids": [kb_id]}
+    if conversation_id:
+        payload["conversation_id"] = conversation_id
+    resp = client.post("/api/v1/chat/ask-stream", json=payload)
+    assert resp.status_code == 200, resp.text
+    return _parse_sse(resp.text)
+
+
+# ---------- 单元：MockLLM 流式 ----------
+
+
+@pytest.mark.anyio
+async def test_mock_llm_chat_stream_concat_equals_chat():
+    """MockLLM.chat_stream 各 chunk 拼接后应与 chat() 完全一致。"""
+    from src.infrastructure.llm import MockLLM
+
+    messages = [
+        {"role": "user", "content": (
+            "公司实行什么工时？\n\n"
+            "参考资料（编号即引用标识）：\n"
+            "[1] 文档：手册.pdf | 页码：3 | 标题：考勤\n每日工作八小时。"
+        )}
+    ]
+    full = await MockLLM().chat(messages)
+    chunks: list[str] = []
+    async for chunk in MockLLM().chat_stream(messages):
+        chunks.append(chunk)
+    assert "".join(chunks) == full
+
+
+@pytest.mark.anyio
+async def test_mock_llm_chat_stream_empty_context_refuses():
+    """无参考资料时流式也应输出防幻觉回答。"""
+    from src.infrastructure.llm import MockLLM
+
+    chunks: list[str] = []
+    async for chunk in MockLLM().chat_stream([{"role": "user", "content": "无关问题"}]):
+        chunks.append(chunk)
+    assert "无法回答" in "".join(chunks)
+
+
+# ---------- 单元：_hits_to_citations ----------
+
+
+@pytest.mark.anyio
+async def test_hits_to_citations_returns_all_with_1based_index():
+    """_hits_to_citations 返回全部命中，source_index 从 1 递增。"""
+    from src.application.rag_service import RagService
+
+    svc = RagService.__new__(RagService)  # 绕过 __init__
+    hits = [
+        {"id": "c1", "doc_id": "d1", "doc_name": "手册.pdf", "page_num": 3,
+         "title_path": "考勤", "content": "工时八小时", "score": 0.9},
+        {"id": "c2", "doc_id": "d2", "doc_name": "报销.pdf", "page_num": 1,
+         "title_path": "报销", "content": "报销流程", "rerank_score": 0.6},
+    ]
+    cits = svc._hits_to_citations(hits)
+    assert len(cits) == 2
+    assert [c["source_index"] for c in cits] == [1, 2]
+    assert cits[0]["chunk_id"] == "c1" and cits[1]["chunk_id"] == "c2"
+    # rerank_score 优先于 score
+    assert cits[1]["score"] == 0.6
+
+
+# ---------- 集成：/chat/ask-stream 事件序列 ----------
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_ask_stream_event_sequence(client):
+    """有资料提问：事件序列 start → citations → delta×N → done，答案含引用标注。"""
+    kb_id = _make_kb(client)
+    _upload_doc(client, kb_id, "考勤制度.txt")
+
+    events = _ask_stream(client, "公司实行什么工时制度？", kb_id)
+    names = [e for e, _ in events]
+    assert names[0] == "start"
+    assert "conversation_id" in events[0][1]
+    assert names[1] == "citations"
+    assert events[1][1]["citations"], "应推送引用来源"
+    assert names[-1] == "done"
+    assert events[-1][1]["message_id"] and events[-1][1]["conversation_id"]
+
+    # delta 事件拼接为完整答案
+    deltas = [data for name, data in events if name == "delta"]
+    assert deltas, "应至少有一个 delta"
+    answer = "".join(d["content"] for d in deltas)
+    assert "[citation: 1" in answer, "答案应含引用标注"
+
+    # done 中的 conversation_id 应与 start 一致
+    assert events[-1][1]["conversation_id"] == events[0][1]["conversation_id"]
+
+    # 助手消息已持久化：会话消息列表含本轮 user/assistant
+    conv_id = events[-1][1]["conversation_id"]
+    messages = client.get(
+        f"/api/v1/chat/conversations/{conv_id}/messages"
+    ).json()
+    assert [m["role"] for m in messages] == ["user", "assistant"]
+    assert messages[1]["content"] == answer
+    assert messages[1]["citations"]["sources"]
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_stream_done_citations_only_include_used_sources(client):
+    """流式 citations 事件是检索候选；done/落库只保留正文实际引用的来源。
+
+    回归：回答只写 [citation: 1] 时，不能把其余检索候选（如第 2 篇文档）
+    继续展示为“引用来源”。
+    """
+    kb_id = _make_kb(client)
+    _upload_doc(client, kb_id, "考勤制度.txt")
+    _upload_doc(client, kb_id, "报销制度.txt")
+
+    events = _ask_stream(client, "公司实行什么工时制度？", kb_id)
+    citations_events = [data for name, data in events if name == "citations"]
+    assert citations_events, "应推送 citations 事件"
+    assert len(citations_events[0]["citations"]) >= 2, "生成前应下发全部检索候选"
+
+    done = [data for name, data in events if name == "done"][-1]
+    assert len(done["citations"]) == 1, "done 只能保留正文实际引用的来源"
+    assert done["citations"][0]["source_index"] == 1
+    assert done["evidence"] == done["citations"]
+    assert done["evidence_summary"]["evidence_count"] == 1
+
+    messages = client.get(
+        f"/api/v1/chat/conversations/{done['conversation_id']}/messages"
+    ).json()
+    assert len(messages[-1]["citations"]["sources"]) == 1, "落库引用必须与 done 一致"
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_ask_stream_without_kb_ids_returns_422(client):
+    resp = client.post("/api/v1/chat/ask-stream", json={"question": "问题"})
+    assert resp.status_code == 422
+    assert "kb_ids" in resp.json()["message"]
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_ask_stream_empty_kb_returns_unable(client):
+    """空知识库提问：防幻觉路径，无 citations 事件内容为空，答案含'无法回答'。"""
+    kb_id = _make_kb(client)
+    events = _ask_stream(client, "年度预算是多少？", kb_id)
+    names = [e for e, _ in events]
+    assert names[0] == "start"
+    # 空检索：citations 事件 data 为空列表
+    cit_events = [data for name, data in events if name == "citations"]
+    if cit_events:
+        assert cit_events[0]["citations"] == []
+    deltas = [data for name, data in events if name == "delta"]
+    answer = "".join(d["content"] for d in deltas)
+    assert "无法回答" in answer
+    assert names[-1] == "done"
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_ask_stream_unknown_conversation_returns_404(client):
+    kb_id = _make_kb(client)
+    resp = client.post(
+        "/api/v1/chat/ask-stream",
+        json={"question": "问题", "kb_ids": [kb_id], "conversation_id": str(uuid.uuid4())},
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_ask_stream_member_can_access_public_kb(client, monkeypatch):
+    """问题3回归：member 角色（员工）能访问 public 知识库并正常提问。"""
+    # 1. admin 创建 public 知识库
+    kb_id = _make_kb(client, visibility="public")
+
+    # 2. 在数据库中创建真实的 member 用户（员工）
+    import uuid as _uuid
+    from src.domain.models import User
+    member_id = _uuid.uuid4()
+    member_user = User(
+        id=member_id,
+        email=f"employee_{member_id.hex[:8]}@example.com",
+        username=f"employee_{member_id.hex[:8]}",
+        hashed_password="",
+        role="member",
+    )
+    # 通过 admin 接口创建用户（绕过外键约束）
+    resp = client.post("/api/v1/users", json={
+        "username": member_user.username,
+        "email": member_user.email,
+        "role": "member",
+    })
+    assert resp.status_code == 201, f"创建 member 用户失败: {resp.text}"
+    created_user_id = resp.json()["user"]["id"]
+
+    # 3. 将 TEST_USER 替换为真实的 member 用户
+    member_user.id = _uuid.UUID(created_user_id)
+    monkeypatch.setattr(deps_mod, "TEST_USER", member_user)
+
+    # 4. member 能看到 public 知识库
+    kbs = client.get("/api/v1/kb").json()
+    assert any(kb["id"] == kb_id for kb in kbs), "member 应看到 public 知识库"
+
+    # 5. member 能用该知识库提问（至少收到 start 事件）
+    events = _ask_stream(client, "测试问题", kb_id)
+    names = [e for e, _ in events]
+    assert names[0] == "start", f"member 提问失败: {events}"
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_ask_stream_member_cannot_access_private_kb(client, monkeypatch):
+    """member 角色无法访问未授权的 private 知识库。"""
+    kb_id = _make_kb(client, visibility="private")
+
+    # 创建真实的 member 用户
+    import uuid as _uuid
+    member_id = _uuid.uuid4()
+    resp = client.post("/api/v1/users", json={
+        "username": f"employee2_{member_id.hex[:8]}",
+        "email": f"employee2_{member_id.hex[:8]}@example.com",
+        "role": "member",
+    })
+    assert resp.status_code == 201, f"创建 member 用户失败: {resp.text}"
+    created_user_id = resp.json()["user"]["id"]
+
+    from src.domain.models import User
+    member_user = User(
+        id=_uuid.UUID(created_user_id),
+        email=f"employee2_{member_id.hex[:8]}@example.com",
+        username=f"employee2_{member_id.hex[:8]}",
+        hashed_password="",
+        role="member",
+    )
+    monkeypatch.setattr(deps_mod, "TEST_USER", member_user)
+
+    # member 看不到 private 知识库
+    kbs = client.get("/api/v1/kb").json()
+    assert not any(kb["id"] == kb_id for kb in kbs), "member 不应看到 private 知识库"
+
+    # member 用 private 知识库提问 → 403
+    resp = client.post(
+        "/api/v1/chat/ask-stream",
+        json={"question": "测试", "kb_ids": [kb_id]},
+    )
+    assert resp.status_code == 403, f"应返回 403: {resp.text}"

@@ -1,0 +1,347 @@
+{
+  "dataset_version": "tcm-v1",
+  "name": "中医领域评测测试集种子 v1（TASK-009）",
+  "description": "面向中医药知识资源管理与智能问答系统的评测测试集骨架，共 40 条，覆盖中药、方剂、中医理论、文献出处、多来源知识与无依据/知识库中不存在六类问题，为 TASK-011 Query Analyzer / Dynamic Router 按问题类型对比检索策略提供基础。",
+  "annotation_policy": {
+    "principle": "不凭空编造中医医学事实作为标准答案（AGENTS.md 第 8 条、TASKS.md 严禁事项）。",
+    "knowledge_questions": "golden_answer 留空且 needs_review=true。评估运行只计算 context_relevancy，answer_correctness 记为「未评估」（NULL），不计 0 分。需由具备中医药专业背景的人员依据知识库中的原文/资源条目填写 golden_answer 与 golden_contexts，并把 needs_review 置为 false 后，该条用例才会参与答案正确度统计。",
+    "unanswerable_questions": "golden_answer 为系统拒答文案（RagService.REFUSAL_ANSWER），属于系统行为预期而非医学事实，needs_review=false，可直接参与评估。",
+    "source_reference": "标注依据提示，说明应到哪类资源/文献中核对，仅供人工标注参考，不参与打分。"
+  },
+  "question_types": {
+    "herb": "中药知识",
+    "prescription": "方剂知识",
+    "theory": "中医理论",
+    "literature": "文献/出处",
+    "multi_source": "多来源知识",
+    "unanswerable": "无依据/知识库中不存在"
+  },
+  "refusal_golden_answer": "根据现有资料，我无法回答该问题。知识库中未找到与您问题直接相关的内容，请尝试更换提问方式，或确认知识库中已包含相关文档。",
+  "cases": [
+    {
+      "question": "黄芪的性味、归经和主要功效是什么？",
+      "question_type": "herb",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中药资源「黄芪」（中药管理模块）或《中药学》教材文档；需核对原文后填写"
+    },
+    {
+      "question": "麻黄与桂枝在功效与主治上有什么区别？",
+      "question_type": "herb",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中药资源「麻黄」「桂枝」条目对比；解表药分类相关资料"
+    },
+    {
+      "question": "当归的功效与常见配伍有哪些？",
+      "question_type": "herb",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中药资源「当归」条目；补虚药/补血药相关资料"
+    },
+    {
+      "question": "甘草在方剂中通常起什么作用？使用时需要注意什么？",
+      "question_type": "herb",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中药资源「甘草」条目；配伍禁忌（十八反、海藻等）相关资料"
+    },
+    {
+      "question": "清热药分为哪几类？各举一例代表药物。",
+      "question_type": "herb",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中药分类（解表药/清热药等）与中药资源条目"
+    },
+    {
+      "question": "人参、党参、西洋参的功效侧重有什么不同？",
+      "question_type": "herb",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中药资源「人参」「党参」「西洋参」条目"
+    },
+    {
+      "question": "半夏的性味归经、功效及使用注意是什么？",
+      "question_type": "herb",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中药资源「半夏」条目；毒性中药使用注意相关资料"
+    },
+    {
+      "question": "茯苓与薏苡仁在利水渗湿方面有什么异同？",
+      "question_type": "herb",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中药资源「茯苓」「薏苡仁」条目"
+    },
+    {
+      "question": "中药配伍禁忌中的「十八反」包括哪些内容？",
+      "question_type": "herb",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中药理论/文献资料中关于配伍禁忌的原文"
+    },
+
+    {
+      "question": "桂枝汤由哪些药物组成？其功用与主治是什么？",
+      "question_type": "prescription",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "方剂资源「桂枝汤」条目（组成/功用/主治/用法）"
+    },
+    {
+      "question": "麻黄汤与桂枝汤在组成和主治上如何区别？",
+      "question_type": "prescription",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "方剂资源「麻黄汤」「桂枝汤」条目对比"
+    },
+    {
+      "question": "四君子汤由哪些药物组成？主治何种证候？",
+      "question_type": "prescription",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "方剂资源「四君子汤」条目"
+    },
+    {
+      "question": "六味地黄丸的组成与主治是什么？",
+      "question_type": "prescription",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "方剂资源「六味地黄丸」条目"
+    },
+    {
+      "question": "补中益气汤体现了什么治法？适用于哪些证候？",
+      "question_type": "prescription",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "方剂资源「补中益气汤」条目；中医理论中补气升提相关论述"
+    },
+    {
+      "question": "小柴胡汤的主治与配伍特点是什么？",
+      "question_type": "prescription",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "方剂资源「小柴胡汤」条目；和解剂相关资料"
+    },
+    {
+      "question": "银翘散与桑菊饮在功用主治上有什么异同？",
+      "question_type": "prescription",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "方剂资源「银翘散」「桑菊饮」条目对比"
+    },
+    {
+      "question": "方剂的基本结构「君臣佐使」分别是什么含义？",
+      "question_type": "prescription",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "方剂学总论相关理论资源或文献"
+    },
+
+    {
+      "question": "中医阴阳学说的基本内容包括哪些方面？",
+      "question_type": "theory",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中医理论资源（阴阳学说）或《中医基础理论》相关文档"
+    },
+    {
+      "question": "五行学说在中医学中如何用于说明脏腑关系与疾病传变？",
+      "question_type": "theory",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中医理论资源（五行学说）"
+    },
+    {
+      "question": "什么是「藏象」？五脏各自的生理功能特点是什么？",
+      "question_type": "theory",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中医理论资源（藏象学说）"
+    },
+    {
+      "question": "气、血、津液之间的关系是怎样的？",
+      "question_type": "theory",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中医理论资源（气血津液学说）"
+    },
+    {
+      "question": "中医病因学说中的「六淫」指什么？各自的致病特点是什么？",
+      "question_type": "theory",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中医理论资源（病因学说）"
+    },
+    {
+      "question": "什么是「辨证论治」？它与「对症治疗」有什么区别？",
+      "question_type": "theory",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中医理论资源（辨证论治/证候学说）"
+    },
+    {
+      "question": "中医「治未病」思想包含哪些内容？",
+      "question_type": "theory",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "中医理论资源（治则治法/养生）或《黄帝内经》相关文献"
+    },
+
+    {
+      "question": "《黄帝内经》由哪两部分组成？其成书年代与主要内容是什么？",
+      "question_type": "literature",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "文献资源中《黄帝内经》条目（作者/年代/类型/摘要）"
+    },
+    {
+      "question": "《伤寒论》的作者是谁？其主要贡献是什么？",
+      "question_type": "literature",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "文献资源中《伤寒论》条目"
+    },
+    {
+      "question": "《本草纲目》的作者、成书年代及其在药学史上的地位是什么？",
+      "question_type": "literature",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "文献资源中《本草纲目》条目"
+    },
+    {
+      "question": "《神农本草经》将药物分为哪几品？其分类依据是什么？",
+      "question_type": "literature",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "文献资源中《神农本草经》条目"
+    },
+    {
+      "question": "《金匮要略》主要论述哪类疾病？它与《伤寒论》有什么关系？",
+      "question_type": "literature",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "文献资源中《金匮要略》条目"
+    },
+    {
+      "question": "「医圣」指的是哪位医家？他的代表著作是什么？",
+      "question_type": "literature",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "文献资源中相关医家与著作条目"
+    },
+
+    {
+      "question": "治疗外感风寒表证，常用的中药与代表方剂各有哪些？依据是什么？",
+      "question_type": "multi_source",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "需综合中药资源（麻黄、桂枝等）+ 方剂资源（麻黄汤、桂枝汤等）+ 理论/文献依据"
+    },
+    {
+      "question": "补气类中药有哪些？以它们为主组成的常见补气方剂有哪些？",
+      "question_type": "multi_source",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "需综合中药资源（人参、黄芪、白术等）+ 方剂资源（四君子汤、补中益气汤等）"
+    },
+    {
+      "question": "中医如何认识「脾虚」？常用的治法、代表方剂和常用中药有哪些？",
+      "question_type": "multi_source",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "需综合中医理论资源（脏腑辨证）+ 方剂资源 + 中药资源"
+    },
+    {
+      "question": "活血化瘀法适用于哪些病证？常用中药与代表方剂有哪些？",
+      "question_type": "multi_source",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "需综合中医理论资源（治则治法）+ 中药资源（川芎、丹参等）+ 方剂资源"
+    },
+    {
+      "question": "历代文献对「痰饮」的论述以及相应的代表治疗方剂有哪些？",
+      "question_type": "multi_source",
+      "golden_answer": "",
+      "golden_contexts": [],
+      "needs_review": true,
+      "source_reference": "需综合文献资源（如《金匮要略》痰饮篇）+ 方剂资源 + 理论资源"
+    },
+
+    {
+      "question": "2024年诺贝尔物理学奖的获得者是谁？",
+      "question_type": "unanswerable",
+      "golden_answer": "根据现有资料，我无法回答该问题。知识库中未找到与您问题直接相关的内容，请尝试更换提问方式，或确认知识库中已包含相关文档。",
+      "golden_contexts": [],
+      "needs_review": false,
+      "source_reference": "系统拒答行为预期（RagService.REFUSAL_ANSWER），非医学事实，无需医学标注"
+    },
+    {
+      "question": "公司员工的差旅报销标准是多少？",
+      "question_type": "unanswerable",
+      "golden_answer": "根据现有资料，我无法回答该问题。知识库中未找到与您问题直接相关的内容，请尝试更换提问方式，或确认知识库中已包含相关文档。",
+      "golden_contexts": [],
+      "needs_review": false,
+      "source_reference": "系统拒答行为预期（RagService.REFUSAL_ANSWER），非医学事实，无需医学标注"
+    },
+    {
+      "question": "如何用 Python 实现快速排序算法？",
+      "question_type": "unanswerable",
+      "golden_answer": "根据现有资料，我无法回答该问题。知识库中未找到与您问题直接相关的内容，请尝试更换提问方式，或确认知识库中已包含相关文档。",
+      "golden_contexts": [],
+      "needs_review": false,
+      "source_reference": "系统拒答行为预期（RagService.REFUSAL_ANSWER），非医学事实，无需医学标注"
+    },
+    {
+      "question": "阿司匹林的化学合成路线是什么？",
+      "question_type": "unanswerable",
+      "golden_answer": "根据现有资料，我无法回答该问题。知识库中未找到与您问题直接相关的内容，请尝试更换提问方式，或确认知识库中已包含相关文档。",
+      "golden_contexts": [],
+      "needs_review": false,
+      "source_reference": "系统拒答行为预期（RagService.REFUSAL_ANSWER），非医学事实，无需医学标注"
+    },
+    {
+      "question": "《黄帝内经》中记载的青霉素使用方法是什么？",
+      "question_type": "unanswerable",
+      "golden_answer": "根据现有资料，我无法回答该问题。知识库中未找到与您问题直接相关的内容，请尝试更换提问方式，或确认知识库中已包含相关文档。",
+      "golden_contexts": [],
+      "needs_review": false,
+      "source_reference": "时代错置问题（知识库中不存在该依据），验证系统不会依据通用知识编造答案"
+    }
+  ]
+}

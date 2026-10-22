@@ -1,0 +1,43 @@
+==========================================================================
+[A-中药] Q: 丹参有什么功效？
+  Analyzer: qtype=herb rtypes=['herb'] entities=[None] keywords=['丹参', '功效']
+  Router  : strategy=herb_focused filter={'resource_types': ['herb'], 'include_document': True, 'enabled': True} recall=60 rerank_top=6 hyde=True
+  [V0-现状] hyde=ON(ok=True) dense_raw=60{'resource': 10, 'document': 50} -> 60{'resource': 10, 'document': 50} sparse_raw=60{'document': 59, 'resource': 1} -> 60 rrf[60, 60]->60 rerank 60->6
+  [V0-现状] final=6 {'resource': 4, 'document': 2} best_dense=0.7803 best_rerank=0.9827 evidence=6 gate=accept/has_high_evidence
+  [V0-现状] top=['资源', '肘后备急方.txt', '资源', '资源', '资源']
+  [V1-纯资源] hyde=ON(ok=True) dense_raw=60{'resource': 11, 'document': 49} -> 11{'resource': 11} sparse_raw=60{'document': 59, 'resource': 1} -> 1 rrf[11, 1]->11 rerank 11->6
+  [V1-纯资源] final=6 {'resource': 6} best_dense=0.7775 best_rerank=0.9827 evidence=6 gate=accept/has_high_evidence
+  [V1-纯资源] top=['资源', '资源', '资源', '资源', '资源']
+  [V2-文档配额6] hyde=ON(ok=True) dense_raw=60{'resource': 11, 'document': 49} -> 17{'resource': 11, 'document': 6} sparse_raw=60{'document': 59, 'resource': 1} -> 7 rrf[17, 7]->23 rerank 23->6
+  [V2-文档配额6] final=6 {'resource': 4, 'document': 2} best_dense=0.7775 best_rerank=0.9827 evidence=5 gate=accept/has_high_evidence
+  [V2-文档配额6] top=['资源', '资源', '资源', '资源', '严氏济生方.txt']
+  [V3-文档配额6+关HyDE] hyde=OFF(ok=None) dense_raw=60{'resource': 5, 'document': 55} -> 11{'resource': 5, 'document': 6} sparse_raw=60{'resource': 26, 'document': 34} -> 32 rrf[11, 32]->38 rerank 38->6
+  [V3-文档配额6+关HyDE] final=6 {'resource': 4, 'document': 2} best_dense=0.6872 best_rerank=0.9827 evidence=6 gate=accept/multiple_medium_evidence
+  [V3-文档配额6+关HyDE] top=['资源', '资源', '普济本事方.txt', '资源', '资源']
+==========================================================================
+[A-中药] Q: 广藿香归哪些经？
+  Analyzer: qtype=general rtypes=[] entities=[] keywords=['广藿香归']
+  Router  : strategy=baseline_hybrid filter={'resource_types': [], 'include_document': True, 'enabled': False} recall=None rerank_top=None hyde=True
+  [V0-现状] hyde=ON(ok=True) dense_raw=10{'document': 10} -> 10{'document': 10} sparse_raw=10{'document': 10} -> 10 rrf[10, 10]->10 rerank 10->3
+  [V0-现状] final=3 {'document': 3} best_dense=0.6866 best_rerank=0.0479 evidence=3 gate=accept/multiple_medium_evidence
+  [V0-现状] top=['严氏济生方.txt', '民间草药药性赋.txt', '严氏济生方.txt']
+==========================================================================
+[A-中药] Q: 郁金的性味是什么？
+  Analyzer: qtype=herb rtypes=['herb'] entities=[] keywords=['性味', '郁金']
+  Router  : strategy=herb_focused filter={'resource_types': ['herb'], 'include_document': True, 'enabled': True} recall=60 rerank_top=6 hyde=True
+  [V0-现状] hyde=ON(ok=True) dense_raw=60{'resource': 16, 'document': 44} -> 60{'resource': 16, 'document': 44} sparse_raw=60{'document': 59, 'resource': 1} -> 60 rrf[60, 60]->60 rerank 60->6
+  [V0-现状] final=6 {'resource': 5, 'document': 1} best_dense=0.7977 best_rerank=0.9913 evidence=5 gate=accept/has_high_evidence
+  [V0-现状] top=['资源', '资源', '资源', '资源', '塘医话.txt']
+  [V1-纯资源] hyde=ON(ok=True) dense_raw=60{'resource': 15, 'document': 45} -> 15{'resource': 15} sparse_raw=60{'document': 58, 'resource': 2} -> 2 rrf[15, 2]->15 rerank 15->6
+  [V1-纯资源] final=6 {'resource': 6} best_dense=0.8154 best_rerank=0.9913 evidence=6 gate=accept/has_high_evidence
+  [V1-纯资源] top=['资源', '资源', '资源', '资源', '资源']
+  [V2-文档配额6] hyde=ON(ok=True) dense_raw=60{'resource': 23, 'document': 37} -> 29{'resource': 23, 'document': 6} sparse_raw=60{'document': 58, 'resource': 2} -> 8 rrf[29, 8]->34 rerank 34->6
+  [V2-文档配额6] final=6 {'resource': 6} best_dense=0.8124 best_rerank=0.9913 evidence=6 gate=accept/has_high_evidence
+  [V2-文档配额6] top=['资源', '资源', '资源', '资源', '资源']
+  [V3-文档配额6+关HyDE] hyde=OFF(ok=None) dense_raw=60{'resource': 19, 'document': 41} -> 25{'resource': 19, 'document': 6} sparse_raw=60{'resource': 31, 'document': 29} -> 37 rrf[25, 37]->40 rerank 40->6
+  [V3-文档配额6+关HyDE] final=6 {'resource': 6} best_dense=0.6936 best_rerank=0.9913 evidence=5 gate=accept/multiple_medium_evidence
+  [V3-文档配额6+关HyDE] top=['资源', '资源', '资源', '资源', '资源']
+==========================================================================
+[B-方剂] Q: 沉香曲的功效与主治是什么？
+  Analyzer: qtype=herb rtypes=['herb'] entities=[None] keywords=['沉香', '功效', '主治']
+  Router  : strategy=herb_focused filter={'resource_types': ['herb'], 'include_document': True, 'enabled': True} recall=60 rerank_top=6 hyde=True

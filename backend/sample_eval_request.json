@@ -1,0 +1,20 @@
+{
+  "kb_id": "cd72c3a8-8a05-4f36-917b-4b74325c978c",
+  "cases": [
+    {
+      "question": "公司实行什么工时制度？",
+      "golden_answer": "公司实行标准工时制，每日工作8小时，每周40小时。",
+      "golden_contexts": ["公司实行标准工时制，每日工作8小时，每周40小时。"]
+    },
+    {
+      "question": "员工入职满一年享有几天带薪年假？",
+      "golden_answer": "员工入职满一年享有5天带薪年假。",
+      "golden_contexts": ["员工入职满一年享有5天带薪年假。"]
+    },
+    {
+      "question": "公司报销流程是什么？",
+      "golden_answer": "不知道。",
+      "golden_contexts": []
+    }
+  ]
+}

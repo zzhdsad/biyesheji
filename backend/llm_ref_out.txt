@@ -1,0 +1,6 @@
+SELF_REFLECTION_ENABLED=True
+reflector.enabled=True llm_enabled=False
+FINAL elapsed=65.2s
+GATE decision=accept reason=multiple_medium_evidence
+REFLECTION decision=accept reason=refusal_answer_accepted revised=False counts=None
+FINAL_ANSWER: '根据现有资料，我无法回答该问题。\n\n现有参考资料均为中医古籍中治疗黄疸、虚劳等病症的方剂记载，其中虽多处出现「黄」字（如「黄 二两」「黄 （去芦）」），但这是药材「黄芪」在原文中的省略写法，资料内容本身是复方方剂的组成与主治，并未对黄芪单味药的功效作出任何说明或论述 [citation: 1, 0][citation: 2, 0][citation: 3, 0]。因此，无法据此回答黄芪的功效。'

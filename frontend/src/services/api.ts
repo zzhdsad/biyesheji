@@ -1,0 +1,1663 @@
+import axios from 'axios';
+import type {
+  AuditLog,
+  Category,
+  ChatMessage,
+  Citation,
+  Conversation,
+  DocumentItem,
+  EvaluationHistoryItem,
+  EvaluationReport,
+  EvidenceGroup,
+  EvidenceSummary,
+  QueryAnalysis,
+  RouterDecision,
+  EvaluationRunItem,
+  EvalTestCaseItem,
+  EvalTestCaseOut,
+  GateDecision,
+  HealthResponse,
+  ReflectionDecision,
+  Herb,
+  HerbListResponse,
+  KBMember,
+  KBMemberRole,
+  KBResource,
+  KBResourceListResponse,
+  KBResourceType,
+  KnowledgeBase,
+  Literature,
+  LiteratureListResponse,
+  MessageOut,
+  Prescription,
+  PrescriptionListResponse,
+  QuestionTypeOption,
+  Role,
+  SourceEra,
+  SourceType,
+  SystemConfig,
+  SystemConfigValues,
+  Tag,
+  TaxonomyResourceType,
+  Theory,
+  TheoryListResponse,
+  UserOut,
+} from '@/types';
+import { getToken, handleUnauthorized } from './token';
+
+/** 统一 API 客户端：开发环境经 Next.js rewrites 代理到 FastAPI。 */
+export const api = axios.create({
+  baseURL: '/api/v1',
+  timeout: 60_000, // RAG 检索+生成可能较慢，放宽超时
+});
+
+// ── 拦截器：自动携带 JWT + 401 自动跳登录 ───────────────────────────────────
+// 请求拦截器：每个请求自动注入 Authorization: Bearer <token>
+api.interceptors.request.use((config) => {
+  const token = getToken();
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+// 响应拦截器：401（未鉴权/token 过期）→ 清 token + 硬跳登录页
+// 与 SSE（hooks/useSSE.ts）共用 token.ts 的 handleUnauthorized（BUG-062）
+api.interceptors.response.use(
+  (res) => res,
+  (err) => {
+    const status = err?.response?.status;
+    if (status === 401) {
+      // /login 自身的 401 不跳转（避免登录页请求失败时反复跳转）
+      // 无 /register：注册入口已下线（BUG-014），账号由管理员创建
+      handleUnauthorized();
+    }
+    return Promise.reject(err);
+  },
+);
+
+export interface ChatAnswer {
+  conversation_id: string;
+  message_id: string;
+  answer: string;
+  citations: Citation[];
+  /** 阶段十：统一 Evidence 与多来源分组（非流式 /ask） */
+  evidence?: Citation[];
+  evidence_groups?: EvidenceGroup[];
+  evidence_summary?: EvidenceSummary;
+  /** 阶段十一：Query 分析结果 */
+  query_analysis?: QueryAnalysis;
+  /** 阶段十二：Dynamic Router 决策 */
+  router_decision?: RouterDecision;
+  /** 阶段十三：KG 关系证据切片（citations/evidence 已包含，此处为可选视图） */
+  kg_evidence?: Citation[];
+  /** 阶段十四：Evidence Gate 决策（Gate 关闭时为 null） */
+  evidence_gate?: GateDecision | null;
+  /** 阶段十五：Self Reflection 决策（Reflection 关闭时为 null） */
+  reflection?: ReflectionDecision | null;
+}
+
+/** RAG 问答：向量检索 → Rerank → LLM 生成 → 引用溯源。 */
+export async function askQuestion(payload: {
+  question: string;
+  kb_ids?: string[];
+  conversation_id?: string | null;
+}): Promise<ChatAnswer> {
+  const { data } = await api.post<ChatAnswer>('/chat/ask', payload);
+  return data;
+}
+
+/**
+ * 证据原文 → AI 中文翻译（POST /chat/evidence/translate）。
+ *
+ * 纯展示辅助接口：复用现有 LLM 配置，不触碰检索链路；后端带缓存，
+ * 同一段原文重复请求直接命中。原文已为中文时返回 is_chinese=true 且
+ * 不调用模型。
+ */
+export async function translateEvidence(text: string): Promise<{
+  translation: string | null;
+  is_chinese: boolean;
+  cached?: boolean;
+}> {
+  const { data } = await api.post<{
+    translation: string | null;
+    is_chinese: boolean;
+    cached?: boolean;
+  }>('/chat/evidence/translate', { text });
+  return data;
+}
+
+/** 知识库列表（侧边栏数据源）。 */
+export async function fetchKnowledgeBases(): Promise<KnowledgeBase[]> {
+  const { data } = await api.get<KnowledgeBase[]>('/kb');
+  return data;
+}
+
+/** 创建知识库（POST /kb，owner_id 由后端从当前登录用户取）。 */
+export async function createKb(payload: {
+  name: string;
+  description?: string;
+  visibility?: 'public' | 'private';
+}): Promise<KnowledgeBase> {
+  const { data } = await api.post<KnowledgeBase>('/kb', payload);
+  return data;
+}
+
+/** 编辑知识库（PUT /kb/{id}，partial update；仅 owner 或 admin 可调用）。 */
+export async function updateKb(
+  kbId: string,
+  payload: Partial<Pick<KnowledgeBase, 'name' | 'description' | 'visibility'>>,
+): Promise<KnowledgeBase> {
+  const { data } = await api.put<KnowledgeBase>(`/kb/${kbId}`, payload);
+  return data;
+}
+
+/** 删除知识库（DELETE /kb/{id}，documents 外键 CASCADE 级联删除）。 */
+export async function deleteKb(kbId: string): Promise<void> {
+  await api.delete(`/kb/${kbId}`);
+}
+
+/** 历史会话列表（按创建时间倒序）。 */
+export async function fetchConversations(): Promise<Conversation[]> {
+  const { data } = await api.get<Conversation[]>('/chat/conversations');
+  return data;
+}
+
+/** 会话消息记录（按时间升序，解包 citations.sources）。 */
+export async function fetchMessages(conversationId: string): Promise<ChatMessage[]> {
+  const { data } = await api.get<MessageOut[]>(
+    `/chat/conversations/${conversationId}/messages`,
+  );
+  return data.map((m) => ({
+    id: m.id,
+    role: m.role as Role,
+    content: m.content,
+    citations: m.citations?.sources ?? [],
+  }));
+}
+
+/** 删除历史会话（DELETE /chat/conversations/{id}，级联删除消息 + 清缓存）。 */
+export async function deleteConversation(conversationId: string): Promise<void> {
+  await api.delete(`/chat/conversations/${conversationId}`);
+}
+
+/** 删除当前用户的全部历史会话（DELETE /chat/conversations）。 */
+export async function deleteAllConversations(): Promise<{ deletedCount: number }> {
+  const { data } = await api.delete<{ deleted_count: number }>('/chat/conversations');
+  return { deletedCount: data.deleted_count };
+}
+
+/** 系统健康状态（postgres/redis/milvus）。 */
+export async function fetchHealth(): Promise<HealthResponse> {
+  const { data } = await axios.get<HealthResponse>('/health', { timeout: 5_000 });
+  return data;
+}
+
+// ─────────────────────────── 文档管理 ───────────────────────────
+
+/** 文档列表，支持按知识库与解析状态筛选。 */
+export async function fetchDocuments(kbId?: string): Promise<DocumentItem[]> {
+  const { data } = await api.get<DocumentItem[]>('/documents', {
+    params: kbId ? { kb_id: kbId } : {},
+  });
+  return data;
+}
+
+/** 上传时的来源可信度标注（credibility_level 不由前端传入，后端按类型自动推导）。 */
+export interface UploadSourceMeta {
+  sourceType?: SourceType | null;
+  era?: SourceEra | null;
+}
+
+/** 上传单个文档（multipart/form-data）。上传后后端异步派发解析任务。 */
+export async function uploadDocument(
+  file: File,
+  kbId: string,
+  onProgress?: (percent: number) => void,
+  sourceMeta?: UploadSourceMeta,
+): Promise<DocumentItem> {
+  const form = new FormData();
+  form.append('kb_id', kbId);
+  form.append('file', file);
+  if (sourceMeta?.sourceType) form.append('source_type', sourceMeta.sourceType);
+  if (sourceMeta?.era) form.append('era', sourceMeta.era);
+  const { data } = await api.post<DocumentItem>('/documents/upload', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress: (e) => {
+      if (e.total && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+    },
+    timeout: 120_000, // 大文件上传放宽超时
+  });
+  return data;
+}
+
+/** 删除文档及其向量数据。 */
+export async function deleteDocument(docId: string): Promise<void> {
+  await api.delete(`/documents/${docId}`);
+}
+
+/** 手动触发解析/重新解析（失败重试入口，202 Accepted）。 */
+export async function reparseDocument(docId: string): Promise<DocumentItem> {
+  const { data } = await api.post<DocumentItem>(`/documents/${docId}/parse`);
+  return data;
+}
+
+/** 重新向量化（success/completed 才允许，409 拒绝未就绪）。 */
+export async function reindexDocument(docId: string): Promise<DocumentItem> {
+  const { data } = await api.post<DocumentItem>(`/documents/${docId}/reindex`);
+  return data;
+}
+
+// ─────────────────────────── 评估 ───────────────────────────
+
+/** 上传测试集（写入 test_cases，绑定知识库）。 */
+export async function uploadTestSet(
+  kbId: string,
+  cases: EvalTestCaseItem[],
+  datasetVersion?: string,
+): Promise<{ kb_id: string; uploaded: number; case_ids: string[]; dataset_version: string }> {
+  const { data } = await api.post('/evaluation/upload', {
+    kb_id: kbId,
+    cases,
+    ...(datasetVersion ? { dataset_version: datasetVersion } : {}),
+  });
+  return data;
+}
+
+/** 运行评估时指定的实验维度（TASK-009 Baseline 归档）。 */
+export interface EvalRunOptions {
+  experiment_name?: string;
+  retrieval_strategy?: string;
+  dataset_version?: string;
+}
+
+/** 运行 RAGAS 评估（批量 RAG + 指标，返回富报告）。评估较慢，放宽超时。 */
+export async function runEvaluation(
+  kbId: string,
+  caseIds?: string[],
+  options?: EvalRunOptions,
+): Promise<EvaluationReport> {
+  const { data } = await api.post<EvaluationReport>(
+    '/evaluation/run',
+    { kb_id: kbId, case_ids: caseIds, ...(options ?? {}) },
+    { timeout: 300_000 },
+  );
+  return data;
+}
+
+/** 历史评估结果（关联测试用例，按时间倒序），可按 run_id 过滤。 */
+export async function fetchEvalHistory(
+  kbId?: string,
+  runId?: string,
+): Promise<EvaluationHistoryItem[]> {
+  const params: Record<string, string> = {};
+  if (kbId) params.kb_id = kbId;
+  if (runId) params.run_id = runId;
+  const { data } = await api.get<EvaluationHistoryItem[]>('/evaluation/results', { params });
+  return data;
+}
+
+/** 实验运行归档列表（Baseline / 消融实验对比，按时间倒序）。 */
+export async function fetchEvalRuns(kbId?: string): Promise<EvaluationRunItem[]> {
+  const { data } = await api.get<EvaluationRunItem[]>('/evaluation/runs', {
+    params: kbId ? { kb_id: kbId } : {},
+  });
+  return data;
+}
+
+/** 问题类型受控词表。 */
+export async function fetchEvalQuestionTypes(): Promise<QuestionTypeOption[]> {
+  const { data } = await api.get<{ question_types: QuestionTypeOption[] }>(
+    '/evaluation/question-types',
+  );
+  return data.question_types;
+}
+
+/** 查看指定知识库的测试集（含问题分类与人工确认状态）。 */
+export async function fetchEvalTestCases(
+  kbId: string,
+  datasetVersion?: string,
+): Promise<EvalTestCaseOut[]> {
+  const { data } = await api.get<EvalTestCaseOut[]>('/evaluation/test-cases', {
+    params: datasetVersion ? { kb_id: kbId, dataset_version: datasetVersion } : { kb_id: kbId },
+  });
+  return data;
+}
+
+/** 人工确认/修订单条用例的标准答案。 */
+export async function confirmEvalTestCase(
+  caseId: string,
+  payload: {
+    golden_answer?: string;
+    golden_contexts?: string[];
+    source_reference?: string;
+    question_type?: string;
+    needs_review?: boolean;
+  },
+): Promise<EvalTestCaseOut> {
+  const { data } = await api.patch<EvalTestCaseOut>(`/evaluation/test-cases/${caseId}`, payload);
+  return data;
+}
+
+// ─────────────────────────── 反馈收集 ───────────────────────────
+// PRD §3.6 / §8：用户对助手消息点赞/踩 + 文本纠错意见
+
+export interface FeedbackPayload {
+  message_id: string;
+  rating: 1 | -1;
+  comment?: string;
+}
+
+export interface FeedbackResult {
+  id: string;
+  message_id: string;
+  rating: number;
+  comment: string;
+}
+
+/** 提交反馈（点赞/踩 + 可选纠错意见）；同一消息重复提交会覆盖更新。 */
+export async function submitFeedback(
+  payload: FeedbackPayload,
+): Promise<FeedbackResult> {
+  const { data } = await api.post<FeedbackResult>('/feedbacks', payload);
+  return data;
+}
+
+/** 查询某条消息的已有反馈（无则返回 null）。 */
+export async function fetchFeedback(
+  messageId: string,
+): Promise<FeedbackResult | null> {
+  const { data } = await api.get<FeedbackResult | null>(`/feedbacks/${messageId}`);
+  return data;
+}
+
+// ─────────────────────────── 系统仪表盘 ───────────────────────────
+// PRD §5.2：总文档数 / 知识库数 / 累计问答数 / 平均响应延迟（仅 admin）
+
+export interface AdminStats {
+  total_docs: number;
+  total_kbs: number;
+  total_qa: number;
+  avg_latency_ms: number;
+}
+
+/** 系统仪表盘全局统计（GET /admin/stats，仅 admin 可访问）。 */
+export async function fetchAdminStats(): Promise<AdminStats> {
+  const { data } = await api.get<AdminStats>('/admin/stats');
+  return data;
+}
+
+// ─────────────────────────── 模型配置 ───────────────────────────
+
+export interface ModelConfig {
+  llm_provider: 'deepseek' | 'openai' | 'qwen' | 'ollama' | 'custom';
+  llm_base_url: string;
+  llm_model: string;
+  llm_api_key: string; // 脱敏值：sk-****xxxx
+  /** 后端是否已保存过 API Key（用于前端显示"已配置 / 未配置"）。 */
+  llm_api_key_configured?: boolean;
+  /** 与 llm_api_key 相同的脱敏展示值（后端新增，避免前端自行解析）。 */
+  llm_api_key_masked?: string;
+  // Embedding / Rerank / HyDE 均为真实实现（模型随镜像内置），无 mock 选项
+  embedding_backend: 'flagembedding';
+  embedding_model: string;
+  embedding_device: 'cpu' | 'cuda';
+  rerank_backend: 'flagreranker';
+  rerank_model: string;
+  rerank_device: 'cpu' | 'cuda';
+  hyde_enabled: boolean;
+  hyde_backend: 'openai';
+  hyde_model: string;
+  hyde_base_url: string;
+}
+
+export interface TestConnectionResult {
+  ok: boolean;
+  message: string;
+  latency_ms?: number;
+}
+
+/** 获取当前模型配置（API key 已脱敏）。 */
+export async function fetchModelConfig(): Promise<ModelConfig> {
+  const { data } = await api.get<ModelConfig>('/settings/model');
+  return data;
+}
+
+/** 更新模型配置（仅 admin）。API key 传脱敏值则保留原值。 */
+export async function updateModelConfig(payload: Partial<ModelConfig>): Promise<ModelConfig> {
+  const { data } = await api.put<ModelConfig>('/settings/model', payload);
+  return data;
+}
+
+/** 测试 LLM 连通性（不保存配置，直接用提交的参数发请求）。 */
+export async function testModelConnection(
+  payload: Partial<ModelConfig>,
+): Promise<TestConnectionResult> {
+  const { data } = await api.post<TestConnectionResult>('/settings/model/test', payload);
+  return data;
+}
+
+// ── Embedding 状态 / 批量重新向量化 ──────────────────────────────────────────
+
+/**
+ * Embedding 运行状态：ready（可用）/ revectorizing（正在重建存量向量）。
+ * 模型权重与依赖随镜像内置，不存在"待安装 / 初始化"状态。
+ */
+export type EmbeddingDependencyState = 'ready' | 'revectorizing';
+
+export interface RevectorizeJobStatus {
+  job_id: string;
+  status: 'pending' | 'running' | 'succeeded' | 'partial' | 'cancelled' | 'failed';
+  job_type?: 'document' | 'resource';
+  batch_size?: number;
+  total_batches?: number;
+  current_batch?: number;
+  target_model: string;
+  previous_model: string | null;
+  kb_id: string | null;
+  total: number;
+  processed: number;
+  succeeded: number;
+  failed: number;
+  failed_doc_ids: string[];
+  processing: number;
+  percent: number;
+  error_message: string;
+  created_at: string | null;
+  finished_at: string | null;
+}
+
+export interface EmbeddingStatus {
+  config: {
+    backend: string | null;
+    model: string | null;
+    device: string | null;
+    model_key: string;
+  };
+  vectors: {
+    current_model_key: string;
+    /** 仍在使用中的文档总数（B-2：未软删除 + 非回收站知识库，仅作状态卡片分母） */
+    total_documents: number;
+    /** 待重新向量化总数（= stale_with_vectors + unvectorized_documents） */
+    stale_documents: number;
+    /** 真正的旧模型向量（Milvus 中仍存在，检索时被自动排除） */
+    stale_with_vectors: number;
+    /** 从未真正向量化（Milvus 中无向量，如历史导入占位标记） */
+    unvectorized_documents: number;
+    stale_models: string[];
+  };
+  job: RevectorizeJobStatus | null;
+  overall_status: EmbeddingDependencyState;
+}
+
+/** Embedding 运行状态总览（依赖 / 存量向量 / 待重建数量 / 任务进度）。 */
+export async function fetchEmbeddingStatus(): Promise<EmbeddingStatus> {
+  const { data } = await api.get<EmbeddingStatus>('/settings/model/embedding/status');
+  return data;
+}
+
+/** 发起批量重新向量化（仅 admin）；kb_id 为空表示全库。 */
+export async function startRevectorize(kbId?: string): Promise<RevectorizeJobStatus> {
+  const { data } = await api.post<RevectorizeJobStatus>('/settings/model/revectorize', {
+    kb_id: kbId ?? null,
+  });
+  return data;
+}
+
+/** 查询最近一次批量重新向量化任务进度。 */
+export async function fetchRevectorizeStatus(): Promise<RevectorizeJobStatus | null> {
+  const { data } = await api.get<RevectorizeJobStatus | null>('/settings/model/revectorize/status');
+  return data;
+}
+
+/** 重试指定任务的失败项（仅 admin）。 */
+export async function retryRevectorize(jobId: string): Promise<RevectorizeJobStatus> {
+  const { data } = await api.post<RevectorizeJobStatus>('/settings/model/revectorize/retry', {
+    job_id: jobId,
+  });
+  return data;
+}
+
+/**
+ * 取消进行中的批量重新向量化（仅 admin）。
+ * 协作式：已完成的文档保留新向量，剩余文档保持旧向量，不回滚已完成部分。
+ */
+export async function cancelRevectorize(jobId: string): Promise<RevectorizeJobStatus> {
+  const { data } = await api.post<RevectorizeJobStatus>('/settings/model/revectorize/cancel', {
+    job_id: jobId,
+  });
+  return data;
+}
+
+// ───────────────── 真实中医知识数据导入中心（仅 admin）─────────────────────
+
+/** 数据集字段画像。 */
+export interface ImportFieldProfile {
+  name: string;
+  dtype: string;
+  sample: string;
+  non_empty_ratio: number;
+}
+
+/**
+ * 字段映射结论。
+ * status: mapped（可导入）/ pending（待人工确认，默认不写入）/ ignored（结构性字段）
+ */
+export interface ImportFieldMapping {
+  source: string;
+  target: string | null;
+  status: 'mapped' | 'pending' | 'ignored';
+  note: string;
+}
+
+/** 数据集扫描画像（只读分析，不含任何导入副作用）。 */
+export interface ImportDataset {
+  dataset_id: string;
+  name: string;
+  relative_path: string;
+  format: string;
+  size_bytes: number;
+  record_count: number | null;
+  record_count_method: 'exact' | 'estimated' | 'file_count' | 'unknown';
+  fields: ImportFieldProfile[];
+  samples: Record<string, unknown>[];
+  detected_type: string;
+  detected_reason: string;
+  candidate_types: string[];
+  field_mappings: ImportFieldMapping[];
+  pending_fields: string[];
+  warnings: string[];
+  entries: { name: string; size_kb: number }[];
+}
+
+export interface ImportScanResult {
+  source_dir: string;
+  configured: boolean;
+  datasets: ImportDataset[];
+  skipped: string[];
+  message: string;
+}
+
+export interface ImportConfig {
+  source_dir: string;
+  configured: boolean;
+  max_records_per_job: number;
+}
+
+/** 导入任务状态（pending → processing → completed / failed / cancelled）。 */
+export interface ImportJobStatus {
+  job_id: string;
+  batch_id: string;
+  dataset_id: string;
+  dataset_name: string;
+  source_file: string;
+  target_type: string;
+  kb_id: string | null;
+  status: 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
+  total: number;
+  processed: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  percent: number;
+  failed_items: {
+    index?: number;
+    name?: string;
+    reason?: string;
+    resource_id?: string;
+    pending?: boolean;
+  }[];
+  error_message: string;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string | null;
+  // 批量向量化任务扩展字段（资源批量挂载 / 文档批量重建）
+  job_type?: 'document' | 'resource';
+  resource_type?: string;
+  batch_size?: number;
+  total_batches?: number;
+  current_batch?: number;
+  processing?: number;
+}
+
+/** 资源批量挂载统计：各类型总数 / 已挂载 / 未挂载。 */
+export interface ResourceVectorizeStats {
+  kb_id: string | null;
+  items: { resource_type: string; label: string; total: number; mounted: number; unmounted: number }[];
+}
+
+export interface ResourceVectorizePayload {
+  resource_type: 'herb' | 'prescription' | 'theory' | 'literature';
+  kb_id: string;
+  limit?: number | null;
+}
+
+/** 各资源类型的挂载/向量化现状。 */
+export async function fetchResourceVectorizeStats(
+  kbId?: string,
+): Promise<ResourceVectorizeStats> {
+  const { data } = await api.get<ResourceVectorizeStats>('/admin/import/resource-vectorize/stats', {
+    params: kbId ? { kb_id: kbId } : undefined,
+  });
+  return data;
+}
+
+/** 创建资源批量挂载+向量化任务（后台执行）。 */
+export async function createResourceVectorizeJob(
+  payload: ResourceVectorizePayload,
+): Promise<ImportJobStatus> {
+  const { data } = await api.post<ImportJobStatus>('/admin/import/resource-vectorize', payload);
+  return data;
+}
+
+/** 最近一次资源批量挂载任务（轮询进度）。 */
+export async function fetchLatestResourceVectorizeJob(
+  resourceType?: string,
+): Promise<ImportJobStatus | null> {
+  const { data } = await api.get<{ job: ImportJobStatus | null }>(
+    '/admin/import/resource-vectorize/latest',
+    { params: resourceType ? { resource_type: resourceType } : undefined },
+  );
+  return data.job;
+}
+
+/** 断点续跑 / 只重试失败项（跳过已成功条目）。 */
+export async function resumeResourceVectorizeJob(jobId: string): Promise<ImportJobStatus> {
+  const { data } = await api.post<ImportJobStatus>(
+    `/admin/import/resource-vectorize/${jobId}/resume`,
+  );
+  return data;
+}
+
+export interface ImportJobPayload {
+  dataset_id: string;
+  target_type: 'herb' | 'prescription' | 'theory' | 'literature' | 'document';
+  kb_id?: string | null;
+  limit?: number | null;
+  vectorize?: boolean;
+  confirmed: boolean;
+}
+
+/** 导入中心数据源配置（是否配置了 IMPORT_SOURCE_DIR）。 */
+export async function fetchImportConfig(): Promise<ImportConfig> {
+  const { data } = await api.get<ImportConfig>('/admin/import/config');
+  return data;
+}
+
+/** 扫描数据源目录（只读，不导入）。 */
+export async function scanImportDatasets(sampleRows = 5): Promise<ImportScanResult> {
+  const { data } = await api.post<ImportScanResult>('/admin/import/scan', null, {
+    params: { sample_rows: sampleRows },
+  });
+  return data;
+}
+
+/** 单数据集映射预览（真实样例 + 映射结论）。 */
+export async function previewImportDataset(
+  datasetId: string,
+  sampleRows = 10,
+): Promise<{ dataset: ImportDataset; source_dir: string; hint: string }> {
+  const { data } = await api.get<{ dataset: ImportDataset; source_dir: string; hint: string }>(
+    `/admin/import/datasets/${datasetId}/preview`,
+    { params: { sample_rows: sampleRows } },
+  );
+  return data;
+}
+
+/** 创建并启动导入任务（confirmed 必须为 true）。 */
+export async function createImportJob(payload: ImportJobPayload): Promise<ImportJobStatus> {
+  const { data } = await api.post<ImportJobStatus>('/admin/import/jobs', payload);
+  return data;
+}
+
+/** 最近一次导入任务（轮询进度）。 */
+export async function fetchLatestImportJob(): Promise<ImportJobStatus | null> {
+  const { data } = await api.get<{ job: ImportJobStatus | null }>('/admin/import/jobs/latest');
+  return data.job;
+}
+
+/** 导入任务列表。 */
+export async function fetchImportJobs(limit = 20): Promise<ImportJobStatus[]> {
+  const { data } = await api.get<{ items: ImportJobStatus[] }>('/admin/import/jobs', {
+    params: { limit },
+  });
+  return data.items;
+}
+
+/** 取消进行中的导入任务。 */
+export async function cancelImportJob(jobId: string): Promise<ImportJobStatus> {
+  const { data } = await api.post<ImportJobStatus>(`/admin/import/jobs/${jobId}/cancel`);
+  return data;
+}
+
+/** 清理统计：知识库 / 资源 / documents / chunks / Milvus 向量。 */
+export interface CleanupStats {
+  knowledge_bases: { total: number; with_imported_data: number; test_only: number };
+  resources: Record<string, { total: number; imported: number; test: number }>;
+  documents: { total: number; imported: number; test: number };
+  chunks: { total: number; imported: number; test: number };
+  milvus_vectors: { total: number | null; note: string };
+  rule: string;
+}
+
+export interface CleanupPlan {
+  dry_run: boolean;
+  scope: string;
+  documents: number;
+  chunks: number;
+  resources: Record<string, number>;
+  knowledge_bases: number;
+  protected: string[];
+}
+
+export interface CleanupResult {
+  deleted: Record<string, number>;
+  errors: string[];
+  error_count: number;
+}
+
+export interface CleanupPayload {
+  batch_ids?: string[] | null;
+  include_test_data?: boolean;
+  include_knowledge_bases?: boolean;
+  confirm?: boolean;
+}
+
+export async function fetchCleanupStats(): Promise<CleanupStats> {
+  const { data } = await api.get<CleanupStats>('/admin/import/cleanup/stats');
+  return data;
+}
+
+/** 清理计划（只读，不删数据）。 */
+export async function planCleanup(payload: CleanupPayload): Promise<CleanupPlan> {
+  const { data } = await api.post<CleanupPlan>('/admin/import/cleanup/plan', payload);
+  return data;
+}
+
+/** 执行清理（必须 confirm: true）。 */
+export async function executeCleanup(payload: CleanupPayload): Promise<CleanupResult> {
+  const { data } = await api.post<CleanupResult>('/admin/import/cleanup/execute', payload);
+  return data;
+}
+
+// ─────────────────────────── 用户管理 ───────────────────────────
+
+/** 创建用户请求体。 */
+export interface UserCreatePayload {
+  username: string;
+  email: string;
+  name?: string;
+  department?: string;
+  role?: 'admin' | 'member' | 'viewer';
+}
+
+/** 创建用户响应（含初始密码）。 */
+export interface UserCreateResponse {
+  user: UserOut;
+  initial_password: string;
+}
+
+/** 更新用户请求体。 */
+export interface UserUpdatePayload {
+  name?: string;
+  department?: string;
+  role?: 'admin' | 'member' | 'viewer';
+}
+
+/** 批量导入结果。 */
+export interface BatchImportResult {
+  total: number;
+  success: number;
+  failed: number;
+  errors: string[];
+}
+
+/** 重置密码响应。 */
+export interface ResetPasswordResponse {
+  user_id: string;
+  username: string;
+  new_password: string;
+}
+
+/** 批量删除结果。 */
+export interface BatchDeleteResult {
+  total: number;
+  success: number;
+  message: string;
+}
+
+/** 批量删除预检失败返回。 */
+export interface BatchDeleteError {
+  message: string;
+  errors: string[];
+}
+
+/** 用户列表（全量，兼容既有调用方）。 */
+export async function fetchUsers(): Promise<UserOut[]> {
+  const { data } = await api.get<UserOut[]>('/users');
+  return data;
+}
+
+/**
+ * 服务端分页的用户列表（卡顿修复）。
+ *
+ * 后端 `/users` 支持可选 `limit`/`offset`，并在响应头 `X-Total-Count` 返回活跃用户总数：
+ * 用户管理页改用它后，一次只拉当前页（默认 20 条），不再拉回全部 846 条后由
+ * AntD 做客户端分页。
+ *
+ * `total` 为 null 表示响应头缺失（例如被代理剥离），调用方应回退为客户端分页。
+ */
+export interface UserPage {
+  users: UserOut[];
+  total: number | null;
+}
+
+export async function fetchUsersPage(params: {
+  limit: number;
+  offset: number;
+}): Promise<UserPage> {
+  const res = await api.get<UserOut[]>('/users', { params });
+  const raw = res.headers?.['x-total-count'];
+  const parsed = raw === undefined || raw === null ? Number.NaN : Number(raw);
+  return { users: res.data, total: Number.isFinite(parsed) ? parsed : null };
+}
+
+/** 创建用户（系统自动生成初始密码）。 */
+export async function createUser(payload: UserCreatePayload): Promise<UserCreateResponse> {
+  const { data } = await api.post<UserCreateResponse>('/users', payload);
+  return data;
+}
+
+/** 更新用户信息。 */
+export async function updateUser(
+  userId: string,
+  payload: UserUpdatePayload,
+): Promise<UserOut> {
+  const { data } = await api.put<UserOut>(`/users/${userId}`, payload);
+  return data;
+}
+
+/** 删除用户。 */
+export async function deleteUser(userId: string): Promise<void> {
+  await api.delete(`/users/${userId}`);
+}
+
+/** 管理员重置用户密码（返回新随机密码）。 */
+export async function resetUserPassword(userId: string): Promise<ResetPasswordResponse> {
+  const { data } = await api.post<ResetPasswordResponse>(`/users/${userId}/reset-password`);
+  return data;
+}
+
+/** 批量删除用户（全量预检，有错误则抛 400 + 错误详情）。 */
+export async function batchDeleteUsers(userIds: string[]): Promise<BatchDeleteResult> {
+  const { data } = await api.post<BatchDeleteResult>('/users/batch-delete', { user_ids: userIds });
+  return data;
+}
+
+/** 回收站用户列表。 */
+export async function fetchTrashUsers(): Promise<UserOut[]> {
+  const { data } = await api.get<UserOut[]>('/users/trash');
+  return data;
+}
+
+/** 从回收站恢复用户。 */
+export async function restoreUser(userId: string): Promise<UserOut> {
+  const { data } = await api.post<UserOut>(`/users/${userId}/restore`);
+  return data;
+}
+
+/** 批量恢复回收站用户（全量预检，有错误则抛 400 + 错误详情）。 */
+export async function batchRestoreUsers(userIds: string[]): Promise<{ total: number; success: number; message: string }> {
+  const { data } = await api.post('/users/batch-restore', { user_ids: userIds });
+  return data;
+}
+
+/** 彻底删除用户（不可恢复）。 */
+export async function purgeUser(userId: string): Promise<void> {
+  await api.delete(`/users/${userId}/purge`);
+}
+
+/** 批量导入用户（CSV 文件）。 */
+export async function batchImportUsers(file: File): Promise<BatchImportResult> {
+  const form = new FormData();
+  form.append('file', file);
+  const { data } = await api.post<BatchImportResult>('/users/batch', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+  });
+  return data;
+}
+
+/** 下载批量导入 CSV 模板。 */
+export async function downloadUserTemplate(): Promise<void> {
+  const resp = await api.get('/users/template', { responseType: 'blob' });
+  const blob = new Blob([resp.data], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'user_import_template.csv';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/** 禁用用户账号（BUSINESS_RULES §2 离职处理=禁用）。 */
+export async function disableUser(userId: string): Promise<void> {
+  await api.post(`/users/${userId}/disable`);
+}
+
+/** 启用用户账号（恢复已禁用的用户）。 */
+export async function enableUser(userId: string): Promise<void> {
+  await api.post(`/users/${userId}/enable`);
+}
+
+// ─────────────────────────── 知识库成员管理 ───────────────────────────
+
+/** 知识库成员列表。 */
+export async function fetchKbMembers(kbId: string): Promise<KBMember[]> {
+  const { data } = await api.get<KBMember[]>(`/kb/${kbId}/members`);
+  return data;
+}
+
+/** 添加知识库成员。 */
+export async function addKbMember(
+  kbId: string,
+  userId: string,
+  role: KBMemberRole,
+): Promise<KBMember> {
+  const { data } = await api.post<KBMember>(`/kb/${kbId}/members`, {
+    user_id: userId,
+    role,
+  });
+  return data;
+}
+
+/** 批量添加知识库成员。 */
+export async function batchAddKbMembers(
+  kbId: string,
+  userIds: string[],
+  role: KBMemberRole,
+): Promise<{ added: number; skipped: number }> {
+  const { data } = await api.post(`/kb/${kbId}/members/batch`, {
+    user_ids: userIds,
+    role,
+  });
+  return data;
+}
+
+/** 移除知识库成员。 */
+export async function removeKbMember(
+  kbId: string,
+  userId: string,
+): Promise<void> {
+  await api.delete(`/kb/${kbId}/members/${userId}`);
+}
+
+/** 修改成员角色。 */
+export async function updateKbMemberRole(
+  kbId: string,
+  userId: string,
+  role: KBMemberRole,
+): Promise<KBMember> {
+  const { data } = await api.put<KBMember>(`/kb/${kbId}/members/${userId}`, {
+    role,
+  });
+  return data;
+}
+
+/** 转移知识库所有权。 */
+export async function transferKbOwnership(
+  kbId: string,
+  newOwnerId: string,
+): Promise<void> {
+  await api.post(`/kb/${kbId}/transfer-ownership`, {
+    new_owner_user_id: newOwnerId,
+  });
+}
+
+// ─────────────────────────── 知识库回收站 ───────────────────────────
+
+/** 回收站知识库列表。 */
+export async function fetchTrashKbs(): Promise<KnowledgeBase[]> {
+  const { data } = await api.get<KnowledgeBase[]>('/kb/trash');
+  return data;
+}
+
+// ─────────────────────────── 知识库资源挂载（TASK-008 Stage 4-7）───────────────────────────
+
+/** 已挂载结构化资源列表（GET /kb/{id}/resources）。 */
+export async function fetchKbResources(
+  kbId: string,
+  params?: { resource_type?: KBResourceType; limit?: number; offset?: number },
+): Promise<KBResourceListResponse> {
+  const { data } = await api.get<KBResourceListResponse>(`/kb/${kbId}/resources`, {
+    params,
+  });
+  return data;
+}
+
+/** 挂载结构化资源（POST /kb/{id}/resources，仅 Owner/Admin）。 */
+export async function mountKbResource(
+  kbId: string,
+  resourceType: KBResourceType,
+  resourceId: string,
+): Promise<KBResource> {
+  const { data } = await api.post<KBResource>(`/kb/${kbId}/resources`, {
+    resource_type: resourceType,
+    resource_id: resourceId,
+  });
+  return data;
+}
+
+/** 卸载结构化资源（DELETE /kb/{id}/resources/{type}/{rid}，仅 Owner/Admin）。 */
+export async function unmountKbResource(
+  kbId: string,
+  resourceType: KBResourceType,
+  resourceId: string,
+): Promise<void> {
+  await api.delete(`/kb/${kbId}/resources/${resourceType}/${resourceId}`);
+}
+
+/** 恢回收站知识库。 */
+export async function restoreKb(kbId: string): Promise<KnowledgeBase> {
+  const { data } = await api.post<KnowledgeBase>(`/kb/${kbId}/restore`);
+  return data;
+}
+
+/** 彻底删除知识库（不可恢复）。 */
+export async function purgeKb(kbId: string): Promise<void> {
+  await api.delete(`/kb/${kbId}/purge`);
+}
+
+// ─────────────────────────── 文档回收站 ───────────────────────────
+
+/** 回收站文档列表。 */
+export async function fetchTrashDocuments(): Promise<DocumentItem[]> {
+  const { data } = await api.get<DocumentItem[]>('/documents/trash/list');
+  return data;
+}
+
+/** 恢回收站文档。 */
+export async function restoreDocument(docId: string): Promise<DocumentItem> {
+  const { data } = await api.post<DocumentItem>(`/documents/${docId}/restore`);
+  return data;
+}
+
+/** 彻底删除文档（不可恢复）。 */
+export async function purgeDocument(docId: string): Promise<void> {
+  await api.delete(`/documents/${docId}/purge`);
+}
+
+// ─────────────────────────── 审计日志 ───────────────────────────
+
+/** 查询审计日志（仅 admin，支持筛选）。 */
+export async function fetchAuditLogs(params?: {
+  operation?: string;
+  target_type?: string;
+  start_time?: string;
+  end_time?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<AuditLog[]> {
+  const { data } = await api.get<AuditLog[]>('/audit', { params });
+  return data;
+}
+
+// ─────────────────────────── 系统配置 ───────────────────────────
+
+/** 获取系统级配置。 */
+export async function fetchSystemConfig(): Promise<SystemConfig> {
+  const { data } = await api.get<SystemConfig>('/settings/system');
+  return data;
+}
+
+/** 更新系统级配置。 */
+export async function updateSystemConfig(
+  payload: Partial<SystemConfigValues>,
+): Promise<SystemConfig> {
+  const { data } = await api.put<SystemConfig>('/settings/system', payload);
+  return data;
+}
+
+/** 恢复系统级配置为后端默认值。 */
+export async function resetSystemConfig(): Promise<SystemConfig> {
+  const { data } = await api.post<SystemConfig>('/settings/system/reset');
+  return data;
+}
+
+// ─────────────────────────── 分类（TASK-002）───────────────────────────
+
+/** 查询分类列表；tree=true 返回嵌套树，可按资源域过滤。 */
+export async function fetchCategories(params?: {
+  resource_type?: TaxonomyResourceType;
+  tree?: boolean;
+}): Promise<Category[]> {
+  const { data } = await api.get<Category[]>('/categories', { params });
+  return data;
+}
+
+/** 新建分类。 */
+export async function createCategory(payload: {
+  resource_type: TaxonomyResourceType;
+  name: string;
+  parent_id?: string | null;
+  sort_order?: number;
+  description?: string;
+}): Promise<Category> {
+  const { data } = await api.post<Category>('/categories', payload);
+  return data;
+}
+
+/** 修改分类（仅 name/sort_order/description）。 */
+export async function updateCategory(
+  categoryId: string,
+  payload: Pick<Category, 'name' | 'sort_order' | 'description'>,
+): Promise<Category> {
+  const { data } = await api.put<Category>(`/categories/${categoryId}`, payload);
+  return data;
+}
+
+/** 删除分类（有子分类或被引用时后端返回 409）。 */
+export async function deleteCategory(categoryId: string): Promise<void> {
+  await api.delete(`/categories/${categoryId}`);
+}
+
+// ─────────────────────────── 标签（TASK-002）───────────────────────────
+
+/** 查询标签，支持关键词。 */
+export async function fetchTags(keyword?: string): Promise<Tag[]> {
+  const { data } = await api.get<Tag[]>('/tags', { params: { keyword } });
+  return data;
+}
+
+/** 新建标签。 */
+export async function createTag(payload: {
+  name: string;
+  color?: string;
+  description?: string;
+}): Promise<Tag> {
+  const { data } = await api.post<Tag>('/tags', payload);
+  return data;
+}
+
+/** 修改标签。 */
+export async function updateTag(
+  tagId: string,
+  payload: Partial<Pick<Tag, 'name' | 'color' | 'description'>>,
+): Promise<Tag> {
+  const { data } = await api.put<Tag>(`/tags/${tagId}`, payload);
+  return data;
+}
+
+/** 删除标签（被引用时后端返回 409）。 */
+export async function deleteTag(tagId: string): Promise<void> {
+  await api.delete(`/tags/${tagId}`);
+}
+
+// ─────────────────────────── 中药（TASK-003）───────────────────────────
+
+/** 查询中药列表，支持关键词 / 分类 / 标签筛选 + 分页。 */
+export async function fetchHerbs(params?: {
+  keyword?: string;
+  category_id?: string;
+  tag_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<HerbListResponse> {
+  const { data } = await api.get<HerbListResponse>('/herbs', { params });
+  return data;
+}
+
+/** 查询中药详情。 */
+export async function getHerb(herbId: string): Promise<Herb> {
+  const { data } = await api.get<Herb>(`/herbs/${herbId}`);
+  return data;
+}
+
+/** 新建中药（POST /herbs，仅 admin）。 */
+export async function createHerb(payload: {
+  name: string;
+  aliases?: string[];
+  category_id?: string | null;
+  properties?: string;
+  channels?: string[];
+  effects?: string;
+  source?: string;
+  description?: string;
+  tag_ids?: string[];
+}): Promise<Herb> {
+  const { data } = await api.post<Herb>('/herbs', payload);
+  return data;
+}
+
+/** 更新中药（PUT /herbs/{id}，partial update，仅 admin）。 */
+export async function updateHerb(
+  herbId: string,
+  payload: Partial<{
+    name: string;
+    aliases: string[];
+    category_id: string | null;
+    properties: string;
+    channels: string[];
+    effects: string;
+    source: string;
+    description: string;
+    tag_ids: string[];
+  }>,
+): Promise<Herb> {
+  const { data } = await api.put<Herb>(`/herbs/${herbId}`, payload);
+  return data;
+}
+
+/** 删除中药（DELETE /herbs/{id}，herb_tags 由 DB CASCADE 清理，仅 admin）。 */
+export async function deleteHerb(herbId: string): Promise<void> {
+  await api.delete(`/herbs/${herbId}`);
+}
+
+// ─────────────────────────── 方剂（TASK-004）───────────────────────────
+
+/** 方剂组成提交项（对应后端 IngredientIn；不含 herb_name）。 */
+export interface IngredientPayload {
+  herb_id: string;
+  amount?: number | null;
+  unit?: string;
+  processing?: string;
+  role?: string;
+  sort_order: number;
+}
+
+/** 查询方剂列表，支持关键词 / 分类 / 标签筛选 + 分页。 */
+export async function fetchPrescriptions(params?: {
+  keyword?: string;
+  category_id?: string;
+  tag_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<PrescriptionListResponse> {
+  const { data } = await api.get<PrescriptionListResponse>('/prescriptions', { params });
+  return data;
+}
+
+/** 查询方剂详情（含组成 / 标签 / 分类）。 */
+export async function getPrescription(prescriptionId: string): Promise<Prescription> {
+  const { data } = await api.get<Prescription>(`/prescriptions/${prescriptionId}`);
+  return data;
+}
+
+/** 新建方剂（POST /prescriptions，仅 admin）。 */
+export async function createPrescription(payload: {
+  name: string;
+  aliases?: string[];
+  category_id?: string | null;
+  efficacy?: string;
+  indications?: string;
+  usage_method?: string;
+  source?: string;
+  description?: string;
+  ingredients?: IngredientPayload[];
+  tag_ids?: string[];
+}): Promise<Prescription> {
+  const { data } = await api.post<Prescription>('/prescriptions', payload);
+  return data;
+}
+
+/** 更新方剂（PUT /prescriptions/{id}，仅 admin）。
+ * ingredients / tag_ids 提供时整体替换。 */
+export async function updatePrescription(
+  prescriptionId: string,
+  payload: Partial<{
+    name: string;
+    aliases: string[];
+    category_id: string | null;
+    efficacy: string;
+    indications: string;
+    usage_method: string;
+    source: string;
+    description: string;
+    ingredients: IngredientPayload[];
+    tag_ids: string[];
+  }>,
+): Promise<Prescription> {
+  const { data } = await api.put<Prescription>(`/prescriptions/${prescriptionId}`, payload);
+  return data;
+}
+
+/** 删除方剂（DELETE /prescriptions/{id}，组成行随 DB CASCADE 清理，仅 admin）。 */
+export async function deletePrescription(prescriptionId: string): Promise<void> {
+  await api.delete(`/prescriptions/${prescriptionId}`);
+}
+
+// ─────────────────────────── 中医理论（TASK-005）───────────────────────────
+
+/** 查询理论列表，支持关键词 / 分类 / 标签筛选 + 分页。 */
+export async function fetchTheories(params?: {
+  keyword?: string;
+  category_id?: string;
+  tag_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<TheoryListResponse> {
+  const { data } = await api.get<TheoryListResponse>('/theories', { params });
+  return data;
+}
+
+/** 查询理论详情。 */
+export async function getTheory(theoryId: string): Promise<Theory> {
+  const { data } = await api.get<Theory>(`/theories/${theoryId}`);
+  return data;
+}
+
+/** 新建理论（POST /theories，仅 admin）。 */
+export async function createTheory(payload: {
+  name: string;
+  aliases?: string[];
+  category_id?: string | null;
+  content?: string;
+  source?: string;
+  tag_ids?: string[];
+}): Promise<Theory> {
+  const { data } = await api.post<Theory>('/theories', payload);
+  return data;
+}
+
+/** 更新理论（PUT /theories/{id}，partial update，仅 admin）。
+ * tag_ids 提供时整体替换。 */
+export async function updateTheory(
+  theoryId: string,
+  payload: Partial<{
+    name: string;
+    aliases: string[];
+    category_id: string | null;
+    content: string;
+    source: string;
+    tag_ids: string[];
+  }>,
+): Promise<Theory> {
+  const { data } = await api.put<Theory>(`/theories/${theoryId}`, payload);
+  return data;
+}
+
+/** 删除理论（DELETE /theories/{id}，theory_tags 由 DB CASCADE 清理，仅 admin）。 */
+export async function deleteTheory(theoryId: string): Promise<void> {
+  await api.delete(`/theories/${theoryId}`);
+}
+
+// ─────────────────────────── 中医文献（TASK-006）───────────────────────────
+
+/** 查询文献列表，支持关键词 / 分类 / 标签筛选 + 分页。 */
+export async function fetchLiteratures(params?: {
+  keyword?: string;
+  category_id?: string;
+  tag_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<LiteratureListResponse> {
+  const { data } = await api.get<LiteratureListResponse>('/literatures', { params });
+  return data;
+}
+
+/** 查询文献详情。 */
+export async function getLiterature(literatureId: string): Promise<Literature> {
+  const { data } = await api.get<Literature>(`/literatures/${literatureId}`);
+  return data;
+}
+
+/** 新建文献（POST /literatures，仅 admin）。 */
+export async function createLiterature(payload: {
+  name: string;
+  aliases?: string[];
+  category_id?: string | null;
+  author?: string;
+  dynasty?: string;
+  summary?: string;
+  content?: string;
+  source?: string;
+  tag_ids?: string[];
+}): Promise<Literature> {
+  const { data } = await api.post<Literature>('/literatures', payload);
+  return data;
+}
+
+/** 更新文献（PUT /literatures/{id}，partial update，仅 admin）。
+ * tag_ids 提供时整体替换（空数组清空，不可被忽略）。 */
+export async function updateLiterature(
+  literatureId: string,
+  payload: Partial<{
+    name: string;
+    aliases: string[];
+    category_id: string | null;
+    author: string;
+    dynasty: string;
+    summary: string;
+    content: string;
+    source: string;
+    tag_ids: string[];
+  }>,
+): Promise<Literature> {
+  const { data } = await api.put<Literature>(`/literatures/${literatureId}`, payload);
+  return data;
+}
+
+/** 删除文献（DELETE /literatures/{id}，literature_tags 由 DB CASCADE 清理，仅 admin）。 */
+export async function deleteLiterature(literatureId: string): Promise<void> {
+  await api.delete(`/literatures/${literatureId}`);
+}
+
+// ───────────── 管理中心统一回收站（中药/方剂/理论/文献/分类/标签）─────────────
+
+/** 支持回收站生命周期的资源类型。 */
+export type TrashResourceType =
+  | 'herb'
+  | 'prescription'
+  | 'theory'
+  | 'literature'
+  | 'category'
+  | 'tag';
+
+/** 资源类型 → 后端基础路径（分类/标签路由无统一前缀，故单独映射）。 */
+const TRASH_BASE_PATH: Record<TrashResourceType, string> = {
+  herb: '/herbs',
+  prescription: '/prescriptions',
+  theory: '/theories',
+  literature: '/literatures',
+  category: '/categories',
+  tag: '/tags',
+};
+
+/** 批量操作返回结构（成功数 + 失败明细）。 */
+export interface BatchOpResult {
+  total?: number;
+  success?: number;
+  purged?: number;
+  message?: string;
+  failed?: { id: string; reason: string }[];
+}
+
+/** 回收站列表返回结构。 */
+export interface TrashListResult<T> {
+  items: T[];
+  total: number;
+  limit: number | null;
+  offset: number;
+}
+
+function trashPath(rtype: TrashResourceType, suffix = ''): string {
+  return `${TRASH_BASE_PATH[rtype]}${suffix}`;
+}
+
+/** 批量删除 → 移入回收站（软删除）。 */
+export async function batchDeleteResources(
+  rtype: TrashResourceType,
+  ids: string[],
+): Promise<BatchOpResult> {
+  const { data } = await api.post<BatchOpResult>(trashPath(rtype, '/batch-delete'), { ids });
+  return data;
+}
+
+/** 回收站列表（后端进入时会自动清理超过保留期的条目）。 */
+export async function fetchResourceTrash<T>(
+  rtype: TrashResourceType,
+  params?: { limit?: number; offset?: number },
+): Promise<TrashListResult<T>> {
+  const { data } = await api.get<TrashListResult<T>>(
+    trashPath(rtype, '/trash/list'),
+    { params },
+  );
+  return data;
+}
+
+/** 批量恢复。 */
+export async function batchRestoreResources(
+  rtype: TrashResourceType,
+  ids: string[],
+): Promise<BatchOpResult> {
+  const { data } = await api.post<BatchOpResult>(trashPath(rtype, '/batch-restore'), { ids });
+  return data;
+}
+
+/** 单条恢复。 */
+export async function restoreResource(
+  rtype: TrashResourceType,
+  id: string,
+): Promise<{ id: string; restored: boolean }> {
+  const { data } = await api.post<{ id: string; restored: boolean }>(
+    trashPath(rtype, `/${id}/restore`),
+  );
+  return data;
+}
+
+/** 单条彻底删除（不可恢复）。 */
+export async function purgeResource(
+  rtype: TrashResourceType,
+  id: string,
+): Promise<{ id: string; purged: boolean }> {
+  const { data } = await api.delete<{ id: string; purged: boolean }>(
+    trashPath(rtype, `/${id}/purge`),
+  );
+  return data;
+}
+
+/** 批量彻底删除；单条失败只记录原因并继续其余记录。 */
+export async function batchPurgeResources(
+  rtype: TrashResourceType,
+  ids: string[],
+): Promise<BatchOpResult> {
+  const { data } = await api.post<BatchOpResult>(trashPath(rtype, '/batch-purge'), { ids });
+  return data;
+}
+
+/** 一键清空回收站（彻底删除回收站中的全部条目）。 */
+export async function purgeAllResourceTrash(
+  rtype: TrashResourceType,
+): Promise<BatchOpResult> {
+  const { data } = await api.delete<BatchOpResult>(trashPath(rtype, '/trash/purge-all'));
+  return data;
+}
+
+/** 用户回收站一键清空（仅 admin）。 */
+export async function purgeAllUserTrash(): Promise<BatchOpResult> {
+  const { data } = await api.delete<BatchOpResult>('/users/trash/purge-all');
+  return data;
+}
+
+// ─────────────────────────── 知识库批量操作 ───────────────────────────
+
+/** 知识库批量删除 → 回收站。 */
+export async function batchDeleteKbs(kbIds: string[]): Promise<BatchOpResult> {
+  const { data } = await api.post<BatchOpResult>('/kb/batch-delete', { ids: kbIds });
+  return data;
+}
+
+/** 知识库批量恢复（仅 admin）。 */
+export async function batchRestoreKbs(kbIds: string[]): Promise<BatchOpResult> {
+  const { data } = await api.post<BatchOpResult>('/kb/batch-restore', { ids: kbIds });
+  return data;
+}
+
+/** 一键清空知识库回收站（仅 admin）。 */
+export async function purgeAllKbTrash(): Promise<BatchOpResult> {
+  const { data } = await api.delete<BatchOpResult>('/kb/trash/purge-all');
+  return data;
+}
+
+// ──────────────────── 数据导入中心：上传文件导入 ────────────────────
+
+/** 自动识别出的目标资源类型（unknown 表示无法可靠判断，需用户选择）。 */
+export type ImportTargetType = 'herb' | 'prescription' | 'theory' | 'literature' | 'unknown';
+
+export interface ImportUploadPreview {
+  dataset_id: string;
+  file_name: string;
+  file_type: string;
+  total_rows: number;
+  headers: string[];
+  detected_type: ImportTargetType;
+  detected_scores: Record<string, number>;
+  target_type: ImportTargetType;
+  field_mapping: Record<string, string | null>;
+  need_user_type: boolean;
+  sample_rows: Record<string, string>[];
+  estimate: { insert: number; update: number; skip: number; invalid: number };
+}
+
+export interface ImportCommitResult {
+  job_id: string;
+  batch_id: string;
+  dataset_id: string;
+  target_type: string;
+  status: string;
+  total: number;
+  inserted: number;
+  updated: number;
+  skipped: number;
+  failed: number;
+  failed_items: { row?: string; name?: string; reason: string }[];
+  vectorize?: boolean;
+  vectorize_result?: { requested: number; vectorized: number; errors: string[] };
+}
+
+/** 上传数据文件并自动分析（只预览，不写业务数据）。 */
+export async function uploadImportFile(file: File): Promise<ImportUploadPreview> {
+  const form = new FormData();
+  form.append('file', file);
+  const { data } = await api.post<ImportUploadPreview>('/admin/import/upload', form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,
+  });
+  return data;
+}
+
+/** 按指定类型重新生成预览与字段映射。 */
+export async function previewImportUpload(
+  datasetId: string,
+  targetType?: ImportTargetType,
+): Promise<ImportUploadPreview> {
+  const { data } = await api.post<ImportUploadPreview>('/admin/import/upload/preview', {
+    dataset_id: datasetId,
+    target_type: targetType ?? null,
+  });
+  return data;
+}
+
+/** 确认后真正导入（必须先预览确认）。 */
+export async function commitImportUpload(payload: {
+  dataset_id: string;
+  target_type: ImportTargetType;
+  field_mapping?: Record<string, string>;
+  kb_id?: string | null;
+  vectorize?: boolean;
+  confirmed: boolean;
+}): Promise<ImportCommitResult> {
+  const { data } = await api.post<ImportCommitResult>('/admin/import/upload/commit', payload, {
+    timeout: 300000,
+  });
+  return data;
+}
+
+/** 查询某次上传的导入任务状态。 */
+export async function fetchUploadImportJob(
+  datasetId: string,
+): Promise<ImportJobStatus | null> {
+  const { data } = await api.get<{ job: ImportJobStatus | null }>(
+    `/admin/import/upload/jobs/${datasetId}`,
+  );
+  return data.job;
+}

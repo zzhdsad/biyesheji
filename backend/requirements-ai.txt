@@ -1,0 +1,6 @@
+# ===== FlagEmbedding + BGE 系列模型依赖 =====
+# BGE-M3 向量化 + BGE-Reranker-v2-m3 精排
+# 运行时 import：from FlagEmbedding import BGEM3FlagModel / FlagReranker
+# 构建前请确保核心依赖（requirements.txt）已安装
+FlagEmbedding>=1.2
+sentence-transformers>=3.0

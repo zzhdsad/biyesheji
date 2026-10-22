@@ -1,0 +1,6 @@
+[32m2026-09-28 14:07:47.275[0m | [1mINFO    [0m | [36msrc.infrastructure.embedding[0m:[36m__init__[0m:[36m57[0m - [1m加载 BGE-M3 模型（device=cpu, model=C:\bi ye she ji\backend\prebuilt-models\bge-m3）…[0m
+Loading weights:   0%|          | 0/391 [00:00<?, ?it/s]Loading weights: 100%|██████████| 391/391 [00:00<00:00, 7403.24it/s]
+pre tokenize:   0%|          | 0/2 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 2/2 [00:00<00:00, 132.34it/s]
+Inference Embeddings:   0%|          | 0/2 [00:00<?, ?it/s]Inference Embeddings:  50%|█████     | 1/2 [00:37<00:37, 37.58s/it]Inference Embeddings: 100%|██████████| 2/2 [01:00<00:00, 28.77s/it]Inference Embeddings: 100%|██████████| 2/2 [01:00<00:00, 30.09s/it]
+pre tokenize:   0%|          | 0/2 [00:00<?, ?it/s]pre tokenize: 100%|██████████| 2/2 [00:00<00:00, 176.62it/s]
+Inference Embeddings:   0%|          | 0/2 [00:00<?, ?it/s]Inference Embeddings:  50%|█████     | 1/2 [00:24<00:24, 24.52s/it]Inference Embeddings: 100%|██████████| 2/2 [00:40<00:00, 19.28s/it]Inference Embeddings: 100%|██████████| 2/2 [00:40<00:00, 20.07s/it]

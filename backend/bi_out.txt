@@ -1,0 +1,15 @@
+[HyDE=OFF] 丹参 hits=3 kinds={'resource': 2, 'document': 1} resource_hits=2 best_dense=0.7759 best_res_dense=0.7759
+[HyDE=OFF] 广藿香 hits=3 kinds={'resource': 1, 'document': 2} resource_hits=1 best_dense=0.6419 best_res_dense=0.0000
+[HyDE=OFF] 郁金 hits=3 kinds={'document': 3} resource_hits=0 best_dense=0.6421 best_res_dense=0.0000
+[SIM] 丹参: q~英文canonical=0.6872 q~双语canonical=0.6907 增益=+0.0035
+      当前: 【药名】丹参 | 【别名】丹参酮、酒丹参、紫丹参 | 【性味】四气：cold；五味：bitter | 【归经】heart、liver | 【功效】activating blood flow and removing bl
+      双语: 【药名】丹参 | 【别名】丹参酮、酒丹参、紫丹参 | 【性味】四气：cold（寒）；五味：bitter（苦） | 【归经】heart（心）、liver（肝） | 【功效】activating blood flow and
+      未映射术语: ['Chinese', 'Danshen', 'MKG', 'SALVIAE MILTIORRHIZAE RADIX ET RHIZOMA', 'Salvia miltiorrhiza Bge', 'TCM', 'herbal', 'pieces']
+[SIM] 广藿香: q~英文canonical=0.6542 q~双语canonical=0.6698 增益=+0.0156
+      当前: 【药名】广藿香 | 【性味】四气：warm；五味：pungent | 【归经】spleen、stomach、lung | 【功效】dissipating dampness | 【出处】AromaTCM_herb_basi
+      双语: 【药名】广藿香 | 【性味】四气：warm（温）；五味：pungent（辛） | 【归经】spleen（脾）、stomach（胃）、lung（肺） | 【功效】dissipating dampness（化湿） | 【出处
+      未映射术语: ['AromaTCM', 'Benth', 'Blanco', 'Guanghuoxiang', 'POGOSTEMONIS HERBA', 'Pogostemon cablin ', 'basic', 'csv']
+[SIM] 郁金: q~英文canonical=0.6936 q~双语canonical=0.7054 增益=+0.0118
+      当前: 【药名】郁金 | 【性味】四气：warm；五味：pungent、bitter | 【归经】liver、heart、lung | 【功效】activating blood flow and removing blood s
+      双语: 【药名】郁金 | 【性味】四气：warm（温）；五味：pungent（辛）、bitter（苦） | 【归经】liver（肝）、heart（心）、lung（肺） | 【功效】activating blood flow an
+      未映射术语: ['AromaTCM', 'CURCUMAE RADIX', 'Chen et C', 'Curcuma kwangsiensis S', 'Curcuma longa L', 'Curcuma phaeocaulis Val', 'Curcuma wenyujin Y', 'Lee et C']
