@@ -39,6 +39,7 @@ import { AdminHeaderRight } from '@/components/layout/AppSider';
 import { useRequestSeq } from '@/hooks/useRequestSeq';
 import type {
   EvalCaseResult,
+  EvalDraftAnswer,
   EvaluationHistoryItem,
   EvaluationReport,
   EvaluationRunItem,
@@ -50,6 +51,7 @@ import type {
 } from '@/types';
 import {
   confirmEvalTestCase,
+  draftEvalAnswer,
   fetchEvalHistory,
   fetchEvalQuestionTypes,
   fetchEvalRuns,
@@ -126,8 +128,11 @@ export default function EvaluationPage() {
   // 人工确认标准答案弹窗
   const [confirming, setConfirming] = useState<EvalTestCaseOut | null>(null);
   const [confirmAnswer, setConfirmAnswer] = useState('');
+  const [confirmContexts, setConfirmContexts] = useState('');
   const [confirmSource, setConfirmSource] = useState('');
   const [confirmReviewed, setConfirmReviewed] = useState(false);
+  const [drafting, setDrafting] = useState(false);
+  const [draftInfo, setDraftInfo] = useState<EvalDraftAnswer | null>(null);
 
   // 初始化：加载知识库列表、问题类型、历史评估、运行归档
   useEffect(() => {
@@ -305,8 +310,32 @@ export default function EvaluationPage() {
   const openConfirm = (row: EvalTestCaseOut) => {
     setConfirming(row);
     setConfirmAnswer(row.golden_answer);
+    setConfirmContexts((row.golden_contexts ?? []).join('\n\n'));
     setConfirmSource(row.source_reference);
     setConfirmReviewed(!row.needs_review);
+    setDraftInfo(null);
+  };
+
+  const handleDraft = async () => {
+    if (!confirming) return;
+    setDrafting(true);
+    try {
+      const draft = await draftEvalAnswer(confirming.id);
+      setDraftInfo(draft);
+      if (draft.usable) {
+        setConfirmAnswer(draft.answer);
+        setConfirmContexts(draft.golden_contexts.join('\n\n'));
+        setConfirmSource(draft.source_reference);
+        setConfirmReviewed(false);
+        message.success('已生成参考答案草稿，请核对知识库原文后再确认');
+      } else {
+        message.warning(draft.warning || '未生成可用草稿，请人工填写');
+      }
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '草稿生成失败');
+    } finally {
+      setDrafting(false);
+    }
   };
 
   const submitConfirm = async () => {
@@ -314,6 +343,10 @@ export default function EvaluationPage() {
     try {
       const updated = await confirmEvalTestCase(confirming.id, {
         golden_answer: confirmAnswer,
+        golden_contexts: confirmContexts
+          .split('\n')
+          .map((s) => s.trim())
+          .filter(Boolean),
         source_reference: confirmSource,
         needs_review: !confirmReviewed,
       });
@@ -853,12 +886,13 @@ export default function EvaluationPage() {
       </Card>
 
       <Modal
-        title="人工确认标准答案"
+        title="人工确认 / 修订标准答案"
         open={confirming !== null}
         onOk={() => void submitConfirm()}
         onCancel={() => setConfirming(null)}
         okText="保存"
         cancelText="取消"
+        width={720}
       >
         {confirming && (
           <Space direction="vertical" size={12} style={{ width: '100%' }}>
@@ -866,12 +900,47 @@ export default function EvaluationPage() {
             <Text type="secondary" style={{ fontSize: 12 }}>
               标注依据提示：{confirming.source_reference || '（未填写）'}
             </Text>
+            <Button
+              icon={<ThunderboltOutlined />}
+              loading={drafting}
+              onClick={() => void handleDraft()}
+            >
+              用知识库生成参考答案草稿
+            </Button>
+            {draftInfo && (
+              <Alert
+                type={draftInfo.usable ? 'warning' : 'error'}
+                showIcon
+                message={
+                  draftInfo.usable
+                    ? '这是 AI 草稿，不是已确认答案'
+                    : '没有生成可用草稿'
+                }
+                description={
+                  draftInfo.usable
+                    ? `已从知识库命中 ${draftInfo.evidence_count} 条证据。请逐句核对原文，必要时删改；确认前该用例不会参与答案正确度计算。`
+                    : draftInfo.warning
+                }
+              />
+            )}
             <Input.TextArea
-              rows={6}
+              rows={7}
               value={confirmAnswer}
               onChange={(e) => setConfirmAnswer(e.target.value)}
               placeholder="请依据知识库原文填写标准答案，不要凭记忆编造医学事实"
             />
+            <div>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                标准上下文（每行一条，用于后续检索质量对比；可留空）
+              </Text>
+              <Input.TextArea
+                rows={4}
+                value={confirmContexts}
+                onChange={(e) => setConfirmContexts(e.target.value)}
+                placeholder="粘贴知识库原文片段，每行一条；不要填模型生成的解释"
+                style={{ marginTop: 4 }}
+              />
+            </div>
             <Input
               value={confirmSource}
               onChange={(e) => setConfirmSource(e.target.value)}

@@ -20,6 +20,7 @@ export interface SSEHandlers {
    */
   onStart?: (data: {
     conversation_id: string;
+    user_message_id?: string;
     query_analysis?: QueryAnalysis;
     router_decision?: RouterDecision;
   }) => void;
@@ -64,6 +65,7 @@ export async function streamSSE(
   url: string,
   body: unknown,
   handlers: SSEHandlers,
+  signal?: AbortSignal,
 ): Promise<void> {
   // 流式 fetch 不走 axios，需手动注入 Authorization（鉴权后 /chat/ask-stream 受保护）
   const token = getToken();
@@ -73,6 +75,7 @@ export async function streamSSE(
     method: 'POST',
     headers,
     body: JSON.stringify(body),
+    signal,
   });
   // BUG-062：流式 fetch 不过 axios 拦截器，401 必须在这里走同一套处理
   // （清 token + 硬跳登录页），否则 token 过期只表现为"请求失败"。
@@ -102,7 +105,10 @@ export async function streamSSE(
     const data = parsed as Record<string, unknown>;
     switch (event) {
       case 'start':
-        handlers.onStart?.(data as unknown as { conversation_id: string });
+        handlers.onStart?.(data as unknown as {
+          conversation_id: string;
+          user_message_id?: string;
+        });
         break;
       case 'citations':
         handlers.onCitations?.(data as unknown as { citations: Citation[] });

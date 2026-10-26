@@ -9,10 +9,10 @@
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Query, Request, Response, UploadFile
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.document_service import DocumentService
@@ -192,16 +192,48 @@ def _run_vectorize_safely(doc_id: str) -> None:
         logger.exception(f"后台向量化任务执行失败 doc_id={doc_id}")
 
 
+async def _purge_document_cascade(db: AsyncSession, doc: Document) -> None:
+    """彻底删除文档：Milvus 向量 → 原始文件 → PG 行（含 chunks 级联）。
+
+    供手动 purge 与回收站过期清理共用，避免过期路径直接 db.delete 留下孤儿向量。
+    向量清理失败必须中断：PG 行删除不可逆，留下孤儿向量会让问答引用到已删除文档。
+    """
+    try:
+        from src.infrastructure.milvus_store import get_vector_store
+
+        get_vector_store().delete_by_doc(str(doc.id))
+    except Exception as exc:
+        logger.error(f"文档向量清理失败 doc_id={doc.id}: {exc}")
+        raise AppException(422, f"文档向量清理失败，无法彻底删除：{exc}") from exc
+
+    try:
+        from src.infrastructure.storage import get_storage
+
+        if doc.storage_path:
+            get_storage().delete(doc.storage_path)
+    except Exception as exc:  # noqa: BLE001 - 文件清理失败不阻断数据库删除
+        logger.warning(f"清理文件失败（不影响删除）: {exc}")
+
+    await db.delete(doc)
+    await db.flush()
+
+
 # ── 端点实现 ────────────────────────────────────────────────────────────────
 
 @router.get("", response_model=list[DocumentOut])
 async def list_documents(
     request: Request,
+    response: Response,
     kb_id: uuid.UUID | None = None,
     parse_status: str | None = None,
+    limit: int | None = Query(None, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ) -> list[Document]:
-    """文档列表，支持按知识库与解析状态筛选。
+    """文档列表，支持按知识库与解析状态筛选，可选 limit/offset 分页。
+
+    不传 limit 时保持全量返回（兼容旧前端 / 下拉选择）；响应头 X-Total-Count
+    始终给出当前过滤条件下的总数，供前端做真分页。
 
     安全隔离：
     - 基础过滤：Document.kb_id IN 当前用户可访问的知识库集合
@@ -210,16 +242,23 @@ async def list_documents(
     user: User = request.state.user
     accessible = await get_accessible_kb_ids(db, user)
 
-    stmt = select(Document).where(
-        Document.kb_id.in_(accessible), Document.deleted_at.is_(None)
-    )
+    filters = [Document.kb_id.in_(accessible), Document.deleted_at.is_(None)]
     if kb_id is not None:
         if kb_id not in accessible:
+            response.headers["X-Total-Count"] = "0"
             return []  # 用户无权访问该 kb_id，返回空而非报错（400 由前端处理）
-        stmt = stmt.where(Document.kb_id == kb_id)
+        filters.append(Document.kb_id == kb_id)
     if parse_status is not None:
-        stmt = stmt.where(Document.parse_status == parse_status)
-    stmt = stmt.order_by(Document.created_at.desc())
+        filters.append(Document.parse_status == parse_status)
+
+    total = int(
+        await db.scalar(select(func.count()).select_from(Document).where(*filters)) or 0
+    )
+    response.headers["X-Total-Count"] = str(total)
+
+    stmt = select(Document).where(*filters).order_by(Document.created_at.desc()).offset(offset)
+    if limit is not None:
+        stmt = stmt.limit(limit)
     rows = (await db.scalars(stmt)).all()
     return list(rows)
 
@@ -400,12 +439,18 @@ async def list_trash_documents(
         from src.core.exceptions import PermissionDeniedError
         raise PermissionDeniedError("仅管理员可查看回收站")
 
-    # 清理过期项
+    # 清理过期项：必须走向量/文件清理，不能直接 db.delete 留孤儿向量
     cutoff = utcnow() - timedelta(days=int(get_system_value("trash_retention_days")))
     expired = (await db.scalars(select(Document).where(Document.deleted_at < cutoff))).all()
+    removed = 0
     for d in expired:
-        await db.delete(d)
-    if expired:
+        try:
+            async with db.begin_nested():
+                await _purge_document_cascade(db, d)
+            removed += 1
+        except Exception as exc:  # noqa: BLE001 - 单条失败不影响其它过期项
+            logger.warning(f"过期文档清理失败 doc_id={d.id}: {exc}")
+    if removed:
         await db.commit()
 
     rows = (
@@ -461,23 +506,6 @@ async def purge_document(
     # 清理 Milvus 向量（BUG-006：方法名错误 + 异常被吞 → 向量永久残留）
     # 清理失败必须中断 purge：PG 记录删除不可逆，留下孤儿向量会让问答引用
     # 到"未知文档"（AGENTS.md §8：禁止伪造来源），且再无清理入口。
-    try:
-        from src.infrastructure.milvus_store import get_vector_store
-        store = get_vector_store()
-        store.delete_by_doc(str(doc_id))
-    except Exception as exc:
-        logger.error(f"文档向量清理失败 doc_id={doc_id}: {exc}")
-        raise AppException(422, f"文档向量清理失败，无法彻底删除：{exc}") from exc
-
-    # 清理原始文件（best-effort）
-    try:
-        from src.infrastructure.storage import get_storage
-        storage = get_storage()
-        if doc.storage_path:
-            storage.delete(doc.storage_path)
-    except Exception as e:
-        logger.warning(f"清理文件失败（不影响删除）: {e}")
-
-    await db.delete(doc)
+    await _purge_document_cascade(db, doc)
     await db.commit()
     return {"id": str(doc_id), "purged": True}

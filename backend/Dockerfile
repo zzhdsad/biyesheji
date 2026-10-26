@@ -80,6 +80,9 @@ ENV MODELS_DIR=/app/models \
     RERANK_MODEL_PATH=/app/models/bge-reranker-v2-m3
 COPY --from=model-source /models /app/models
 COPY src ./src
+# 迁移文件进入镜像，容器内可执行 alembic upgrade head
+COPY alembic.ini ./
+COPY alembic ./alembic
 
 RUN mkdir -p uploads logs
 

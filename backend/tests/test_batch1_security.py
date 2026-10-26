@@ -396,10 +396,17 @@ def test_must_change_password_blocks_business_api(auth_client):
 
 
 def test_prod_rejects_default_secret_key():
-    """生产环境使用内置默认密钥 → 直接拒绝启动。"""
+    """生产环境使用内置默认密钥 / 模板占位值 / 过短密钥 → 直接拒绝启动。"""
     with pytest.raises(Exception) as exc:
         Settings(ENV="prod", SECRET_KEY=DEV_DEFAULT_SECRET_KEY)
     assert "SECRET_KEY" in str(exc.value)
+
+    with pytest.raises(Exception) as exc:
+        Settings(ENV="prod", SECRET_KEY="change-me-in-production")
+    assert "SECRET_KEY" in str(exc.value)
+
+    with pytest.raises(Exception):
+        Settings(ENV="prod", SECRET_KEY="short")
 
     ok = Settings(ENV="prod", SECRET_KEY="x" * 48)
     assert ok.SECRET_KEY == "x" * 48

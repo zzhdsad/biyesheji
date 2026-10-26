@@ -401,6 +401,7 @@ export default function PrescriptionsPage() {
 
   // 筛选
   const [keyword, setKeyword] = useState('');
+  const initialQueryRef = useRef(false);
   const [categoryId, setCategoryId] = useState<string | undefined>(undefined);
   const [tagId, setTagId] = useState<string | undefined>(undefined);
 
@@ -477,7 +478,16 @@ export default function PrescriptionsPage() {
   }, [message]);
 
   useEffect(() => {
-    void loadPrescriptions();
+    const opts = !initialQueryRef.current
+      ? (() => {
+          initialQueryRef.current = true;
+          const kw = new URLSearchParams(window.location.search).get('keyword');
+          if (!kw) return undefined;
+          setKeyword(kw);
+          return { keyword: kw, categoryId: undefined, tagId: undefined, current: 1, pageSize };
+        })()
+      : undefined;
+    void loadPrescriptions(opts);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current, pageSize]);
 

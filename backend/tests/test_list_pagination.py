@@ -15,6 +15,8 @@
 需要 PostgreSQL，不可用则整模块 skip。
 """
 
+import uuid
+
 import pytest
 
 from tests.test_upload import PG_AVAILABLE
@@ -107,3 +109,55 @@ def test_kb_offset_pages_do_not_overlap(client):
 def test_kb_rejects_invalid_limit(client):
     assert client.get("/api/v1/kb", params={"limit": 0}).status_code == 422
     assert client.get("/api/v1/kb", params={"limit": 501}).status_code == 422
+
+
+# ── GET /documents ───────────────────────────────────────────────────────────
+
+
+def _doc_kb(client) -> str:
+    resp = client.post("/api/v1/kb", json={"name": f"文档分页KB-{uuid.uuid4().hex[:8]}"})
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+def test_documents_limit_and_total_header(client):
+    kb_id = _doc_kb(client)
+    for name in ("分页1.txt", "分页2.txt"):
+        resp = client.post(
+            "/api/v1/documents/upload",
+            data={"kb_id": kb_id},
+            files={"file": (name, b"hello world", "text/plain")},
+        )
+        assert resp.status_code == 201, resp.text
+
+    all_resp = client.get("/api/v1/documents", params={"kb_id": kb_id})
+    assert all_resp.status_code == 200
+    assert len(all_resp.json()) >= 2
+    assert int(all_resp.headers["x-total-count"]) == len(all_resp.json())
+
+    limited = client.get(
+        "/api/v1/documents", params={"kb_id": kb_id, "limit": 1}
+    )
+    assert limited.status_code == 200
+    assert len(limited.json()) == 1
+    assert int(limited.headers["x-total-count"]) >= 2
+
+
+def test_documents_offset_pages_do_not_overlap(client):
+    kb_id = _doc_kb(client)
+    for name in ("翻页1.txt", "翻页2.txt"):
+        resp = client.post(
+            "/api/v1/documents/upload",
+            data={"kb_id": kb_id},
+            files={"file": (name, b"hello world", "text/plain")},
+        )
+        assert resp.status_code == 201, resp.text
+
+    page1 = client.get(
+        "/api/v1/documents", params={"kb_id": kb_id, "limit": 1, "offset": 0}
+    ).json()
+    page2 = client.get(
+        "/api/v1/documents", params={"kb_id": kb_id, "limit": 1, "offset": 1}
+    ).json()
+    assert page1 and page2
+    assert page1[0]["id"] != page2[0]["id"]

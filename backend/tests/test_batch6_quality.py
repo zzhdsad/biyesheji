@@ -138,9 +138,10 @@ def test_trash_retention_reads_runtime_config_not_hardcoded(monkeypatch):
     routes_dir = Path(__file__).resolve().parents[1] / "src" / "api" / "routes"
     for name in ("users.py", "knowledge_bases.py", "documents.py"):
         source = (routes_dir / name).read_text(encoding="utf-8")
-        assert "get_system_value('trash_retention_days')" in source, (
-            f"{name} 未统一读运行时配置"
-        )
+        assert (
+            "get_system_value('trash_retention_days')" in source
+            or 'get_system_value("trash_retention_days")' in source
+        ), f"{name} 未统一读运行时配置"
         assert "TRASH_RETENTION_DAYS = 7" not in source, f"{name} 仍写死 7 天"
 
 

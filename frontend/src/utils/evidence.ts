@@ -284,24 +284,62 @@ export type AnswerSegment =
  * - `[citation: 3]` → { index: 3, page: null }；
  * - `[citation: 1, 5]` → { index: 1, page: 5 }；
  * - `[citation: 1, 0]` → page=0（后端 Prompt 旧约定"无页码填 0"，展示层不得
- *   把 0 当编号显示——chip 一律显示 [index]）。
+ *   把 0 当编号显示——chip 一律显示 [index]）；
+ * - `[citation: 1, 页码]`（模型误抄占位词）→ page=null，仍按 index=1 出 chip，
+ *   最终页码由证据卡片提供。
  *
  * 该函数只做解析（纯函数，可独立测试）；编号是否有效（能否定位证据卡片）
  * 由调用方结合 source_index 集合判断（见 resolveCitationKey）。
  */
 export function parseCitationMarkers(content: string): AnswerSegment[] {
   const segments: AnswerSegment[] = [];
-  const re = /\[citation:\s*(\d+)(?:,\s*(-?\d+))?\]/g;
+  const re = /\[citation:\s*(\d+)(?:,\s*([^\]\s]+))?\]/g;
   let last = 0;
   for (let m = re.exec(content); m !== null; m = re.exec(content)) {
     const at = m.index;
     if (at > last) segments.push({ type: 'text', text: content.slice(last, at) });
-    const page = m[2] != null ? Number(m[2]) : null;
+    const rawPage = m[2];
+    const page =
+      rawPage != null && /^-?\d+$/.test(rawPage) ? Number(rawPage) : null;
     segments.push({ type: 'citation', index: Number(m[1]), page });
     last = at + m[0].length;
   }
   if (last < content.length) segments.push({ type: 'text', text: content.slice(last) });
   return segments;
+}
+
+/** 证据来源 → 原始数据管理页面的快捷入口（用于定位后修改/删除）。 */
+export function sourceHref(
+  ev: Pick<
+    Citation,
+    | 'source_kind'
+    | 'doc_id'
+    | 'kb_id'
+    | 'resource_type'
+    | 'source_name'
+    | 'resource_name'
+    | 'doc_name'
+  >,
+): string | null {
+  if ((ev.source_kind ?? 'document') === 'document') {
+    if (!ev.doc_id) return null;
+    const params = new URLSearchParams({ doc_id: ev.doc_id });
+    if (ev.kb_id) params.set('kb_id', ev.kb_id);
+    return `/documents?${params.toString()}`;
+  }
+  const path =
+    ev.resource_type === 'herb'
+      ? '/herbs'
+      : ev.resource_type === 'prescription'
+        ? '/prescriptions'
+        : ev.resource_type === 'theory'
+          ? '/theories'
+          : ev.resource_type === 'literature'
+            ? '/literatures'
+            : null;
+  if (!path) return null;
+  const name = ev.resource_name || ev.source_name || ev.doc_name || '';
+  return name ? `${path}?keyword=${encodeURIComponent(name)}` : path;
 }
 
 /**

@@ -22,6 +22,7 @@ import {
   normalizeEvidenceGroups,
   parseCitationMarkers,
   resolveCitationKey,
+  sourceHref,
   summarizeEvidence,
 } from './evidence.ts';
 import type { Citation, EvidenceGroup, EvidenceLevel } from '@/types';
@@ -82,8 +83,34 @@ describe('evidenceLevel', () => {
 
 // ── 引用 0 修复：parseCitationMarkers（正文 → 文本/引用标记序列）─────────────
 
-describe('parseCitationMarkers（引用编号解析）', () => {
-  it('citation 1 / 2 / 6：编号与页码（含旧约定页码 0）正确解析', () => {
+describe('sourceHref（来源定位）', () => {
+  it('文档来源带 doc_id / kb_id', () => {
+    assert.equal(
+      sourceHref({
+        source_kind: 'document',
+        doc_id: 'doc-1',
+        kb_id: 'kb-1',
+        doc_name: '伤寒论.pdf',
+      }),
+      '/documents?doc_id=doc-1&kb_id=kb-1',
+    );
+  });
+
+  it('资源来源按类型进入对应列表并按名称检索', () => {
+    assert.equal(
+      sourceHref({
+        source_kind: 'resource',
+        doc_id: 'hash',
+        resource_type: 'herb',
+        resource_name: '桂枝',
+        doc_name: '桂枝',
+      }),
+      '/herbs?keyword=%E6%A1%82%E6%9E%9D',
+    );
+  });
+});
+
+describe('parseCitationMarkers（引用编号解析）', () => {  it('citation 1 / 2 / 6：编号与页码（含旧约定页码 0）正确解析', () => {
     const segs = parseCitationMarkers('太阳中风 [citation: 1, 0] 阳浮而阴弱 [citation: 2, 5]');
     assert.deepEqual(segs, [
       { type: 'text', text: '太阳中风 ' },
@@ -96,6 +123,12 @@ describe('parseCitationMarkers（引用编号解析）', () => {
     assert.deepEqual(segs6, [
       { type: 'text', text: '多来源 ' },
       { type: 'citation', index: 6, page: null },
+    ]);
+
+    // 模型误抄「页码」占位词：仍按编号出 chip，页码交由证据卡片提供
+    assert.deepEqual(parseCitationMarkers('桂枝汤 [citation: 1, 页码]'), [
+      { type: 'text', text: '桂枝汤 ' },
+      { type: 'citation', index: 1, page: null },
     ]);
   });
 

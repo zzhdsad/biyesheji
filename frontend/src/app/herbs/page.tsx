@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   App,
   Button,
@@ -130,6 +130,7 @@ export default function HerbsPage() {
 
   // 筛选
   const [keyword, setKeyword] = useState('');
+  const initialQueryRef = useRef(false);
   const [categoryId, setCategoryId] = useState<string | undefined>(undefined);
   const [tagId, setTagId] = useState<string | undefined>(undefined);
 
@@ -199,7 +200,17 @@ export default function HerbsPage() {
   }, [message]);
 
   useEffect(() => {
-    void loadHerbs();
+    // 从问答引用“定位来源”进入：?keyword=xxx 自动按名称检索
+    const opts = !initialQueryRef.current
+      ? (() => {
+          initialQueryRef.current = true;
+          const kw = new URLSearchParams(window.location.search).get('keyword');
+          if (!kw) return undefined;
+          setKeyword(kw);
+          return { keyword: kw, categoryId: undefined, tagId: undefined, current: 1, pageSize };
+        })()
+      : undefined;
+    void loadHerbs(opts);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current, pageSize]);
 

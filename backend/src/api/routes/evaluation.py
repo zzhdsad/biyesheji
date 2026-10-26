@@ -152,6 +152,17 @@ class TestCaseUpdateRequest(BaseModel):
     needs_review: bool | None = None
 
 
+class DraftAnswerOut(BaseModel):
+    """参考答案草稿：只供人工确认弹窗预填，不自动保存、不自动确认。"""
+
+    answer: str
+    golden_contexts: list[str]
+    source_reference: str
+    evidence_count: int
+    usable: bool
+    warning: str = ""
+
+
 class CaseResultOut(BaseModel):
     test_case_id: str
     question: str
@@ -405,6 +416,21 @@ async def confirm_test_case(
         question_type=payload.question_type,
         needs_review=payload.needs_review,
     )
+
+
+@router.post("/test-cases/{case_id}/draft-answer", response_model=DraftAnswerOut)
+async def draft_test_case_answer(
+    case_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """用知识库生成参考答案草稿（预填人工确认弹窗，不落库、不自动确认）。
+
+    权限：按用例所属知识库校验写权限，禁止跨库生成/读取草稿。
+    """
+    await _check_kb_write(request, db, await _resolve_case_kb(db, case_id))
+    service = EvaluationService(db)
+    return await service.draft_golden_answer(case_id)
 
 
 @router.post("/run", response_model=EvaluationReport)

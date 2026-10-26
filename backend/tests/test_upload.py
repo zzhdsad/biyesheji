@@ -95,6 +95,21 @@ def test_upload_rejects_invalid_extension(client):
     assert "不支持" in resp.json()["message"]
 
 
+def test_upload_rejects_unparseable_office_formats(client):
+    """未安装 Docling 时，PPTX/XLSX 不应被接受为可解析文档。"""
+    for name, content in (
+        ("slides.pptx", b"PK\x03\x04fake-pptx"),
+        ("table.xlsx", b"PK\x03\x04fake-xlsx"),
+    ):
+        resp = client.post(
+            "/api/v1/documents/upload",
+            data={"kb_id": str(uuid.uuid4())},
+            files={"file": (name, content, "application/octet-stream")},
+        )
+        assert resp.status_code == 400, resp.text
+        assert "仅支持 PDF/DOCX/TXT/MD" in resp.json()["message"]
+
+
 def test_upload_rejects_empty_file(client):
     resp = client.post(
         "/api/v1/documents/upload",
@@ -105,13 +120,21 @@ def test_upload_rejects_empty_file(client):
     assert "为空" in resp.json()["message"]
 
 
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 def test_upload_rejects_oversized_file(client, monkeypatch):
     """超过大小限制返回 400。"""
-    monkeypatch.setattr(settings, "MAX_FILE_SIZE_MB", 1)
+    resp = client.post("/api/v1/kb", json={"name": f"上传大小KB-{uuid.uuid4().hex[:8]}"})
+    assert resp.status_code == 201, resp.text
+    kb_id = resp.json()["id"]
+
+    monkeypatch.setattr(
+        "src.application.document_service.get_system_value",
+        lambda key: 1 if key == "max_file_size_mb" else settings.MAX_FILE_SIZE_MB,
+    )
     big = b"x" * (1024 * 1024 + 1)
     resp = client.post(
         "/api/v1/documents/upload",
-        data={"kb_id": str(uuid.uuid4())},
+        data={"kb_id": kb_id},
         files={"file": ("big.pdf", big, "application/pdf")},
     )
     assert resp.status_code == 400

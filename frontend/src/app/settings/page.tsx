@@ -1,4 +1,4 @@
-﻿'use client';
+'use client';
 
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -22,6 +22,8 @@ import {
 } from 'antd';
 import {
   ApiOutlined,
+  CopyOutlined,
+  DatabaseOutlined,
   ExperimentOutlined,
   ReloadOutlined,
   RobotOutlined,
@@ -32,10 +34,11 @@ import {
 import type {
   EmbeddingStatus,
   ModelConfig,
+  PersistenceInfo,
   RevectorizeJobStatus,
 } from '@/services/api';
 import type { SystemConfigValues } from '@/types';
-import { fetchModelConfig, testModelConnection, updateModelConfig, fetchSystemConfig, updateSystemConfig, fetchEmbeddingStatus, startRevectorize, fetchRevectorizeStatus, retryRevectorize, cancelRevectorize, resetSystemConfig } from '@/services/api';
+import { fetchModelConfig, fetchPersistenceInfo, testModelConnection, updateModelConfig, fetchSystemConfig, updateSystemConfig, fetchEmbeddingStatus, startRevectorize, fetchRevectorizeStatus, retryRevectorize, cancelRevectorize, resetSystemConfig } from '@/services/api';
 import {
   canCancelJob,
   canStartRevectorize,
@@ -74,6 +77,7 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [persistence, setPersistence] = useState<PersistenceInfo | null>(null);
   const [sysLoading, setSysLoading] = useState(false);
   const [sysSaving, setSysSaving] = useState(false);
   const [sysResetting, setSysResetting] = useState(false);
@@ -197,6 +201,9 @@ export default function SettingsPage() {
   useEffect(() => {
     void loadConfig();
     void loadSysConfig();
+    void fetchPersistenceInfo()
+      .then(setPersistence)
+      .catch(() => setPersistence(null)); // 持久化卡片是辅助信息，不阻断配置页
   }, [loadConfig, loadSysConfig]);
 
   /** 表单项下方的"默认值："提示（取值来自后端 Settings 默认值）。 */
@@ -266,6 +273,9 @@ export default function SettingsPage() {
     }
     setTesting(true);
     setTestResult(null);
+    // 连通测试是只读操作；部分浏览器/表单重渲染会把密码框回填成脱敏值，
+    // 导致第二次测试使用错误 Key。测试结束后恢复用户刚输入的原始值。
+    const apiKeySnapshot = values.llm_api_key;
     try {
       const res = await testModelConnection(values);
       setTestResult({ ok: res.ok, msg: res.message });
@@ -279,6 +289,7 @@ export default function SettingsPage() {
       setTestResult({ ok: false, msg });
       message.error(`连通测试失败：${msg}`);
     } finally {
+      if (apiKeySnapshot) form.setFieldValue('llm_api_key', apiKeySnapshot);
       setTesting(false);
     }
   };
@@ -681,6 +692,64 @@ export default function SettingsPage() {
               </Form.Item>
             </Col>
           </Row>
+        </Card>
+
+        <Card
+          title={
+            <Space>
+              <DatabaseOutlined />
+              <span>数据持久化</span>
+              <Tag color="green">本地目录挂载</Tag>
+            </Space>
+          }
+          style={{ marginTop: 16, maxWidth: 900 }}
+        >
+          {persistence ? (
+            <>
+              <Alert
+                type="success"
+                showIcon
+                message="容器删除 / 重建不会丢失数据"
+                description={`数据保存在宿主机 ${persistence.host_dir}；只有手动删除该目录才会丢失。`}
+                style={{ marginBottom: 12 }}
+              />
+              <Space direction="vertical" size={4} style={{ fontSize: 13 }}>
+                <span>
+                  宿主机数据目录：<Typography.Text code>{persistence.host_dir}</Typography.Text>
+                </span>
+                <span>
+                  上传文件：<Typography.Text code>{persistence.uploads_dir}</Typography.Text>
+                </span>
+                <span>
+                  容器内上传目录：<Typography.Text code>{persistence.container_uploads_dir}</Typography.Text>
+                </span>
+              </Space>
+              <div style={{ marginTop: 12 }}>
+                <Button
+                  size="small"
+                  icon={<CopyOutlined />}
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(persistence.host_dir);
+                      message.success('数据目录已复制');
+                    } catch {
+                      message.warning(`请手动复制：${persistence.host_dir}`);
+                    }
+                  }}
+                >
+                  复制数据目录
+                </Button>
+              </div>
+              <Typography.Paragraph type="secondary" style={{ fontSize: 12, marginTop: 12 }}>
+                备份：停止容器后复制 `{persistence.host_dir}` 目录；恢复：把备份目录放回项目根目录后启动。
+                不要执行 `docker compose down -v` 删除数据卷。
+              </Typography.Paragraph>
+            </>
+          ) : (
+            <Typography.Text type="secondary">
+              未读取到持久化信息（非 Docker 部署，或当前账号无管理员权限）。
+            </Typography.Text>
+          )}
         </Card>
 
         <Divider />

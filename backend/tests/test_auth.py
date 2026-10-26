@@ -155,6 +155,70 @@ def test_login_success_returns_token(auth_client, _unique_user):
     assert resp2.status_code == 200
 
 
+@pytest.mark.anyio
+async def test_login_rejects_inactive_user_before_token():
+    """单元级：禁用账号在密码校验通过后不得签发 token。"""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from fastapi import HTTPException
+
+    from src.api.routes.auth import LoginRequest, login as login_endpoint
+    from src.core.security import hash_password
+    from src.domain.models import User
+
+    user = User(
+        email="disabled@test.com",
+        username="disabled",
+        hashed_password=hash_password("secret-pass"),
+        is_active=False,
+    )
+    db = MagicMock()
+    db.scalar = AsyncMock(return_value=user)
+
+    with pytest.raises(HTTPException) as exc:
+        await login_endpoint(
+            LoginRequest(username_or_email="disabled", password="secret-pass"), db
+        )
+    assert exc.value.status_code == 403
+    assert "禁用" in exc.value.detail
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_disabled_user_cannot_login(auth_client, _unique_user):
+    """禁用账号必须在登录阶段拒绝，而不是先发 token 再在业务接口 403。"""
+    login = auth_client.post(
+        "/api/v1/auth/login",
+        json={
+            "username_or_email": _unique_user["username"],
+            "password": _unique_user["password"],
+        },
+    )
+    assert login.status_code == 200, login.text
+    user_token = login.json()["access_token"]
+    me = auth_client.get(
+        "/api/v1/auth/me", headers={"Authorization": f"Bearer {user_token}"}
+    )
+    assert me.status_code == 200, me.text
+    user_id = me.json()["id"]
+
+    admin_token = _admin_login(auth_client)
+    resp = auth_client.post(
+        f"/api/v1/users/{user_id}/disable",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    denied = auth_client.post(
+        "/api/v1/auth/login",
+        json={
+            "username_or_email": _unique_user["username"],
+            "password": _unique_user["password"],
+        },
+    )
+    assert denied.status_code == 403
+    assert "禁用" in denied.json()["detail"]
+
+
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 def test_login_wrong_password_401(auth_client, _unique_user):
     resp = auth_client.post(

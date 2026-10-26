@@ -160,6 +160,8 @@ class Document(Base, TimestampMixin):
     parse_status: Mapped[str] = mapped_column(String(16), default="pending")
     # pending / parsing / success（切片就绪）/ completed（已向量化）/ failed
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 历史迁移遗留列（c185a0406aa3）：当前业务不使用，但数据库 / Alembic 已存在
+    progress_percent: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str] = mapped_column(Text, default="")
     # 来源可信度标注（AGENTS.md 中医约束第 6 条）；历史文档可为空，经补标接口回填
     # source_type 受控枚举见 src.core.source_meta；credibility_level 由其固定映射推导
@@ -384,6 +386,8 @@ class EvaluationResult(Base, TimestampMixin):
     context_relevancy: Mapped[float] = mapped_column(Float, default=0.0)
     # NULL 表示未评估（标准答案缺失或待人工确认），与 0 分（已评估但不正确）区分
     answer_correctness: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # 历史迁移遗留列（c185a0406aa3）：当前指标计算不使用，保留以对齐 DB / Alembic
+    faithfulness: Mapped[float] = mapped_column(Float, default=0.0)
     # 归属运行（evaluation_runs.id 的字符串形式，冗余存储便于分组查询）
     run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     experiment_name: Mapped[str] = mapped_column(String(128), default="baseline")

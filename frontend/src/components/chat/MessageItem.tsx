@@ -1,10 +1,11 @@
 'use client';
 
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { Avatar, Typography, theme } from 'antd';
+import { Avatar, Button, Typography, theme } from 'antd';
 import {
   CheckCircleOutlined,
   DownOutlined,
+  EditOutlined,
   LoadingOutlined,
   RobotOutlined,
   UserOutlined,
@@ -431,7 +432,14 @@ function renderAnswer(
   return nodes;
 }
 
-export function MessageItem({ message }: { message: ChatMessage }) {
+export function MessageItem({
+  message,
+  onEdit,
+}: {
+  message: ChatMessage;
+  /** 用户提问的“编辑后重问”入口；未传则不显示。 */
+  onEdit?: (message: ChatMessage) => void;
+}) {
   const isUser = message.role === 'user';
   const [activeKey, setActiveKey] = useState<string[]>([]);
   // 模块 E：视觉 token 化（修复暗色模式下气泡硬编码白底/浅色文字的问题）
@@ -506,6 +514,24 @@ export function MessageItem({ message }: { message: ChatMessage }) {
             </>
           )}
         </div>
+        {isUser && onEdit && (
+          <div style={{ textAlign: 'right', marginTop: 2 }}>
+            <Button
+              type="text"
+              size="small"
+              icon={<EditOutlined />}
+              onClick={() => onEdit(message)}
+              style={{ fontSize: 12, color: token.colorTextTertiary }}
+            >
+              编辑后重问
+            </Button>
+          </div>
+        )}
+        {!isUser && message.cancelled && (
+          <Text type="secondary" style={{ fontSize: 12, marginLeft: 8 }}>
+            已停止生成
+          </Text>
+        )}
         {/* BUG-057：后端 /feedbacks 已实现，但组件此前全项目无引用 → 接入助手消息 */}
         {!isUser && <FeedbackButtons messageId={message.id} />}
         {!isUser &&
@@ -538,6 +564,7 @@ export function MessageItem({ message }: { message: ChatMessage }) {
             groups={message.evidenceGroups}
             activeKey={activeKey}
             onChange={(keys) => setActiveKey(keys as string[])}
+            streaming={Boolean(message.streamPhase)}
           />
         )}
       </div>

@@ -58,11 +58,10 @@ SYSTEM_PROMPT = (
     "（如都提到「产品」）但内容答非所问时，视为不相关，必须拒答；"
     "主观评价类问题（如「你觉得这款产品如何」）若资料中没有评价性内容，同样必须拒答。\n"
     "3. 引用标注：回答中凡是来自参考资料的内容，必须在对应语句末尾标注来源，"
-    "格式为 [citation: 来源编号, 页码]，例如 [citation: 1, 3]。"
-    "来源编号即参考资料前的方括号编号，页码取该资料标注的页码"
-    "（该资料没有页码时省略页码，只写 [citation: 来源编号]）。"
-    "同一句话引用多份资料时，必须连续标注如 [citation: 1, 3][citation: 2, 5]，"
-    "不得只给一个无法确认来源的编号。\n"
+    "格式为 [citation: 来源编号, N]，N 是该资料中标注的页码数字（没有页码写 0），"
+    "例如 [citation: 1, 3]。不要把 N 或「页码」两个字照抄进答案。"
+    "来源编号即参考资料前的方括号编号；同一句话引用多份资料时，必须连续标注如 "
+    "[citation: 1, 3][citation: 2, 5]，不得只给一个无法确认来源的编号。\n"
     "4. 来源区分：不同参考资料的记载不得混合成一条看起来统一的结论。"
     "当多份资料从不同角度记载同一主题时，应说明「根据检索到的资料，"
     "不同文献中的记载包括：」，再逐条分列（如「1. …… 2. ……」），"
@@ -82,7 +81,11 @@ SYSTEM_PROMPT = (
     "10. 若资料中存在矛盾或信息不完整，如实说明，不要自行推断。\n"
     "11. 多子问题处理：当用户一次提出多个独立问题时，必须逐个回答；有资料依据的子问题正常回答并引用，"
     "无资料依据的子问题单独列出并说明「资料未涉及：…」；只有所有子问题都没有资料时才整体拒答。"
-    "不得因为部分子问题无资料而拒绝全部。"
+    "不得因为部分子问题无资料而拒绝全部。\n"
+    "12. 证型/适应证归纳：资料若以「太阳中风」「发热恶风汗出」等症状、病机或治法描述适用情形，"
+    "应据此归纳为相应证型（可使用资料原文中的术语，如「太阳中风证」），"
+    "不得仅因资料没有出现「证型」二字就回答「资料未系统归纳」；"
+    "归纳必须限定在资料明确支持的范围，并逐句引用。"
 )
 
 # 检索相关性不足时的固定拒答文案（不调用 LLM，确定性防幻觉）
@@ -99,8 +102,9 @@ GATE_REFUSAL_ANSWER = (
 )
 
 _CONTEXT_MARKER = "参考资料"
-# [citation: 1, 3] 或 [citation: 1]；页码可选，兼容有无空格
-_CITATION_PATTERN = re.compile(r"\[citation:\s*(\d+)\s*(?:,\s*(\d+)\s*)?\]", re.IGNORECASE)
+# [citation: 1, 3] / [citation: 1] / 模型误写 [citation: 1, 页码]
+# 页码只做语法兼容；最终页码始终以检索命中的权威 page_num 为准。
+_CITATION_PATTERN = re.compile(r"\[citation:\s*(\d+)\s*(?:,\s*([^\]\s]+)\s*)?\]", re.IGNORECASE)
 # 拒答 / 保守回答前缀：这类回答没有引用标记时，保留检索证据供用户判断。
 _REFUSAL_PREFIX = "根据现有资料，我无法"
 
@@ -109,17 +113,20 @@ def _is_refusal_answer(answer: str) -> bool:
     return (answer or "").strip().startswith(_REFUSAL_PREFIX)
 
 
-def _is_multi_question(question: str) -> bool:
-    """粗略识别一次提问包含多个子问题（问号 / 编号列表）。"""
-    text = question or ""
-    if len(re.findall(r"[?？]", text)) >= 2:
-        return True
-    numbered = [
-        line
-        for line in text.splitlines()
-        if re.match(r"^\s*\d+\s*[.、)]\s*", line)
+def split_sub_questions(question: str) -> list[str]:
+    """把一次提问拆成子问题清单（问号 / 换行 / 编号列表）。
+
+    只用于 Prompt 结构化，不改变检索链路；单问题返回长度 1。
+    """
+    text = (question or "").strip()
+    if not text:
+        return []
+    parts = [
+        part.strip()
+        for part in re.split(r"(?<=[?？])\s*|\n+", text)
+        if part.strip()
     ]
-    return len(numbered) >= 2
+    return parts or [text]
 
 # Stage 4-4 / Stage 4-5：Resource 类型标签与证据等级统一收敛到
 # application.evidence（阶段十：统一 Evidence 模型），此处仅保留别名，
@@ -239,7 +246,7 @@ class RagService:
         # 资源元数据缓存（kb_id → {doc_id: (resource_type, resource_name)}）：
         # 老集合 enable_dynamic_field=False 时 Milvus 不带回资源字段，
         # 需按 doc_id 从 PG 事实源补齐（每实例只查一次，避免每次检索重复查询）。
-        self._resource_meta_cache: dict[str, dict[str, tuple[str, str]]] = {}
+        self._resource_meta_cache: dict[str, dict[str, tuple[str, str, str]]] = {}
 
     async def _ensure_components(self) -> None:
         """惰性加载运行时配置并初始化 embedding/llm/rerank/hyde。
@@ -479,6 +486,10 @@ class RagService:
         # 事实源补齐，使 resource_types 真正作用到检索层（不改变排序与打分）。
         await self._attach_resource_meta(kb_ids, dense_hits + sparse_hits)
 
+        # PG 状态校验：软删除文档 / 资源、未完成向量化的文档不得进入引用。
+        dense_hits = await self._filter_inactive_hits(dense_hits)
+        sparse_hits = await self._filter_inactive_hits(sparse_hits)
+
         # 新旧 embedding 模型隔离：剔除由**其它模型**生成的向量。
         # 不同模型的向量不在同一向量空间，混检会产生无意义相似度（错误结果）。
         # 未标注（legacy，vector_model IS NULL）的文档不受影响，保持既有行为。
@@ -560,6 +571,8 @@ class RagService:
 
         # 为精排后的命中注入 doc_name（Prompt 与引用卡片均需展示文档名）
         await self._enrich_hits_with_doc_name(hits)
+        # KG 证据在向量检索之后合并，这里再校验一次，避免软删除资源经图谱漏出
+        hits = await self._filter_inactive_hits(hits)
         return hits
 
     @staticmethod
@@ -571,17 +584,17 @@ class RagService:
         except (ValueError, TypeError, AttributeError):
             return False
 
-    async def _resource_meta(self, kb_id: str) -> dict[str, tuple[str, str]]:
-        """知识库内「资源向量 doc_id → (resource_type, resource_name)」映射。
+    async def _resource_meta(self, kb_id: str) -> dict[str, tuple[str, str, str]]:
+        """知识库内「资源向量 doc_id → (resource_type, resource_name, resource_id)」映射。
 
         以 PG（KnowledgeBaseResource + 各资源表）为事实源重算 doc_id：
         老集合（enable_dynamic_field=False）未把资源元数据写入 Milvus，
-        只能据此还原，供资源类型过滤与引用展示使用。
+        只能据此还原，供资源类型过滤、状态校验与引用展示使用。
         """
         cached = self._resource_meta_cache.get(kb_id)
         if cached is not None:
             return cached
-        out: dict[str, tuple[str, str]] = {}
+        out: dict[str, tuple[str, str, str]] = {}
         try:
             mounts = (
                 await self.db.scalars(
@@ -604,6 +617,7 @@ class RagService:
                     out[make_doc_id(rtype, r.id, uuid.UUID(kb_id))] = (
                         rtype,
                         (r.name or "").strip(),
+                        str(r.id),
                     )
         except Exception as exc:  # noqa: BLE001  元数据缺失不得影响检索主流程
             logger.warning(f"资源元数据加载失败（按无资源元数据处理）: {exc}")
@@ -625,7 +639,7 @@ class RagService:
         ]
         if not need:
             return
-        meta: dict[str, tuple[str, str]] = {}
+        meta: dict[str, tuple[str, str, str]] = {}
         for kb in kb_ids:
             meta.update(await self._resource_meta(str(kb)))
         if not meta:
@@ -633,7 +647,78 @@ class RagService:
         for h in need:
             found = meta.get(str(h.get("doc_id")))
             if found:
-                h["resource_type"], h["resource_name"] = found[0], found[1]
+                h["resource_type"], h["resource_name"], h["resource_id"] = found
+
+    async def _filter_inactive_hits(self, hits: list[dict]) -> list[dict]:
+        """过滤已软删除的文档 / 资源，以及未完成向量化的文档命中。
+
+        Milvus 是索引，不是事实源：文档 / 资源移入回收站后向量不会立刻消失，
+        因此检索命中必须回 PostgreSQL 校验状态，否则已删除内容仍会被引用。
+        校验失败时返回空列表（宁可拒答，也不返回未经确认的删除数据）。
+        """
+        if not hits:
+            return hits
+
+        doc_ids: set[uuid.UUID] = set()
+        resource_ids: dict[str, set[uuid.UUID]] = {}
+        for hit in hits:
+            doc_id = hit.get("doc_id")
+            if self._is_document_doc_id(doc_id):
+                try:
+                    doc_ids.add(uuid.UUID(str(doc_id)))
+                except (ValueError, TypeError):
+                    continue
+            else:
+                rtype = hit.get("resource_type")
+                rid = hit.get("resource_id")
+                if rtype and rid:
+                    try:
+                        resource_ids.setdefault(rtype, set()).add(uuid.UUID(str(rid)))
+                    except (ValueError, TypeError):
+                        continue
+
+        active_docs: set[uuid.UUID] = set()
+        active_resources: set[tuple[str, str]] = set()
+        try:
+            if doc_ids:
+                rows = await self.db.scalars(
+                    select(Document.id).where(
+                        Document.id.in_(doc_ids),
+                        Document.deleted_at.is_(None),
+                        Document.parse_status == "completed",
+                    )
+                )
+                active_docs = set(rows.all())
+            for rtype, ids in resource_ids.items():
+                model = _RESOURCE_MODEL_BY_TYPE.get(rtype)
+                if model is None:
+                    continue
+                rows = await self.db.scalars(
+                    select(model.id).where(
+                        model.id.in_(ids),
+                        model.deleted_at.is_(None),
+                    )
+                )
+                active_resources.update((rtype, str(rid)) for rid in rows.all())
+        except Exception as exc:  # noqa: BLE001 - 状态校验失败时按安全侧拒答
+            logger.warning(f"检索命中状态校验失败，丢弃本批命中: {exc}")
+            return []
+
+        def _active(hit: dict) -> bool:
+            doc_id = hit.get("doc_id")
+            if self._is_document_doc_id(doc_id):
+                try:
+                    return uuid.UUID(str(doc_id)) in active_docs
+                except (ValueError, TypeError):
+                    return False
+            rtype = hit.get("resource_type")
+            rid = hit.get("resource_id")
+            if rtype and rid:
+                return (rtype, str(rid)) in active_resources
+            # 老集合 / KG 行可能没有 resource_id：无法校验时保留，避免误删召回
+            return True
+
+        return [hit for hit in hits if _active(hit)]
 
     def _is_relevant(self, hits: list[dict]) -> bool:
         """相关性门槛（PRD §8.3 幻觉兜底）：Top 候选的稠密语义相似度均低于
@@ -1286,15 +1371,9 @@ class RagService:
         query_analysis, router_decision = await self.plan_retrieval_with_entities(question)
         strategy, resource_types = self._strategy_of(router_decision)
         conversation = await self._ensure_conversation(user, kb_ids, question, conversation_id)
-        yield {
-            "event": "start",
-            "data": {
-                "conversation_id": str(conversation.id),
-                "query_analysis": query_analysis.to_dict(),
-                "router_decision": router_decision.to_dict(),
-            },
-        }
 
+        # 先加载历史（不含本轮问题），再持久化用户消息；start 事件带回服务端
+        # user_message_id，供前端“编辑并重新提问”精确删除该轮及之后的回答。
         history, cache_hit = await self._load_history(conversation.id)
 
         # 先持久化用户消息（独立事务）：保证与助手消息 created_at 顺序确定。
@@ -1304,6 +1383,16 @@ class RagService:
         )
         self.db.add(user_msg)
         await self.db.commit()
+
+        yield {
+            "event": "start",
+            "data": {
+                "conversation_id": str(conversation.id),
+                "user_message_id": str(user_msg.id),
+                "query_analysis": query_analysis.to_dict(),
+                "router_decision": router_decision.to_dict(),
+            },
+        }
 
         # 检索+重排核心（不持久化；阶段十二按路由选择的策略执行；
         # 阶段十三透传 QueryAnalysis，供 KG 策略做图遍历）
@@ -1643,13 +1732,22 @@ class RagService:
                     f"[{i}] 文档：{h.get('doc_name', '未知')}{provenance} | "
                     f"{page_label} | 标题：{source}\n{h['content']}"
                 )
-        header = f"{_CONTEXT_MARKER}（编号即引用标识，引用时标注 [citation: 编号, 页码]）："
-        multi_hint = (
-            "\n\n【多子问题要求】请逐条回答上面的子问题；有资料的部分正常回答并引用，"
-            "没有资料的部分单独写「资料未涉及：…」，不要因部分子问题缺少资料而拒绝全部。"
-            if _is_multi_question(question)
-            else ""
+        header = (
+            f"{_CONTEXT_MARKER}（编号即引用标识；引用格式 [citation: 编号, N]，"
+            "N 为资料标注的页码数字，无页码写 0；不要把 N 或「页码」照抄）："
         )
+        sub_questions = split_sub_questions(question)
+        if len(sub_questions) >= 2:
+            sub_list = "\n".join(
+                f"{i}. {sub}" for i, sub in enumerate(sub_questions, start=1)
+            )
+            multi_hint = (
+                f"\n\n【子问题清单】\n{sub_list}\n"
+                "【多子问题要求】请按清单逐条回答；有资料的部分正常回答并引用，"
+                "没有资料的部分单独写「资料未涉及：…」，不要因部分子问题缺少资料而拒绝全部。"
+            )
+        else:
+            multi_hint = ""
         return f"{question}{multi_hint}\n\n{header}\n" + "\n\n".join(blocks)
 
     @staticmethod

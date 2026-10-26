@@ -58,6 +58,84 @@ def test_ask_returns_answer_with_citations(client):
 
 
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_edit_question_truncates_old_turn_and_can_ask_again(client):
+    """编辑并重新提问：删除该用户消息及其后回答，再在同一会话重新提问。"""
+    kb_id = _make_kb(client)
+    _upload_doc(client, kb_id, "考勤制度.txt")
+    first = _ask(client, "公司实行什么工时制度？", kb_id)
+    conversation_id = first["conversation_id"]
+
+    messages = client.get(
+        f"/api/v1/chat/conversations/{conversation_id}/messages"
+    ).json()
+    user_message = next(m for m in messages if m["role"] == "user")
+    resp = client.delete(
+        f"/api/v1/chat/conversations/{conversation_id}/messages/from/{user_message['id']}"
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["deleted_count"] >= 2
+    assert client.get(
+        f"/api/v1/chat/conversations/{conversation_id}/messages"
+    ).json() == []
+
+    second = _ask(
+        client, "公司每日工作多少小时？", kb_id, conversation_id=conversation_id
+    )
+    assert second["conversation_id"] == conversation_id
+    assert second["answer"]
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_soft_deleted_resource_not_retrievable(client):
+    """软删除并卸载资源后，RAG 不得再命中其残留向量。"""
+    kb_id = _make_kb(client)
+    herb_name = f"丹参-{uuid.uuid4().hex[:8]}"
+    resp = client.post(
+        "/api/v1/herbs",
+        json={
+            "name": herb_name,
+            "aliases": ["赤参"],
+            "properties": "苦；微寒",
+            "channels": ["心", "肝"],
+            "effects": "活血祛瘀；通经止痛",
+            "source": "神农本草经",
+            "description": "唇形科植物丹参的根",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    herb_id = resp.json()["id"]
+    resp = client.post(
+        f"/api/v1/kb/{kb_id}/resources",
+        json={"resource_type": "herb", "resource_id": herb_id},
+    )
+    assert resp.status_code == 201, resp.text
+
+    first = _ask(client, f"{herb_name}有什么功效？", kb_id)
+    assert first["citations"], "删除前应能检索到资源"
+
+    assert client.delete(f"/api/v1/herbs/{herb_id}").status_code == 200
+    second = _ask(client, f"{herb_name}有什么功效？", kb_id)
+    assert second["citations"] == [], "软删除资源不得继续出现在引用中"
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_soft_deleted_document_not_retrievable(client):
+    """软删除文档后，RAG 不得再命中其残留 Milvus 向量。"""
+    kb_id = _make_kb(client)
+    doc_id = _upload_doc(client, kb_id, "考勤制度.txt")
+
+    first = _ask(client, "公司实行什么工时制度？", kb_id)
+    assert first["citations"], "删除前应能检索到文档"
+
+    resp = client.delete(f"/api/v1/documents/{doc_id}")
+    assert resp.status_code == 200, resp.text
+
+    second = _ask(client, "公司实行什么工时制度？", kb_id)
+    assert second["citations"] == [], "软删除文档不得继续出现在引用中"
+    assert "无法回答" in second["answer"] or "资料不足" in second["answer"]
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 def test_ask_multi_turn_reuses_conversation(client):
     """多轮对话：携带 conversation_id 续问复用同一会话，消息持久化 4 条。"""
     kb_id = _make_kb(client)
@@ -157,6 +235,15 @@ async def test_citation_pattern_parses_various_forms():
     assert _CITATION_PATTERN.search("答案[1]") is None  # 旧格式不匹配
 
 
+def test_system_prompt_guards_page_placeholder_and_syndrome_induction():
+    """回归：模型不得照抄「页码」占位词；证型可由症状/病机归纳。"""
+    from src.application.rag_service import SYSTEM_PROMPT
+
+    assert "不要把 N 或「页码」两个字照抄" in SYSTEM_PROMPT
+    assert "太阳中风证" in SYSTEM_PROMPT
+    assert "不得仅因资料没有出现「证型」二字" in SYSTEM_PROMPT
+
+
 @pytest.mark.anyio
 async def test_build_citations_resolves_index_and_fallback():
     """_build_citations：解析标记→对应来源；正常回答无标记/越界→不返回候选。"""
@@ -175,6 +262,11 @@ async def test_build_citations_resolves_index_and_fallback():
     assert cits[0]["doc_name"] == "手册.pdf"
     assert cits[0]["page_num"] == 3
     assert cits[0]["chunk_id"] == "c1"
+    # 模型误抄占位词「页码」：仍按来源编号建立引用，页码取命中权威值
+    cits_literal = await svc._build_citations("回答[citation: 1, 页码]继续", hits)
+    assert len(cits_literal) == 1
+    assert cits_literal[0]["doc_name"] == "手册.pdf"
+    assert cits_literal[0]["page_num"] == 3
     # 正常回答无标记 → 不把候选当引用
     cits2 = await svc._build_citations("回答无标记", hits)
     assert len(cits2) == 0
@@ -271,14 +363,18 @@ def test_citation_pydantic_relevance_score_null_compatible_with_legacy_data():
 @pytest.mark.anyio
 async def test_build_user_prompt_adds_multi_question_hint():
     """一次包含多个子问题时，Prompt 明确要求逐条回答、未知部分写资料未涉及。"""
-    from src.application.rag_service import RagService
+    from src.application.rag_service import RagService, split_sub_questions
 
+    assert split_sub_questions("问题一？问题二？") == ["问题一？", "问题二？"]
     svc = RagService.__new__(RagService)
     hits = [
         {"id": "c1", "doc_id": "d1", "doc_name": "手册.pdf", "page_num": 3,
          "title_path": "考勤", "content": "工时八小时", "dense_score": 0.9},
     ]
     prompt = svc._build_user_prompt("问题一？问题二？", hits)
+    assert "子问题清单" in prompt
+    assert "1. 问题一？" in prompt
+    assert "2. 问题二？" in prompt
     assert "多子问题要求" in prompt
     assert "资料未涉及" in prompt
     assert "不要因部分子问题缺少资料而拒绝全部" in prompt

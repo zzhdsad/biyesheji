@@ -98,7 +98,7 @@ _STRONG_PATTERNS: dict[str, tuple[str, ...]] = {
 
 _WEAK_SIGNALS: dict[str, tuple[str, ...]] = {
     "herb": ("单味", "药对", "采收", "草药", "主治"),
-    "prescription": ("主治", "煎法", "服法", "汤剂"),
+    "prescription": ("主治", "煎法", "服法", "汤剂", "证型", "证候", "适应证"),
     "theory": ("概念", "原理", "机制", "关系", "基础"),
     "literature": ("经典", "著作", "年代"),
 }

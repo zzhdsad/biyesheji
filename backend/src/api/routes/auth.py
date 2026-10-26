@@ -77,6 +77,8 @@ async def login(
     user = await db.scalar(q)
     if user is None or not verify_password(payload.password, user.hashed_password):
         raise HTTPException(status_code=401, detail="用户名/邮箱或密码错误")
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="账号已禁用，请联系管理员")
 
     token = create_access_token(
         subject=user.id,

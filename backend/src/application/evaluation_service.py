@@ -27,6 +27,7 @@ TASK-009 扩展（中医问答评测体系 / Evaluation Baseline）：
   使 Baseline 与后续消融实验可在同一测试集下对比。
 """
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
@@ -78,6 +79,9 @@ ROUTER_FAILED_STRATEGY = "router_failed"
 # 这件事可追溯、可解释。
 EVAL_ALLOW_RETRY = True
 ONLINE_STREAM_ALLOW_RETRY = False
+
+# 参考答案草稿：去掉模型输出的引用标记，避免标准答案被 [citation: 1, 2] 污染
+_CITATION_MARKER = re.compile(r"\[citation:\s*\d+\s*(?:,\s*[^\]\s]+\s*)?\]", re.IGNORECASE)
 
 # BUG-023：列表分页默认值与上限。默认值沿用原先硬编码的 100 / 200，行为不变，
 # 新增分页参数后可避免「只返回前 N 条且无法翻页」。
@@ -266,6 +270,67 @@ class EvaluationService:
         await self.db.commit()
         await self.db.refresh(tc)
         return self._case_out(tc)
+
+    async def draft_golden_answer(self, case_id: uuid.UUID, max_contexts: int = 3) -> dict:
+        """用知识库为一条测试用例生成「参考答案草稿」，不落库、不自动确认。
+
+        目的：让 35 条待人工确认用例不必从零手写；但草稿仍必须由人核对知识库原文
+        后才能勾选「已人工确认」。接口返回 answer / golden_contexts / source_reference，
+        前端预填到确认弹窗，用户可改。若检索拒答或无命中，返回 usable=False，
+        绝不把拒答文案当成标准答案。
+        """
+        tc = await self.db.get(TestCase, case_id)
+        if tc is None:
+            raise NotFoundError("测试用例不存在")
+
+        answer, hits = await self.rag.retrieve_and_answer(
+            [tc.kb_id], tc.question
+        )
+        hits = [h for h in (hits or []) if isinstance(h, dict) and str(h.get("content") or "").strip()]
+        contexts: list[str] = []
+        for h in hits:
+            content = str(h.get("content") or "").strip()
+            if not content or content in contexts:
+                continue
+            contexts.append(content[:2000])
+        contexts = contexts[: max(1, min(max_contexts, 5))]
+
+        answer = _CITATION_MARKER.sub("", answer or "").strip()
+        answer = re.sub(r"[ \t]+", " ", answer)
+        answer = re.sub(r"\s+([。！？；：，、])", r"\1", answer)
+        answer = re.sub(r"\n{3,}", "\n\n", answer).strip()
+        usable = bool(answer) and bool(contexts) and not answer.startswith("根据现有资料，我无法")
+
+        source_bits: list[str] = []
+        for h in hits[: len(contexts)]:
+            name = (
+                h.get("doc_name")
+                or h.get("resource_name")
+                or h.get("document_id")
+                or "知识库片段"
+            )
+            bit = f"《{name}》" if name else "知识库片段"
+            title = str(h.get("title_path") or "").strip()
+            if title:
+                bit += f" · {title}"
+            page = h.get("page_num")
+            if page not in (None, "", 0, "0"):
+                bit += f" 第{page}页"
+            if bit not in source_bits:
+                source_bits.append(bit)
+
+        return {
+            "answer": answer if usable else "",
+            "golden_contexts": contexts,
+            "source_reference": "；".join(source_bits),
+            "evidence_count": len(hits),
+            "usable": usable,
+            "warning": (
+                ""
+                if usable
+                else "检索/生成没有得到可用草稿：请人工查找原文并填写，不能把空答案或拒答当成标准答案。"
+            ),
+        }
 
     @staticmethod
     def _case_out(tc: TestCase) -> dict:

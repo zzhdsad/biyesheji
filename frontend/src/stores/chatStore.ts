@@ -6,6 +6,7 @@ import {
   createKb as apiCreateKb,
   deleteAllConversations as apiDeleteAllConversations,
   deleteConversation as apiDeleteConversation,
+  deleteMessagesFrom,
   fetchConversations,
   fetchHealth,
   fetchKnowledgeBases,
@@ -40,6 +41,10 @@ interface ChatState {
   deleteConversation: (conversationId: string) => Promise<void>;
   deleteAllConversations: () => Promise<void>;
   sendMessage: (question: string) => Promise<void>;
+  /** 中止当前流式回答（客户端断开 SSE，保留已显示内容）。 */
+  abortStream: () => void;
+  /** 删除某条用户提问及其后的消息，并以同一会话重新提问。 */
+  editAndResend: (messageId: string, question: string) => Promise<boolean>;
   loadHealth: () => Promise<void>;
 }
 
@@ -75,6 +80,7 @@ function storeKbIds(ids: string[]): void {
  * 继续跑的流因按 assistantId 匹配不到消息而自然无副作用。
  */
 const conversationSeq = createRequestSeq();
+let activeStreamController: AbortController | null = null;
 
 export const useChatStore = create<ChatState>((set, get) => ({
   knowledgeBases: [],
@@ -195,6 +201,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (kbIds.length === 0) return; // 无知识库时拒绝发送
     if (get().sending) return; // 防止重复发送
 
+    const controller = new AbortController();
+    activeStreamController = controller;
+
     const userMsg: ChatMessage = {
       id: crypto.randomUUID(),
       role: 'user',
@@ -225,26 +234,29 @@ export const useChatStore = create<ChatState>((set, get) => ({
         '/api/v1/chat/ask-stream',
         { question, kb_ids: kbIds, conversation_id: currentConversationId },
         {
-          onStart: ({ conversation_id, query_analysis, router_decision }) => {
+          onStart: ({ conversation_id, user_message_id, query_analysis, router_decision }) => {
             // 阶段十一/十二：start 事件携带 Query 分析与路由决策（仅展示，不影响请求行为）
             // 过程状态：问题分析完成 → 后端开始检索知识库（searching）
             set((s) => ({
               currentConversationId: conversationSeq.isLatest(viewId)
                 ? conversation_id
                 : s.currentConversationId,
-              messages: s.messages.map((m) =>
-                m.id === assistantId
-                  ? {
-                      ...m,
-                      ...(query_analysis ? { queryAnalysis: query_analysis } : {}),
-                      ...(router_decision ? { routerDecision: router_decision } : {}),
-                      // 仅在仍处于 analyzing 时推进（防御乱序事件回拨阶段）
-                      ...(m.streamPhase === 'analyzing'
-                        ? { streamPhase: 'searching' as const }
-                        : {}),
-                    }
-                  : m,
-              ),
+              messages: s.messages.map((m) => {
+                // 用户消息本地 id 是临时 UUID；start 事件带回服务端持久化 id，
+                // 后续“编辑并重新提问”必须使用服务端 id 删除该轮消息。
+                if (m.id === userMsg.id && user_message_id) {
+                  return { ...m, id: user_message_id };
+                }
+                if (m.id !== assistantId) return m;
+                return {
+                  ...m,
+                  ...(query_analysis ? { queryAnalysis: query_analysis } : {}),
+                  ...(router_decision ? { routerDecision: router_decision } : {}),
+                  ...(m.streamPhase === 'analyzing'
+                    ? { streamPhase: 'searching' as const }
+                    : {}),
+                };
+              }),
             }));
           },
           onCitations: ({
@@ -344,23 +356,82 @@ export const useChatStore = create<ChatState>((set, get) => ({
             }));
           },
         },
+        controller.signal,
       );
     } catch {
-      // 网络错误等：占位消息兜底提示
-      set((s) => ({
-        messages: s.messages.map((m) =>
-          m.id === assistantId
-            ? { ...m, content: m.content || '请求失败，请稍后重试。', streamPhase: undefined }
-            : m,
-        ),
-        sending: false,
-      }));
+      // 用户主动停止：abortStream 已写入“已停止生成”，这里不再覆盖正文。
+      if (controller.signal.aborted) {
+        set((s) => ({
+          messages: s.messages.map((m) =>
+            m.id === assistantId && !m.content
+              ? { ...m, content: '已停止生成', streamPhase: undefined, cancelled: true }
+              : m.id === assistantId
+                ? { ...m, streamPhase: undefined, cancelled: true }
+                : m,
+          ),
+          sending: false,
+        }));
+      } else {
+        // 网络错误等：占位消息兜底提示
+        set((s) => ({
+          messages: s.messages.map((m) =>
+            m.id === assistantId
+              ? { ...m, content: m.content || '请求失败，请稍后重试。', streamPhase: undefined }
+              : m,
+          ),
+          sending: false,
+        }));
+      }
     } finally {
       // 阶段十六：流异常终止（既没收到 done 也没收到 error，例如连接被中断）时，
       // 必须恢复可发送状态，否则 sending 永久为 true，用户再也无法提问。
       // 已流式渲染出的内容保留，交由用户判断是否重发。
+      if (activeStreamController === controller) activeStreamController = null;
       set((s) => (s.sending ? { sending: false } : s));
     }
+  },
+
+  abortStream: () => {
+    const controller = activeStreamController;
+    if (!controller) return;
+    controller.abort();
+    set((s) => ({
+      sending: false,
+      messages: s.messages.map((m) => {
+        if (!m.streamPhase) return m;
+        return {
+          ...m,
+          streamPhase: undefined,
+          cancelled: true,
+          content: m.content || '已停止生成',
+        };
+      }),
+    }));
+  },
+
+  editAndResend: async (messageId, question) => {
+    if (get().sending) get().abortStream();
+    const state = get();
+
+    const index = state.messages.findIndex(
+      (m) => m.id === messageId && m.role === 'user',
+    );
+    if (index < 0) {
+      await get().sendMessage(question);
+      return true;
+    }
+
+    if (state.currentConversationId) {
+      try {
+        await deleteMessagesFrom(state.currentConversationId, messageId);
+      } catch {
+        return false;
+      }
+    }
+
+    set({ messages: state.messages.slice(0, index) });
+    await get().sendMessage(question);
+    return true;
   },
 
   loadHealth: async () => {

@@ -1,8 +1,8 @@
 # TASKS.md
 
-> 本文件是当前开发任务清单。
+> 本文件是历史任务清单与阶段记录；当前实现状态以代码、README、PRD、TECH_DESIGN 为准。
 > 开发前先阅读：PRD.md、BUSINESS_RULES.md、TECH_DESIGN.md、AGENTS.md、SYSTEM_MAP.md。
-> 本文件以实际代码现状为准，不重复开发已经完成的功能。
+> 本文件不重复描述已经完成的功能。
 
 ---
 
@@ -14,54 +14,24 @@
 
 当前系统已经完成：
 
-- 用户登录、JWT 认证
-- 用户角色与权限
-- 用户管理
-- 审计日志
-- 管理员仪表盘
-- 知识库 CRUD
-- 文档上传、解析、切分
-- 文档向量化
-- Milvus 检索
-- BGE-M3 Dense + Sparse 检索
-- RRF
-- Reranker
-- HyDE
-- LLM 流式回答
-- Citation
-- 多轮对话
-- Redis + PostgreSQL 历史记录
-- 拒答
-- 知识库权限过滤
-- SSE
-- 点赞/点踩
-- 基础 Evaluation
-- Docker 部署
-- 知识数据导入中心（扫描 / 字段映射 / 预览 / 导入任务）
-- 真实数据批次标识（dataset_name + import_batch_id + source_file）
+- 用户登录、JWT 认证、角色与权限、用户管理、审计日志、管理员仪表盘
+- 知识库 CRUD、成员与多态资源挂载、回收站
+- 文档上传、解析、切片、向量化、来源补标、重新向量化
+- 中药、方剂、中医理论、经典及现代文献管理
+- 分类、标签、普通关键词检索
+- 知识数据导入中心（扫描 / 字段映射 / 预览 / 导入任务 / 批次溯源）
 - 测试数据清理（按批次区分真实数据与手工测试数据）
+- RAG Baseline：HyDE、BGE-M3 Dense + Sparse、RRF、Reranker、Relevance Gate、Citation、多轮、SSE
+- 多来源证据展示、点赞/点踩
+- 研究增强：Query Analyzer、EntityResolver、Dynamic Router、KG Retrieval、Evidence Gate、Self Reflection
+- 评测：测试集、RAGAS 风格指标、实验归档、策略 / Gate / Reflection 消融
+- Docker 部署
 
-现有 RAG Baseline 已经完成。
+当前已知技术债（详见优化体检报告）：
 
-当前最大缺口：
-
-- 中药管理
-- 方剂管理
-- 中医理论管理
-- 经典及现代文献管理
-- 分类管理
-- 标签管理
-- 普通关键词搜索
-
-研究增强功能暂未实现：
-
-- Query Analyzer
-- Dynamic Router
-- Knowledge Graph / KG Retrieval
-- Evidence Gate
-- Self Reflection
-- 多来源证据分组展示
-- 检索策略日志
+- 多子问题已加入子问题清单与部分回答约束，但仍以 Prompt 为主，尚未逐子问题拆检索
+- 历史测试用例对软删除语义（DELETE=回收站 / purge=清理）的断言需要同步
+- 评测集与真实数据仍需持续补充
 
 ---
 

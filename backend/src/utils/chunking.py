@@ -23,6 +23,7 @@ class RawChunk:
     content: str
     title_path: str | None = None
     chunk_index: int = 0
+    page_num: int | None = None
 
 
 def estimate_tokens(text: str) -> int:

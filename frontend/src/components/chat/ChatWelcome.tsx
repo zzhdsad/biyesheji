@@ -196,15 +196,18 @@ export function ChatWelcome({
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: 6,
-                border: 'none',
                 cursor: disabled || !value.trim() ? 'not-allowed' : 'pointer',
                 padding: '6px 20px',
                 borderRadius: token.borderRadius,
                 fontSize: 14,
                 fontWeight: 500,
-                color: token.colorWhite,
+                color: disabled || !value.trim() ? token.colorTextSecondary : token.colorWhite,
                 background:
-                  disabled || !value.trim() ? token.colorBgContainer : token.colorPrimary,
+                  disabled || !value.trim() ? token.colorFillTertiary : token.colorPrimary,
+                border:
+                  disabled || !value.trim()
+                    ? `1px solid ${token.colorBorder}`
+                    : '1px solid transparent',
                 boxShadow: token.boxShadowTertiary,
                 opacity: disabled || !value.trim() ? 0.6 : 1,
               }}

@@ -13,6 +13,7 @@ import type {
   QueryAnalysis,
   RouterDecision,
   EvaluationRunItem,
+  EvalDraftAnswer,
   EvalTestCaseItem,
   EvalTestCaseOut,
   GateDecision,
@@ -176,6 +177,17 @@ export async function fetchMessages(conversationId: string): Promise<ChatMessage
   }));
 }
 
+/** 删除某条用户提问及其后的消息（编辑后重新提问前调用）。 */
+export async function deleteMessagesFrom(
+  conversationId: string,
+  messageId: string,
+): Promise<{ deleted_count: number }> {
+  const { data } = await api.delete<{ deleted_count: number }>(
+    `/chat/conversations/${conversationId}/messages/from/${messageId}`,
+  );
+  return data;
+}
+
 /** 删除历史会话（DELETE /chat/conversations/{id}，级联删除消息 + 清缓存）。 */
 export async function deleteConversation(conversationId: string): Promise<void> {
   await api.delete(`/chat/conversations/${conversationId}`);
@@ -201,6 +213,35 @@ export async function fetchDocuments(kbId?: string): Promise<DocumentItem[]> {
     params: kbId ? { kb_id: kbId } : {},
   });
   return data;
+}
+
+/** 单个文档详情（问答引用“定位来源”使用）。 */
+export async function fetchDocument(docId: string): Promise<DocumentItem> {
+  const { data } = await api.get<DocumentItem>(`/documents/${docId}`);
+  return data;
+}
+
+export interface DocumentPage {
+  items: DocumentItem[];
+  total: number;
+}
+
+/** 文档分页列表：不传 limit 仍返回全量；响应头 X-Total-Count 给出总数。 */
+export async function fetchDocumentsPage(
+  kbId?: string,
+  limit?: number,
+  offset?: number,
+): Promise<DocumentPage> {
+  const { data, headers } = await api.get<DocumentItem[]>('/documents', {
+    params: {
+      ...(kbId ? { kb_id: kbId } : {}),
+      ...(limit != null ? { limit } : {}),
+      ...(offset != null ? { offset } : {}),
+    },
+  });
+  const raw = headers['x-total-count'];
+  const total = raw != null ? Number(raw) : data.length;
+  return { items: data, total: Number.isFinite(total) ? total : data.length };
 }
 
 /** 上传时的来源可信度标注（credibility_level 不由前端传入，后端按类型自动推导）。 */
@@ -339,6 +380,14 @@ export async function confirmEvalTestCase(
   return data;
 }
 
+/** 用知识库生成参考答案草稿；只预填弹窗，不自动确认。 */
+export async function draftEvalAnswer(caseId: string): Promise<EvalDraftAnswer> {
+  const { data } = await api.post<EvalDraftAnswer>(
+    `/evaluation/test-cases/${caseId}/draft-answer`,
+  );
+  return data;
+}
+
 // ─────────────────────────── 反馈收集 ───────────────────────────
 // PRD §3.6 / §8：用户对助手消息点赞/踩 + 文本纠错意见
 
@@ -420,6 +469,21 @@ export interface TestConnectionResult {
 /** 获取当前模型配置（API key 已脱敏）。 */
 export async function fetchModelConfig(): Promise<ModelConfig> {
   const { data } = await api.get<ModelConfig>('/settings/model');
+  return data;
+}
+
+export interface PersistenceInfo {
+  mode: string;
+  host_dir: string;
+  uploads_dir: string;
+  container_uploads_dir: string;
+  services: Record<string, string>;
+  note: string;
+}
+
+/** 数据持久化状态（管理员）：宿主机数据目录与各服务路径。 */
+export async function fetchPersistenceInfo(): Promise<PersistenceInfo> {
+  const { data } = await api.get<PersistenceInfo>('/settings/persistence');
   return data;
 }
 

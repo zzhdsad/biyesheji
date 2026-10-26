@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   App,
   Button,
@@ -127,6 +127,7 @@ export default function LiteraturesPage() {
 
   // 筛选
   const [keyword, setKeyword] = useState('');
+  const initialQueryRef = useRef(false);
   const [categoryId, setCategoryId] = useState<string | undefined>(undefined);
   const [tagId, setTagId] = useState<string | undefined>(undefined);
 
@@ -204,7 +205,16 @@ export default function LiteraturesPage() {
   };
 
   useEffect(() => {
-    void loadLiteratures();
+    const overrides = !initialQueryRef.current
+      ? (() => {
+          initialQueryRef.current = true;
+          const kw = new URLSearchParams(window.location.search).get('keyword');
+          if (!kw) return undefined;
+          setKeyword(kw);
+          return { keyword: kw, categoryId: undefined, tagId: undefined, current: 1, pageSize };
+        })()
+      : undefined;
+    void loadLiteratures(overrides);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current, pageSize]);
 

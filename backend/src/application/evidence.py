@@ -187,6 +187,7 @@ def hit_to_evidence(hit: dict, source_index: int) -> dict:
         "era": hit.get("era"),
         "credibility_level": hit.get("credibility_level"),
         "source_kind": source_kind,
+        "kb_id": hit.get("kb_id"),
         "resource_type": resource_type,
         "resource_id": hit.get("resource_id") if is_resource else None,
         "resource_name": hit.get("resource_name") if is_resource else None,

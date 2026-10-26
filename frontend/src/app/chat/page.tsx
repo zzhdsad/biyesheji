@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { App, Input, Space, Tag, Tooltip, Typography, Button, Select } from 'antd';
-import { SendOutlined } from '@ant-design/icons';
+import { SendOutlined, StopOutlined } from '@ant-design/icons';
 import { AppLayout } from '@/components/layout/AppLayout';
 import { ChatHeaderRight } from '@/components/layout/AppSider';
 import { MessageItem } from '@/components/chat/MessageItem';
@@ -16,6 +16,8 @@ export default function ChatPage() {
   const {
     messages,
     sendMessage,
+    abortStream,
+    editAndResend,
     sending,
     selectedKbIds,
     knowledgeBases,
@@ -25,6 +27,7 @@ export default function ChatPage() {
     loadConversations,
   } = useChatStore();
   const [input, setInput] = useState('');
+  const [editingId, setEditingId] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const { message } = App.useApp();
 
@@ -61,7 +64,28 @@ export default function ChatPage() {
       return;
     }
     setInput('');
+    if (editingId) {
+      const ok = await editAndResend(editingId, text);
+      if (ok) {
+        setEditingId(null);
+      } else {
+        setInput(text);
+        message.error('修改失败：无法删除旧问答，请稍后重试');
+      }
+      return;
+    }
     await sendMessage(text);
+  };
+
+  const onEditMessage = (msg: { id: string; content: string }) => {
+    if (sending) abortStream();
+    setEditingId(msg.id);
+    setInput(msg.content);
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setInput('');
   };
 
   const canSend = hasKb && !sending;
@@ -129,7 +153,7 @@ export default function ChatPage() {
   ) : (
     <div style={{ maxWidth: 900, margin: '0 auto' }}>
       {messages.map((m) => (
-        <MessageItem key={m.id} message={m} />
+        <MessageItem key={m.id} message={m} onEdit={onEditMessage} />
       ))}
       <div ref={bottomRef} />
     </div>
@@ -139,39 +163,63 @@ export default function ChatPage() {
   const footer = isEmpty
     ? undefined
     : (() => (
-        <div style={{ maxWidth: 900, margin: '0 auto', display: 'flex', gap: 12 }}>
-          <Input.TextArea
-            value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder="输入问题，Enter 发送，Shift+Enter 换行"
-            autoSize={{ minRows: 1, maxRows: 4 }}
-            disabled={!hasKb}
-            // BUG-052：与后端 max_length 对齐，输入即限长（并显示计数）
-            maxLength={QUESTION_MAX_LENGTH}
-            showCount
-            onPressEnter={(e) => {
-              if (!e.shiftKey) {
-                e.preventDefault();
-                void handleSend();
-              }
-            }}
-          />
-          <Tooltip title={!hasKb ? kbEmptyHint || '请先创建知识库' : ''}>
-            <Button
-              type="primary"
-              icon={<SendOutlined />}
-              onClick={() => void handleSend()}
-              disabled={!canSend}
-              loading={sending}
-              style={
-                !canSend
-                  ? { opacity: 0.45, cursor: 'not-allowed', boxShadow: 'none' }
-                  : undefined
-              }
+        <div style={{ maxWidth: 900, margin: '0 auto' }}>
+          {editingId && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                marginBottom: 6,
+              }}
             >
-              发送
-            </Button>
-          </Tooltip>
+              <Tag color="cyan" style={{ margin: 0 }}>
+                正在编辑历史提问，发送后将截断该问及其后的回答
+              </Tag>
+              <Button type="link" size="small" onClick={cancelEdit}>
+                取消编辑
+              </Button>
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 12 }}>
+            <Input.TextArea
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="输入问题，Enter 发送，Shift+Enter 换行"
+              autoSize={{ minRows: 1, maxRows: 4 }}
+              disabled={!hasKb}
+              // BUG-052：与后端 max_length 对齐，输入即限长（并显示计数）
+              maxLength={QUESTION_MAX_LENGTH}
+              showCount
+              onPressEnter={(e) => {
+                if (!e.shiftKey) {
+                  e.preventDefault();
+                  void handleSend();
+                }
+              }}
+            />
+            {sending ? (
+              <Button danger icon={<StopOutlined />} onClick={abortStream}>
+                停止
+              </Button>
+            ) : (
+              <Tooltip title={!hasKb ? kbEmptyHint || '请先创建知识库' : ''}>
+                <Button
+                  type="primary"
+                  icon={<SendOutlined />}
+                  onClick={() => void handleSend()}
+                  disabled={!canSend}
+                  style={
+                    !canSend
+                      ? { opacity: 0.45, cursor: 'not-allowed', boxShadow: 'none' }
+                      : undefined
+                  }
+                >
+                  {editingId ? '重新提问' : '发送'}
+                </Button>
+              </Tooltip>
+            )}
+          </div>
         </div>
       ))();
 

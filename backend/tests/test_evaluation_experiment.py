@@ -275,6 +275,60 @@ async def test_confirm_test_case_enables_answer_correctness(eval_kb):
         assert r2[0].answer_correctness > 0.5
 
 
+async def test_draft_answer_strips_citations_and_does_not_confirm(eval_kb, monkeypatch):
+    """参考答案草稿：去掉引用标记、返回上下文/来源，但不自动写入或确认。"""
+    async with _session() as db:
+        svc = EvaluationService(db)
+        ids = await svc.save_test_set(
+            eval_kb,
+            [_case(f"草稿-{_SUFFIX}", question_type="herb")],
+            dataset_version="tcm-v1",
+        )
+        case_id = ids[0]
+
+        async def fake_retrieve(self, kb_ids, question, **kwargs):
+            return "黄芪补气 [citation: 1, 2]。", [
+                {
+                    "content": "黄芪味甘，性微温，功能补气升阳。",
+                    "doc_name": "中药资源库",
+                    "title_path": "黄芪",
+                    "page_num": 2,
+                }
+            ]
+
+        monkeypatch.setattr(RagService, "retrieve_and_answer", fake_retrieve)
+        out = await svc.draft_golden_answer(case_id)
+        assert out["usable"] is True
+        assert out["answer"] == "黄芪补气。"
+        assert out["golden_contexts"] == ["黄芪味甘，性微温，功能补气升阳。"]
+        assert "中药资源库" in out["source_reference"]
+        assert "第2页" in out["source_reference"]
+
+        tc = await db.get(EvalCase, case_id)
+        assert tc.needs_review is True
+        assert tc.golden_answer == ""
+
+
+async def test_draft_answer_refusal_is_not_usable(eval_kb, monkeypatch):
+    """检索拒答时不给空答案/拒答文案当标准答案。"""
+    async with _session() as db:
+        svc = EvaluationService(db)
+        ids = await svc.save_test_set(
+            eval_kb,
+            [_case(f"无资料-{_SUFFIX}", question_type="unanswerable")],
+            dataset_version="tcm-v1",
+        )
+
+        async def fake_retrieve(self, kb_ids, question, **kwargs):
+            return "根据现有资料，我无法回答该问题。", []
+
+        monkeypatch.setattr(RagService, "retrieve_and_answer", fake_retrieve)
+        out = await svc.draft_golden_answer(ids[0])
+        assert out["usable"] is False
+        assert out["answer"] == ""
+        assert out["warning"]
+
+
 # ── Baseline 实验归档 ───────────────────────────────────────────────────────
 
 

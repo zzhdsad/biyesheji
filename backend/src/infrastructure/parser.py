@@ -25,9 +25,25 @@ class BaseParser(ABC):
             ParseError: 解析失败或未提取出任何文本。
         """
 
+    def parse_pages(self, content: bytes, file_type: str) -> list[tuple[int | None, str]]:
+        """按页解析；默认退化为单页（page_num=None）。
+
+        支持页码的解析器（如 PDF 降级解析器）覆盖此方法，返回 1-based 页码。
+        """
+        return [(None, self.parse(content, file_type))]
+
 
 class DoclingParser(BaseParser):
     """Docling（IBM）：精准解析 PDF/DOCX 的表格、标题结构与阅读顺序。"""
+
+    def parse_pages(self, content: bytes, file_type: str) -> list[tuple[int | None, str]]:
+        """PDF 页码优先：Docling 导出 Markdown 不带稳定页码，PDF 用 pypdf 按页解析。
+
+        DOCX 等格式仍走 Docling + 单页（无页码语义）。
+        """
+        if file_type == "pdf":
+            return FallbackParser()._parse_pdf_pages(content)
+        return super().parse_pages(content, file_type)
 
     _converter = None  # 惰性单例：初始化耗时，避免重复构建
 
@@ -59,7 +75,13 @@ class DoclingParser(BaseParser):
 
 
 class FallbackParser(BaseParser):
-    """降级解析器：pypdf（PDF）/ python-docx（DOCX，可从 Heading 样式恢复标题层级）/ 直读（TXT）。"""
+    """降级解析器：pypdf（PDF，按页保留页码）/ python-docx（DOCX）/ 直读（TXT）。"""
+
+    def parse_pages(self, content: bytes, file_type: str) -> list[tuple[int | None, str]]:
+        """PDF 按页返回 (page_num, text)；其他格式退化为单页。"""
+        if file_type == "pdf":
+            return self._parse_pdf_pages(content)
+        return super().parse_pages(content, file_type)
 
     def parse(self, content: bytes, file_type: str) -> str:
         try:
@@ -67,7 +89,7 @@ class FallbackParser(BaseParser):
                 text = self._parse_pdf(content)
             elif file_type == "docx":
                 text = self._parse_docx(content)
-            else:  # txt
+            else:  # txt / md
                 text = self._decode_text(content)
             if not text.strip():
                 raise ParseError(
@@ -78,6 +100,22 @@ class FallbackParser(BaseParser):
             raise
         except Exception as exc:
             raise ParseError(f"解析失败：{exc}") from exc
+
+    @staticmethod
+    def _parse_pdf_pages(content: bytes) -> list[tuple[int, str]]:
+        from pypdf import PdfReader
+
+        reader = PdfReader(io.BytesIO(content))
+        pages: list[tuple[int, str]] = []
+        for index, page in enumerate(reader.pages, start=1):
+            text = (page.extract_text() or "").strip()
+            if text:
+                pages.append((index, text))
+        if not pages:
+            raise ParseError(
+                "未解析出文本内容：可能是扫描件 PDF，请上传可复制文本的版本"
+            )
+        return pages
 
     @staticmethod
     def _parse_pdf(content: bytes) -> str:

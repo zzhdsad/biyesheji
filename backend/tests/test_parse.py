@@ -1,13 +1,76 @@
 """文档解析功能测试。
 
-单元：无。切片逻辑见 test_chunking.py。
+单元：PDF 按页解析、切片 page_num 落库。
 集成（需 PostgreSQL）：上传自动解析、手动解析/失败重试、切片查询。
 """
+
+import io
+import uuid
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from src.core.config import settings
 from tests.test_upload import PG_AVAILABLE
+
+
+def test_fallback_pdf_parse_pages_keeps_page_number():
+    """PDF 降级解析器按页返回 1-based page_num（引用页码来源）。"""
+    canvas_mod = pytest.importorskip("reportlab.pdfgen.canvas")
+    from src.infrastructure.parser import FallbackParser
+
+    buf = io.BytesIO()
+    pdf = canvas_mod.Canvas(buf)
+    pdf.drawString(72, 720, "page one content")
+    pdf.showPage()
+    pdf.drawString(72, 720, "page two content")
+    pdf.save()
+
+    pages = FallbackParser().parse_pages(buf.getvalue(), "pdf")
+    assert [p[0] for p in pages] == [1, 2]
+    assert "page one" in pages[0][1]
+    assert "page two" in pages[1][1]
+
+
+@pytest.mark.anyio
+async def test_parse_service_writes_chunk_page_num():
+    """解析服务必须把 parse_pages 的页码写入 Chunk.page_num。"""
+    from src.application.parse_service import ParseService
+    from src.domain.models import Chunk, Document
+
+    doc = Document(
+        id=uuid.uuid4(),
+        kb_id=uuid.uuid4(),
+        file_name="a.pdf",
+        file_type="pdf",
+        storage_path="a.pdf",
+        parse_status="pending",
+    )
+
+    class _Parser:
+        def parse_pages(self, content, file_type):
+            return [
+                (1, "第一页内容。" * 40),
+                (2, "第二页内容。" * 40),
+            ]
+
+    class _Storage:
+        def load(self, path):
+            return b"fake"
+
+    db = MagicMock()
+    db.get = AsyncMock(return_value=doc)
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    db.add = MagicMock()
+
+    await ParseService(db, storage=_Storage(), parser=_Parser()).run(doc.id)
+
+    chunks = [call.args[0] for call in db.add.call_args_list if isinstance(call.args[0], Chunk)]
+    assert chunks
+    assert {c.page_num for c in chunks} == {1, 2}
+    assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
 
 
 def _make_kb(client, visibility: str = "private") -> str:

@@ -1,8 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Collapse, Segmented, Spin, Tag, Tooltip, Typography, theme } from 'antd';
-import { FileTextOutlined, GlobalOutlined } from '@ant-design/icons';
+import { Collapse, Segmented, Spin, Tag, Tooltip, Typography, theme, Button } from 'antd';
+import { FileTextOutlined, GlobalOutlined, LinkOutlined } from '@ant-design/icons';
 import type { Citation, Evidence, EvidenceGroup, EvidenceLevel } from '@/types';
 import { credibilityColor } from '@/constants/source';
 import {
@@ -13,6 +13,7 @@ import {
   displayRelevanceScore,
   formatSourceName,
   normalizeEvidenceGroups,
+  sourceHref,
   summarizeEvidence,
 } from '@/utils/evidence';
 import { getEvidenceTranslation, needsTranslation } from '@/utils/translation';
@@ -142,6 +143,7 @@ function EvidenceContent({
 /** 证据卡片头部：来源编号 · 来源名称（书名号化）· 分类 · Level · 相关度。 */
 function cardLabel(ev: Evidence, token: ReturnType<typeof theme.useToken>['token']): ReactNode {
   const level = ev.evidence_level ?? 'insufficient';
+  const href = sourceHref(ev);
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
       <Tag color="blue" style={{ margin: 0, fontWeight: 500 }}>
@@ -156,6 +158,19 @@ function cardLabel(ev: Evidence, token: ReturnType<typeof theme.useToken>['token
       <LevelTag level={level} />
       {ev.page_num != null && ev.page_num > 0 && (
         <Text type="secondary">第 {ev.page_num} 页</Text>
+      )}
+      {href && (
+        <Button
+          type="link"
+          size="small"
+          icon={<LinkOutlined />}
+          href={href}
+          target="_blank"
+          rel="noreferrer"
+          style={{ padding: 0, height: 'auto', fontSize: 12 }}
+        >
+          定位来源
+        </Button>
       )}
       {ev.source_type && (
         <Tag
@@ -208,12 +223,15 @@ export function EvidencePanel({
   groups: backendGroups,
   activeKey,
   onChange,
+  streaming = false,
 }: {
   citations: Citation[];
   /** 后端下发的 evidence_groups（/ask-stream citations 事件）。 */
   groups?: EvidenceGroup[];
   activeKey: string[];
   onChange: (keys: string[]) => void;
+  /** 生成中：此时列表是候选证据，done 后会收敛为正文实际引用。 */
+  streaming?: boolean;
 }) {
   // 优先使用后端下发的 evidence_groups（group_evidence 已按 relevance_score
   // 量纲算好 max_score / evidence_level，与 per-citation 一致），避免前端重复
@@ -235,8 +253,8 @@ export function EvidencePanel({
   return (
     <div style={{ marginTop: 8 }}>
       <Text type="secondary" style={{ fontSize: 12, marginLeft: 4 }}>
-        引用来源 · {summary.source_count} 个来源 / {summary.evidence_count} 条证据
-        （点击展开原文）
+        {streaming ? '候选证据' : '引用来源'} · {summary.source_count} 个来源 / {summary.evidence_count} 条证据
+        {streaming ? '（生成中，最终引用以完成结果为准）' : '（点击展开原文）'}
       </Text>
       {groups.map((group) => (
         <div key={group.group_key} style={{ marginTop: 6 }}>

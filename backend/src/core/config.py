@@ -9,6 +9,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # 仅用于本地开发/测试的默认密钥；生产环境必须经环境变量 SECRET_KEY 覆盖，
 # 否则启动即失败（BUG-026：固定密钥可被用于伪造 JWT）。
 DEV_DEFAULT_SECRET_KEY = "hfimJesB4aztr41rt3zgnBWKgyY7VIgq5C0LmNoUCSHnUCicRImiHt-_wDpmmbYN"
+# .env.example / 常见教程占位值：生产环境同样必须拒绝，否则“复制模板”即可上线弱密钥
+WEAK_SECRET_KEYS = frozenset({
+    "change-me-in-production",
+    "change-me",
+    "changeme",
+    "secret",
+    "password",
+    "admin",
+})
 
 
 class Settings(BaseSettings):
@@ -127,6 +136,8 @@ class Settings(BaseSettings):
 
     # 文档
     UPLOAD_DIR: str = "uploads"
+    # 宿主机数据目录（前端展示 / 备份说明；容器内实际路径为 UPLOAD_DIR）
+    HOST_DATA_DIR: str = "./docker-data"
     MAX_FILE_SIZE_MB: int = 50  # BUSINESS_RULES §4：默认 50MB（可配置）
 
     # 解析 / 切片（TECH_DESIGN：结构感知切片，512~1024 tokens，overlap 50~100）
@@ -162,12 +173,18 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_production_secret(self) -> "Settings":
-        """生产环境禁止使用内置默认密钥（否则任何人都能签发管理员 JWT）。"""
-        if self.ENV == "prod" and self.SECRET_KEY == DEV_DEFAULT_SECRET_KEY:
-            raise ValueError(
-                "生产环境（ENV=prod）必须通过环境变量 SECRET_KEY 配置独立随机密钥，"
-                "禁止使用内置默认值"
-            )
+        """生产环境禁止使用默认/占位/过短密钥（否则任何人都能签发管理员 JWT）。"""
+        if self.ENV == "prod":
+            secret = (self.SECRET_KEY or "").strip()
+            if (
+                secret == DEV_DEFAULT_SECRET_KEY
+                or secret.lower() in WEAK_SECRET_KEYS
+                or len(secret) < 32
+            ):
+                raise ValueError(
+                    "生产环境（ENV=prod）必须通过环境变量 SECRET_KEY 配置独立随机密钥"
+                    "（至少 32 字符，禁止内置默认值 / change-me-in-production 等占位值）"
+                )
         return self
 
 

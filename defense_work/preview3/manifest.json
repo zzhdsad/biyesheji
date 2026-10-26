@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "backend": "native",
+  "rasterEngine": "libreoffice",
+  "source": "saved",
+  "inputPath": "C:\\biyesheji-3.0.0\\答辩准备手册_中医药知识资源管理与智能问答系统.docx",
+  "sourceSha256": "a88f72e2e32a8e95e73ac951fe3c676d1079e74836fa4b234d3d62a699efd4d3",
+  "dpi": 120,
+  "pageCount": 26,
+  "images": [
+    {
+      "index": 1,
+      "page": 1,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\preview3\\page-0001.png",
+      "width": 993,
+      "height": 1404,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 106218
+    },
+    {
+      "index": 2,
+      "page": 2,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\preview3\\page-0002.png",
+      "width": 993,
+      "height": 1404,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 156394
+    },
+    {
+      "index": 3,
+      "page": 3,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\preview3\\page-0003.png",
+      "width": 993,
+      "height": 1404,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 251509
+    },
+    {
+      "index": 4,
+      "page": 4,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\preview3\\page-0004.png",
+      "width": 993,
+      "height": 1404,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 207568
+    },
+    {
+      "index": 5,
+      "page": 8,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\preview3\\page-0005.png",
+      "width": 993,
+      "height": 1404,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 93334
+    },
+    {
+      "index": 6,
+      "page": 12,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\preview3\\page-0006.png",
+      "width": 993,
+      "height": 1404,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 201884
+    },
+    {
+      "index": 7,
+      "page": 20,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\preview3\\page-0007.png",
+      "width": 993,
+      "height": 1404,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 228734
+    },
+    {
+      "index": 8,
+      "page": 25,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\preview3\\page-0008.png",
+      "width": 993,
+      "height": 1404,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 137476
+    }
+  ],
+  "missingFonts": [
+    "Courier"
+  ]
+}

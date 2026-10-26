@@ -64,6 +64,8 @@ export interface Citation {
    * kg（阶段十三知识图谱关系证据，后端 application/evidence.py 三值之一）。
    */
   source_kind?: 'document' | 'resource' | 'kg';
+  /** 文档所属知识库（来源定位链接用；历史数据可能为空） */
+  kb_id?: string | null;
   /** 证据等级：high / medium / insufficient */
   evidence_level?: EvidenceLevel;
   /** Resource 专属：资源细分类型 */
@@ -269,6 +271,8 @@ export interface ChatMessage {
   streamDuration?: number;
   /** 流式开始时间戳（performance.now）：用于计算 streamDuration */
   streamStartTime?: number;
+  /** 用户主动停止生成（保留已显示正文，UI 标记“已停止生成”） */
+  cancelled?: boolean;
 }
 
 export interface KnowledgeBase {
@@ -434,6 +438,16 @@ export interface EvalTestCaseOut extends EvalTestCaseItem {
   needs_review: boolean;
   source_reference: string;
   created_at: string | null;
+}
+
+/** 参考答案草稿（POST /evaluation/test-cases/{id}/draft-answer）。 */
+export interface EvalDraftAnswer {
+  answer: string;
+  golden_contexts: string[];
+  source_reference: string;
+  evidence_count: number;
+  usable: boolean;
+  warning: string;
 }
 
 /** 按问题类型分组的指标。 */

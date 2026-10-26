@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "backend": "native",
+  "rasterEngine": "pdfium",
+  "source": "saved",
+  "inputPath": "C:\\biyesheji-3.0.0\\defense_work\\margin_test.pdf",
+  "sourceSha256": "d4f1fc0a7537661435b4240556a0fb7c7be1608ccaa16dbe304b2cb2f6604390",
+  "dpi": 120,
+  "pageCount": 1,
+  "images": [
+    {
+      "index": 1,
+      "page": 1,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\margin_pdf_preview\\page-0001.png",
+      "width": 993,
+      "height": 1404,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 178436
+    }
+  ],
+  "missingFonts": []
+}

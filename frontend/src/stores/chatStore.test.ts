@@ -134,6 +134,7 @@ function standardFlow(overrides: {
       'start',
       {
         conversation_id: 'conv-1',
+        user_message_id: 'user-server-1',
         query_analysis: { question_type: 'herb', question_type_label: '中药', analyzer_version: 'analyzer-v3' },
         router_decision: { strategy_name: 'herb_focused', router_version: 'rule-v2' },
       },
@@ -240,6 +241,11 @@ describe('阶段十六：chatStore 正常问答链路', () => {
     assert.equal(assistant.queryAnalysis?.question_type, 'herb');
     assert.equal(assistant.queryAnalysis?.question_type_label, '中药');
     assert.equal(assistant.routerDecision?.strategy_name, 'herb_focused');
+    // start 事件带回服务端用户消息 id，供“编辑后重问”精确截断
+    assert.equal(
+      lastState().messages.find((m) => m.role === 'user')?.id,
+      'user-server-1',
+    );
   });
 
   it('citations 事件写入 evidence / groups / summary / kgEvidence / evidenceGate', async () => {
@@ -537,6 +543,44 @@ describe('阶段十六：Self Reflection 三种决策的前端落地', () => {
 });
 
 describe('阶段十六：错误、中断与状态恢复', () => {
+  it('abortStream 中止流式回答并标记已停止生成', async () => {
+    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
+    (globalThis as unknown as { fetch: unknown }).fetch = async (
+      _url: string,
+      init: { signal?: AbortSignal },
+    ) => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          streamController = controller;
+          controller.enqueue(
+            new TextEncoder().encode(
+              'event: start\ndata: {"conversation_id":"c1","user_message_id":"u1"}\n\n',
+            ),
+          );
+          init.signal?.addEventListener('abort', () => {
+            try {
+              controller.error(new Error('aborted'));
+            } catch {
+              // 流已关闭
+            }
+          });
+        },
+      });
+      return { ok: true, status: 200, body: stream };
+    };
+
+    const sending = chatStore.getState().sendMessage('问题');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    chatStore.getState().abortStream();
+    await sending;
+
+    const assistant = assistantMessages()[0];
+    assert.equal(assistant.cancelled, true);
+    assert.equal(assistant.streamPhase, undefined);
+    assert.equal(lastState().sending, false);
+    assert.ok(streamController);
+  });
+
   it('SSE error 事件：写入失败提示并结束 sending', async () => {
     mockFetch(
       flow([

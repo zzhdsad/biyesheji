@@ -127,13 +127,14 @@ REVISION_SYSTEM_PROMPT = (
     "1. 不得引入资料之外的任何事实、数字、结论或医疗建议；不得用自己的知识补答。\n"
     "2. 资料没有直接支持的内容必须删除；宁可少答，不可多答。\n"
     "3. 不得把图谱中的“共享标签/相关”关系扩展为功效、主治、用药等医学结论。\n"
-    "4. 每个来自资料的句子末尾必须标注来源 [citation: 编号, 页码]，编号即资料前的方括号编号。\n"
+    "4. 每个来自资料的句子末尾必须标注来源 [citation: 编号, N]，N 为资料标注的页码数字（无页码写 0），"
+    "不要把 N 或「页码」两个字照抄；编号即资料前的方括号编号。\n"
     "5. 若资料不足以支撑任何结论，直接回答：根据现有资料，我无法回答该问题。\n"
     "6. 只输出重写后的答案正文，不要说明你的修改过程。"
 )
 
 _JSON_BLOCK = re.compile(r"\{.*\}", re.DOTALL)
-_CITATION_PATTERN = re.compile(r"\[citation:\s*(\d+)\s*(?:,\s*(\d+)\s*)?\]", re.IGNORECASE)
+_CITATION_PATTERN = re.compile(r"\[citation:\s*(\d+)\s*(?:,\s*([^\]\s]+)\s*)?\]", re.IGNORECASE)
 _SENTENCE_SPLIT = re.compile(r"[。！？!?\n]+")
 _PUNCT = re.compile(r"[\s，,。！？；;：:、“”‘’（）()\[\]【】《》\-—…·\"'0-9]+")
 
@@ -382,7 +383,8 @@ def build_revision_messages(question: str, evidence: list[dict], answer: str) ->
         blocks.append(f"[{n}] {ev.get('source_label') or ev.get('source_kind') or ''} "
                       f"{ev.get('source_name') or ''}\n{ev.get('evidence_text') or ev.get('content') or ''}")
     user = (
-        f"问题：{question}\n\n资料（编号即来源标识，引用时标注 [citation: 编号, 页码]）：\n"
+        f"问题：{question}\n\n资料（编号即来源标识；引用格式 [citation: 编号, N]，"
+        "N 为资料标注的页码数字，无页码写 0）：\n"
         + ("\n\n".join(blocks) if blocks else "（无）")
         + f"\n\n待复核的草稿答案：\n{answer}\n\n"
         "请只依据上述资料重写一段更保守的答案（不得新增资料之外的信息）。"

@@ -52,8 +52,17 @@ class ParseService:
         # CPU/IO 密集部分放线程池，避免阻塞事件循环
         try:
             content = await asyncio.to_thread(self.storage.load, doc.storage_path)
-            md = await asyncio.to_thread(self.parser.parse, content, doc.file_type)
-            raw_chunks = await asyncio.to_thread(chunk_document, md)
+            pages = await asyncio.to_thread(
+                self.parser.parse_pages, content, doc.file_type
+            )
+            raw_chunks = []
+            for page_num, page_text in pages:
+                for rc in chunk_document(page_text):
+                    rc.page_num = page_num
+                    raw_chunks.append(rc)
+            # 页码内切片序号从 0 开始，合并后必须重排为全局 chunk_index
+            for idx, rc in enumerate(raw_chunks):
+                rc.chunk_index = idx
         except ParseError as exc:
             await self._mark_failed(doc.id, str(exc))
             raise AppException(422, str(exc)) from exc
@@ -73,7 +82,7 @@ class ParseService:
                     content=rc.content,
                     token_count=estimate_tokens(rc.content),
                     title_path=rc.title_path,
-                    # page_num 待 Docling 页码映射（TODO: 下个迭代）
+                    page_num=rc.page_num,
                     # 来源可信度冗余自文档，保证重新解析后与 documents 一致
                     source_type=doc.source_type,
                     credibility_level=doc.credibility_level,

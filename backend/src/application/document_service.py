@@ -19,8 +19,9 @@ from src.core.source_meta import (
 from src.domain.models import Document, KnowledgeBase, User
 from src.infrastructure.storage import BaseStorage, get_storage
 
-# BUSINESS_RULES §4 支持格式：PDF/DOCX/PPTX/XLSX/TXT/MD/HTML/CSV
-ALLOWED_EXTENSIONS = {"pdf", "docx", "pptx", "xlsx", "txt", "md", "html", "csv"}
+# 当前解析器实际支持：PDF / DOCX / TXT / MD（与前端 accept 保持一致）
+# PPTX/XLSX 需要 Docling；为避免“上传成功但入库乱码”，暂不开放。
+ALLOWED_EXTENSIONS = {"pdf", "docx", "txt", "md"}
 
 
 class DocumentService:
@@ -66,7 +67,7 @@ class DocumentService:
         filename = file.filename or ""
         suffix = Path(filename).suffix.lstrip(".").lower()
         if suffix not in ALLOWED_EXTENSIONS:
-            raise AppException(400, f"不支持的文件类型 .{suffix}，仅支持 PDF/DOCX/PPTX/XLSX/TXT/MD/HTML/CSV")
+            raise AppException(400, f"不支持的文件类型 .{suffix}，仅支持 PDF/DOCX/TXT/MD")
 
         # 2. 大小校验（先落盘到临时文件，read 进内存判断；超大文件分片上传见 PRD 8）
         content = await file.read()

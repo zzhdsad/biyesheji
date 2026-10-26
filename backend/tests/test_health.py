@@ -11,7 +11,7 @@ def test_health_returns_200_with_components() -> None:
     assert resp.status_code == 200
     data = resp.json()
     assert "components" in data
-    for name in ("postgres", "redis"):
+    for name in ("postgres", "redis", "milvus"):
         assert data["components"][name] in ("ok", "unavailable")
     # BUG-029：status 如实反映依赖状态（旧实现恒为 ok，组件全挂也谎报健康）
     all_ok = all(v == "ok" for v in data["components"].values())

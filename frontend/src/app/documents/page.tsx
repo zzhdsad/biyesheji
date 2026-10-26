@@ -24,7 +24,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import type { RcFile, UploadFile } from 'antd/es/upload';
 import type { DocumentItem, ParseStatus, SourceEra, SourceType } from '@/types';
-import { uploadDocument } from '@/services/api';
+import { fetchDocument, uploadDocument } from '@/services/api';
 import { isParsing, useDocumentStore } from '@/stores/documentStore';
 import {
   CREDIBILITY_MAP,
@@ -76,6 +76,9 @@ export default function DocumentsPage() {
     selectKb,
     loadKnowledgeBases,
     documents,
+    total,
+    page,
+    pageSize,
     loading,
     loadDocuments,
     removeDocument,
@@ -85,6 +88,7 @@ export default function DocumentsPage() {
     clearError,
   } = useDocumentStore();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
+  const [focusDoc, setFocusDoc] = useState<DocumentItem | null>(null);
   // 本批上传的来源标注（作用于随后选择的所有文件；credibility 只读、由类型带出）
   const [sourceType, setSourceType] = useState<SourceType | null>(null);
   const [era, setEra] = useState<SourceEra | null>(null);
@@ -92,12 +96,21 @@ export default function DocumentsPage() {
 
   // 初始化：加载知识库，并按 URL ?kb_id= 预选（来自「管理文档」跳转）
   useEffect(() => {
-    const qKb = new URLSearchParams(window.location.search).get('kb_id');
+    const params = new URLSearchParams(window.location.search);
+    const qKb = params.get('kb_id');
+    const qDoc = params.get('doc_id');
     void loadKnowledgeBases().then(() => {
       if (qKb) {
         selectKb(qKb);
       } else {
         void loadDocuments();
+      }
+      if (qDoc) {
+        void fetchDocument(qDoc)
+          .then(setFocusDoc)
+          .catch(() => {
+            // 无权限或已删除：不阻断列表
+          });
       }
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -335,13 +348,47 @@ export default function DocumentsPage() {
         />
       )}
 
+      {focusDoc && (
+        <Alert
+          type="info"
+          showIcon
+          closable
+          style={{ marginBottom: 12 }}
+          message={`已定位到引用来源文档：${focusDoc.file_name}`}
+          description="可在下方表格中重新解析、重新向量化或删除该文档。"
+          onClose={() => setFocusDoc(null)}
+          action={
+            <Button
+              danger
+              size="small"
+              onClick={async () => {
+                await removeDocument(focusDoc.id);
+                setFocusDoc(null);
+              }}
+            >
+              删除文档
+            </Button>
+          }
+        />
+      )}
+
       <Table
         rowKey="id"
         size="middle"
         columns={columns}
         dataSource={documents}
         loading={loading}
-        pagination={{ pageSize: 10, showSizeChanger: true }}
+        rowClassName={(record) =>
+          focusDoc && record.id === focusDoc.id ? 'source-focus-row' : ''
+        }
+        pagination={{
+          current: page,
+          pageSize,
+          total,
+          showSizeChanger: true,
+          showTotal: (n) => `共 ${n} 篇`,
+          onChange: (nextPage, nextSize) => void loadDocuments(nextPage, nextSize),
+        }}
         locale={{ emptyText: selectedKbId ? '该知识库暂无文档' : '请选择知识库查看文档' }}
       />
     </AppLayout>

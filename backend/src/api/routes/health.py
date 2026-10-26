@@ -1,11 +1,14 @@
 """健康检查路由（唯一免鉴权端点）。"""
 
+import asyncio
+
 from fastapi import APIRouter
 from loguru import logger
 from sqlalchemy import text
 
 from src.core.config import settings
 from src.infrastructure.database import get_engine
+from src.infrastructure.milvus_store import get_vector_store
 
 router = APIRouter(tags=["health"])
 
@@ -52,6 +55,15 @@ async def health() -> dict:
                 await client.aclose()
             except Exception as exc:  # noqa: BLE001  关闭失败仅记日志，不影响响应
                 logger.warning(f"健康检查：Redis 连接关闭失败（{exc}）")
+
+    # Milvus（向量检索不可用时仍允许进程存活，但 status=degraded）
+    try:
+        store = get_vector_store()
+        await asyncio.wait_for(asyncio.to_thread(store.health), timeout=1.0)
+        components["milvus"] = "ok"
+    except Exception as exc:
+        components["milvus"] = "unavailable"
+        logger.warning(f"健康检查：Milvus 不可用（{exc}）")
 
     all_ok = bool(components) and all(v == "ok" for v in components.values())
     return {

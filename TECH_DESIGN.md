@@ -50,6 +50,8 @@ Browser
 | 知识资源 | `herbs`、`prescriptions`、`prescription_ingredients`、`theories`、`literatures` |
 | 分类 / 标签 | `categories`、`tags` 与四类 `*_tags` 关联表 |
 | 会话 / 评测 / KG | `conversations`、`messages`、`feedbacks`；`test_cases`、`evaluation_runs`、`evaluation_results`；`kg_nodes`、`kg_edges` |
+
+历史兼容列：`documents.progress_percent`、`evaluation_results.faithfulness` 由迁移 `c185a0406aa3` 保留；ORM 已同步声明但业务不使用，避免 Alembic autogenerate 持续报 drift。
 | 配置 / 审计 | `model_configs`、`system_configs`、`audit_logs` |
 
 实现约定：
@@ -100,9 +102,9 @@ upload → documents(pending) → parse(parsing) → chunks → BGE-M3(dense+spa
 → Milvus → documents(completed)
 ```
 
-- 支持 PDF / DOCX / PPTX / XLSX / TXT / MD / HTML / CSV；大小走运行时配置；文件存本地或 MinIO，key 为 `{kb_id}/{doc_id}.{ext}`。
+- 支持 PDF / DOCX / TXT / MD；大小走运行时配置；文件存本地或 MinIO，key 为 `{kb_id}/{doc_id}.{ext}`。
 - 解析：Docling 为主，失败降级 pypdf / python-docx / 文本直读；扫描件无法提取文本时置 `failed` 并写 `error_message`。
-- 切片：按 Markdown 标题层级分节，再按段落 / 句子滑动窗口切分；默认 768 tokens、overlap 100、min 32；CJK 约 1 字符 1 token，其他约 4 字符 1 token。Chunk 保存 `title_path`、`token_count`、来源类型与可信度。
+- 切片：按 Markdown 标题层级分节，再按段落 / 句子滑动窗口切分；默认 768 tokens、overlap 100、min 32；CJK 约 1 字符 1 token，其他约 4 字符 1 token。Chunk 保存 `title_path`、`token_count`、来源类型与可信度；PDF 使用 pypdf 按页提取 1-based `page_num`（安装 Docling 时也优先页码），DOCX 无页码语义。
 - 状态：`pending/parsing/success/failed/completed`；`success` 为切片就绪，`completed` 为向量已写入 Milvus。
 - 异步：默认 FastAPI `BackgroundTasks`，`parse_runner` / `index_runner` 在新事件循环中执行并创建独立 DB engine，向量化全局信号量限流；`PARSE_BACKEND=celery` 时走 Celery（需另装并启动 worker）。
 - 重新解析先删旧 Chunk 再重写；重新向量化用 `replace_doc` 幂等替换。
@@ -157,7 +159,7 @@ Query → QueryAnalyzer → EntityResolver → DynamicRouter → HyDE
 
 ### 8.4 生成、引用与 Reflection
 
-- Prompt = 系统约束 + 最近历史 + 带编号证据 + 用户问题；模型只依据证据回答，格式含 `[citation: 编号, 页码]`；Citation 从答案编号映射，越界 / 无法对应时不生成假引用。多子问题 Prompt 要求逐条回答，未知部分写「资料未涉及」，不因部分缺失而整体拒答。
+- Prompt = 系统约束 + 最近历史 + 带编号证据 + 用户问题；模型只依据证据回答，格式含 `[citation: 编号, 页码数字]`（无页码写 0）；模型误写「页码」占位词时仍按编号解析、页码以命中为准。Citation 从答案编号映射，越界 / 无法对应时不生成假引用。多子问题 Prompt 要求逐条回答，未知部分写「资料未涉及」，不因部分缺失而整体拒答。
 - Gate retry 在 citations 下发前执行，同步 / 流式均可用；Reflection retry 仅非流式。流式路径生成前已下发 citations，只允许 `accept` / `revise`，最终答案以 `done.answer` 为准。
 - Reflection 检查 Gate 拒答绕过、事实支撑、引用完整 / 越界、无依据句子、KG 弱关系扩展、多来源覆盖；结果 `accept/revise/retry`。默认规则优先，可选 LLM 检查默认关闭；revise / retry 各最多一次；异常保留原答案并记录兜底。
 - 证据原文保持数据库文本；英文原文可调用 `/chat/evidence/translate` 生成 AI 中文翻译，译文标记为 AI 翻译，不写回原文。
@@ -166,8 +168,9 @@ Query → QueryAnalyzer → EntityResolver → DynamicRouter → HyDE
 
 - 用户 / 助手消息写入 `messages`，引用 JSON 写入 `messages.citations`；Redis 追加历史并裁剪。
 - SSE 顺序：`start → citations → delta×N → done`；异常用 `error` 替代 `done`。
-- `start` 含 `conversation_id/query_analysis/router_decision`；`citations` 含 `citations/evidence/evidence_groups/evidence_summary/kg_evidence/evidence_gate`；`delta` 含 `content`；`done` 含 `conversation_id/message_id/answer/citations/evidence/evidence_groups/evidence_summary/kg_evidence/reflection`。`citations` 事件是生成前候选，`done.citations` 只含正文实际引用的来源。
+- `start` 含 `conversation_id/user_message_id/query_analysis/router_decision`；`citations` 含 `citations/evidence/evidence_groups/evidence_summary/kg_evidence/evidence_gate`；`delta` 含 `content`；`done` 含 `conversation_id/message_id/answer/citations/evidence/evidence_groups/evidence_summary/kg_evidence/reflection`。`citations` 事件是生成前候选，`done.citations` 只含正文实际引用的来源。
 - SSE 外层加注释帧心跳（默认 15s）和总超时（默认 900s）；同步接口返回同一套字段。
+- 前端“停止”通过 AbortController 断开 fetch；服务端在下一次事件前检查 `request.is_disconnected()`，断开后不再生成/持久化完整回答。编辑提问调用 `DELETE /chat/conversations/{id}/messages/from/{message_id}` 截断该轮及之后消息，再以同一会话重新提问。
 
 ## 9. 研究增强模块
 
@@ -231,7 +234,7 @@ Query → QueryAnalyzer → EntityResolver → DynamicRouter → HyDE
 | `/kg` `/evaluation` `/feedbacks` | 知识图谱、评测、用户反馈 |
 | `/settings` | 模型配置、Embedding 状态 / 重建、系统参数 |
 
-兼容性：新增字段均为加法，旧 Citation 字段保持；SSE 事件名与顺序不变；`citations` 承载证据与 Gate，`done` 承载最终答案与 Reflection。
+兼容性：新增字段均为加法，旧 Citation 字段保持；SSE 事件名与顺序不变；`citations` 承载证据与 Gate，`done` 承载最终答案与 Reflection。`GET /documents` 支持可选 `limit` / `offset`，响应头 `X-Total-Count` 给出过滤后总数；不传 `limit` 仍全量返回。
 
 ## 11. 前端实现
 
@@ -239,12 +242,16 @@ Query → QueryAnalyzer → EntityResolver → DynamicRouter → HyDE
 - `next.config.mjs` 将 `/api/:path*` 与 `/health` rewrite 到 `BACKEND_URL`；`app/api/v1/chat/ask-stream/route.ts` 用 Route Handler 转发 SSE（避免 Next rewrites 缓冲），透传 Authorization 与状态码。
 - `useSSE` 用 `fetch` POST + ReadableStream 解析事件；401 清 token 跳登录。证据面板优先用后端 `evidence_groups`，历史消息缺失时按 Citation 本地分组；相关度优先 dense `relevance_score`，缺失回退 score。
 - 主题使用 Ant Design ConfigProvider + `themeStore`，默认科幻暗色，支持亮 / 暗 / 跟随系统；`EntryAnimation` 首次进入播放 CSS 过场；`useUiZoom` 提供 70%–160% 缩放按钮与 Ctrl + 滚轮。
+- 问答支持 `AbortController` 停止流式生成；用户消息可“编辑后重问”，后端 `DELETE /chat/conversations/{id}/messages/from/{message_id}` 截断该轮及后续消息；`start` 事件返回 `user_message_id` 供前端精确定位。
+- 引用卡片按 `source_kind` 生成“定位来源”链接：文档进 `/documents?doc_id=...`，资源按类型进对应列表并带 `keyword` 检索。
+- 登录页支持记住账号密码（仅 localStorage，公共电脑应关闭）；系统设置展示 Docker 数据持久化目录。
 - 回答正文按 Markdown 风格标题 / 列表 / 引用 / 加粗分块渲染，流式阶段由 `useTypewriter` 逐字展示，避免 delta 同帧到达时整段闪现。
 
 ## 12. 部署与运行
 
 - `docker-compose.yml`：postgres、redis、etcd、minio、milvus、backend、frontend；持久化卷覆盖 PG / Redis / etcd / MinIO / Milvus / uploads。
-- 后端镜像多阶段构建：Python 3.12；模型权重默认从 `backend/prebuilt-models` COPY 到 `/app/models`，也支持 `MODELS_SOURCE=download`；运行时 `HF_HUB_OFFLINE=1`；CPU 编码限制 `OMP_NUM_THREADS=2`、`MKL_NUM_THREADS=2`。
+- 后端镜像多阶段构建：Python 3.12；模型权重默认从本地 `biyesheji-models:latest` 镜像 COPY 到 `/app/models`（由 `backend/models-image/Dockerfile` 预构建），也支持 `MODELS_SOURCE=download`；镜像内包含 `alembic.ini` 与 `alembic/versions`，可执行迁移；运行时 `HF_HUB_OFFLINE=1`；CPU 编码限制 `OMP_NUM_THREADS=2`、`MKL_NUM_THREADS=2`。
+- 数据持久化：PostgreSQL / Redis / etcd / MinIO / Milvus / uploads 均绑定到宿主机 `${HOST_DATA_DIR:-./docker-data}`，容器删除或重建不丢数据；`/settings` 的“数据持久化”卡片展示目录与备份说明。
 - 前端构建时注入 `BACKEND_URL`（容器内 `http://backend:8000`），rewrites 在 build 阶段固化。
-- FastAPI lifespan：初始化日志、开发环境 `init_db()`、预热运行时配置；生产库结构用 Alembic。`/health` 检查 PostgreSQL、Redis，返回 `status=ok/degraded` 与 `components`，进程存活仍为 HTTP 200。
+- FastAPI lifespan：初始化日志、开发环境 `init_db()`、预热运行时配置；生产库结构用 Alembic。`/health` 检查 PostgreSQL、Redis、Milvus（Milvus 1s 超时），返回 `status=ok/degraded` 与 `components`，进程存活仍为 HTTP 200。
 - 测试：后端 `pytest`；前端 `node --test` 覆盖 stores / hooks / utils，另有 `next lint` 与 `next build`。`backend/alembic/versions` 保存基线（13 张核心表）与后续迁移。

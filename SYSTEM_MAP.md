@@ -2,6 +2,7 @@
 
 > 项目：中医药知识资源管理与智能问答系统
 > 用途：项目全局地图，仅供本人快速理解项目。
+> 文档状态：研究增强已实现基础版（Analyzer / Router / KG / Gate / Reflection / 评测）；具体以代码为准。
 
 ---
 
@@ -122,26 +123,30 @@ LLM
 Citation
 
 
-# 7. 研究方向
+# 7. 研究方向（已实现基础版）
 
 核心问题：
 
 > 不同类型的中医知识问题是否需要不同的检索策略？
 
-研究思路：
+当前研究增强链路：
 
 Query Analyzer
+ ↓
+EntityResolver
  ↓
 Dynamic Router
  ↓
 选择：
 Text RAG / KG / KG + RAG
  ↓
-Evidence Enhancement
+Evidence Gate
  ↓
 LLM
  ↓
-Self Reflection
+Self Reflection（可选 LLM 一致性检查）
+ ↓
+评测与实验归档
 
 
 # 8. 记住模块的作用

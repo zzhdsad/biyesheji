@@ -68,6 +68,10 @@ class VectorRow:
 class BaseVectorStore(ABC):
     """向量库接口：集合管理、幂等写入、按文档删除。"""
 
+    def health(self) -> bool:
+        """轻量连通性检查；默认实现（内存库）恒为可用。"""
+        return True
+
     @abstractmethod
     def ensure_collection(self) -> None:
         """确保集合与索引存在（幂等）。"""
@@ -313,6 +317,12 @@ class MilvusStore(BaseVectorStore):
             except Exception as exc:
                 raise VectorStoreError(f"Milvus 连接失败（{self._uri}）：{exc}") from exc
         return self._client
+
+    def health(self) -> bool:
+        """检查 Milvus 连接与集合是否存在（未建集合视为可用，启动后会创建）。"""
+        client = self._get_client()
+        client.has_collection(self.COLLECTION)
+        return True
 
     def ensure_collection(self) -> None:
         client = self._get_client()

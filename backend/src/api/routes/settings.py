@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.exceptions import AppException
+from src.core.config import settings
 
 from src.application import revectorize_service
 from src.application.model_config_service import (
@@ -63,6 +64,33 @@ class ModelConfigUpdate(BaseModel):
     hyde_base_url: str = Field(default="", max_length=512)
 
 
+@router.get("/persistence")
+async def get_persistence_info(request: Request) -> dict:
+    """数据持久化状态（仅 admin）：告知宿主机数据目录与容器内路径。
+
+    docker-compose 已把 PostgreSQL / Redis / etcd / MinIO / Milvus / uploads
+    绑定到宿主机 `./docker-data`；删除容器或 `docker compose down` 不会丢数据，
+    只有手动删除该目录才会丢失。
+    """
+    _require_admin(request)
+    host_dir = settings.HOST_DATA_DIR or "./docker-data"
+    return {
+        "mode": "bind-mount",
+        "host_dir": host_dir,
+        "uploads_dir": f"{host_dir}/uploads",
+        "container_uploads_dir": settings.UPLOAD_DIR,
+        "services": {
+            "postgres": f"{host_dir}/postgres",
+            "redis": f"{host_dir}/redis",
+            "etcd": f"{host_dir}/etcd",
+            "minio": f"{host_dir}/minio",
+            "milvus": f"{host_dir}/milvus",
+            "uploads": f"{host_dir}/uploads",
+        },
+        "note": "删除容器或 docker compose down 不会丢失数据；不要删除 docker-data 目录。",
+    }
+
+
 @router.get("/model")
 async def get_model_config(
     request: Request,
@@ -100,6 +128,7 @@ async def update_model_config(
 async def test_model_connection(
     payload: ModelConfigUpdate,
     request: Request,
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     """测试 LLM 连通性（仅 admin）：用提交的配置发一条极简 chat 请求。
 
@@ -107,6 +136,16 @@ async def test_model_connection(
     （SSRF 防护），失败信息不回显响应体原文。
     """
     _require_admin(request)
+    # 测试不需要保存到 DB，直接用提交的参数构建客户端；若前端提交的是空值
+    # 或脱敏值（含 *），回退到数据库中已保存的 Key，避免“测试一次后 Key 被
+    # 脱敏值覆盖，第二次测试失败”。
+    api_key = (payload.llm_api_key or "").strip()
+    if not api_key or "*" in api_key:
+        try:
+            saved = await ModelConfigService(db).get_effective_config()
+            api_key = (saved.get("llm_api_key") or "").strip()
+        except Exception as exc:  # noqa: BLE001 - 读不到已保存 Key 时按空 Key 测试
+            logger.warning(f"读取已保存 API Key 失败，按空 Key 测试: {exc}")
     # 测试不需要保存到 DB，直接用提交的参数构建客户端
     if not payload.llm_base_url or not payload.llm_model:
         return {"ok": False, "message": "请填写 Base URL 和模型名称"}
@@ -116,7 +155,7 @@ async def test_model_connection(
         llm = OpenAICompatibleLLM(
             base_url=payload.llm_base_url,
             model=payload.llm_model,
-            api_key=payload.llm_api_key or None,
+            api_key=api_key or None,
         )
         import asyncio
         import time

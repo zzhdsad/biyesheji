@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 1,
+  "backend": "native",
+  "rasterEngine": "pdfium",
+  "source": "saved",
+  "inputPath": "C:\\biyesheji-3.0.0\\defense_work\\手册4.pdf",
+  "sourceSha256": "896de9d4199e6ee5f7ebc708540cb73a9c8d1067f74feff30c189c6ddb6604ff",
+  "dpi": 100,
+  "pageCount": 25,
+  "images": [
+    {
+      "index": 1,
+      "page": 1,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\pdf_final2\\page-0001.png",
+      "width": 827,
+      "height": 1170,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 92204
+    },
+    {
+      "index": 2,
+      "page": 2,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\pdf_final2\\page-0002.png",
+      "width": 827,
+      "height": 1170,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 120057
+    },
+    {
+      "index": 3,
+      "page": 3,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\pdf_final2\\page-0003.png",
+      "width": 827,
+      "height": 1170,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 202013
+    },
+    {
+      "index": 4,
+      "page": 8,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\pdf_final2\\page-0004.png",
+      "width": 827,
+      "height": 1170,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 113294
+    },
+    {
+      "index": 5,
+      "page": 10,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\pdf_final2\\page-0005.png",
+      "width": 827,
+      "height": 1170,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 265622
+    },
+    {
+      "index": 6,
+      "page": 20,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\pdf_final2\\page-0006.png",
+      "width": 827,
+      "height": 1170,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 120585
+    },
+    {
+      "index": 7,
+      "page": 25,
+      "path": "C:\\biyesheji-3.0.0\\defense_work\\pdf_final2\\page-0007.png",
+      "width": 827,
+      "height": 1170,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 793.7333333333333,
+        "height": 1122.5333333333333
+      },
+      "byteLength": 76053
+    }
+  ],
+  "missingFonts": []
+}

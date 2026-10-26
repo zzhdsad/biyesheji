@@ -62,6 +62,7 @@ class Citation(BaseModel):
     era: str | None = None
     credibility_level: int | None = None
     source_kind: str = "document"
+    kb_id: str | None = None
     evidence_level: str = "insufficient"
     resource_type: str | None = None
     resource_id: str | None = None
@@ -496,6 +497,11 @@ async def ask_stream(
                 question=payload.question.strip(),
                 conversation_id=payload.conversation_id,
             ):
+                # 用户点击“停止”会 abort fetch；下一次 yield 前检查连接，
+                # 避免浏览器已断开后仍继续生成/持久化完整回答。
+                if await request.is_disconnected():
+                    logger.info("客户端已断开，停止流式生成")
+                    break
                 data = json.dumps(evt["data"], ensure_ascii=False)
                 yield f"event: {evt['event']}\ndata: {data}\n\n"
         except Exception as exc:  # 兜底，避免流中断无提示
@@ -649,6 +655,56 @@ async def list_messages(
         .order_by(Message.created_at.asc())
     )
     return list(rows)
+
+
+@router.delete("/conversations/{conversation_id}/messages/from/{message_id}")
+async def delete_messages_from(
+    conversation_id: uuid.UUID,
+    message_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """删除某条用户提问及其后的全部消息（用于“编辑并重新提问”）。
+
+    编辑会先截断该轮问答，再以同一 conversation_id 重新提问，避免旧答案和
+    旧上下文继续污染重新生成的回答。只允许操作自己的会话。
+    """
+    from src.core.exceptions import NotFoundError
+    from src.infrastructure.redis_client import get_conversation_cache
+
+    user: User = request.state.user
+    await _validate_conversation_owner(db, user, conversation_id)
+
+    target = await db.get(Message, message_id)
+    if target is None or target.conversation_id != conversation_id:
+        raise NotFoundError("消息不存在")
+    if target.role != "user":
+        raise PermissionDeniedError("只能从用户提问开始编辑")
+
+    rows = list(
+        (
+            await db.scalars(
+                select(Message)
+                .where(Message.conversation_id == conversation_id)
+                .order_by(Message.created_at.asc(), Message.id.asc())
+            )
+        ).all()
+    )
+    start = next((i for i, m in enumerate(rows) if m.id == message_id), None)
+    if start is None:
+        raise NotFoundError("消息不存在")
+
+    for msg in rows[start:]:
+        await db.delete(msg)
+    await db.commit()
+
+    try:
+        cache = get_conversation_cache()
+        await cache.delete(conversation_id)
+    except Exception as exc:  # noqa: BLE001 - 缓存清理失败不阻断删除
+        logger.warning(f"清理会话缓存失败（不影响编辑）: {exc}")
+
+    return {"conversation_id": str(conversation_id), "deleted_count": len(rows) - start}
 
 
 @router.delete("/conversations/{conversation_id}")
