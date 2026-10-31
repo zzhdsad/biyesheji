@@ -598,6 +598,8 @@ async def commit_relational(
     # 从暂存目录重新解析（服务端以文件为准，避免前端篡改分析结果）
     rows_by_table: dict[str, list] = {}
     files_by_table: dict[str, Any] = {}
+    # 解析级错误（坏行被跳过、整文件解析失败），需与入库错误一起返回给前端
+    commit_errors: list[dict[str, Any]] = []
     job = ImportJob(
         batch_id=f"rel-{uuid.uuid4().hex[:12]}",
         dataset_id=payload.session_id,
@@ -656,8 +658,9 @@ async def commit_relational(
     if not rows_by_table:
         job.status = "failed"
         job.error_message = "没有可用于导入的结构化文件"
+        job.failed = len(commit_errors)
         await db.commit()
-        return {"error": job.error_message}
+        return {"error": job.error_message, "errors": commit_errors[:50]}
 
     svc = EntityImportService(db)
 
@@ -728,7 +731,7 @@ async def commit_relational(
     )
     job.processed = sum(len(r) for r in rows_by_table.values())
     job.succeeded = job.processed - stats.failed_rows
-    job.failed = stats.failed_rows
+    job.failed = stats.failed_rows + len(commit_errors)
     job.status = "completed"
 
     # 另存为映射模板：把本次「实际生效」的决策固化下来供下次复用
@@ -764,7 +767,11 @@ async def commit_relational(
     await db.commit()
     shutil.rmtree(session_dir, ignore_errors=True)
 
-    return {"job_id": str(job.id), "template": saved_template, **stats.to_dict()}
+    # 解析错误（坏行跳过/整文件失败）与入库错误一并返回，失败行数保持一致
+    stats_payload = stats.to_dict()
+    stats_payload["errors"] = [*stats_payload["errors"], *commit_errors][:50]
+    stats_payload["failed_rows"] += len(commit_errors)
+    return {"job_id": str(job.id), "template": saved_template, **stats_payload}
 
 
 # ── 映射模板 ────────────────────────────────────────────────────────────────

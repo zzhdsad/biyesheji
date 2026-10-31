@@ -279,6 +279,58 @@ def test_relational_analyze_and_commit(client: TestClient, kb: str):
     assert stats["relations_pending"] == 0
 
 
+JSONL_MEDICINES = (
+    '{"id": "M1", "name": "四君子汤"}\n'
+    '{"id": "M2", "name": \n'
+    '{"id": "M3", "name": "逍遥散"}\n'
+)
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_relational_commit_skips_malformed_rows_and_reports_them(client: TestClient, kb: str):
+    """畸形行只跳过自身：其余行照常入库，且错误明细随提交结果返回。"""
+    analyze = _upload(
+        client,
+        "/api/v1/import/relational/analyze",
+        [
+            ("files", ("D1.csv", CSV_TERMS.encode("utf-8"), "text/csv")),
+            ("files", ("D2.jsonl", JSONL_MEDICINES.encode("utf-8"), "application/jsonl")),
+        ],
+        paths=["D1.csv", "D2.jsonl"],
+    )
+    assert analyze.status_code == 200, analyze.text
+    plan = analyze.json()
+    # 分析阶段整文件解析失败只影响该文件，D1 仍可继续
+    assert any("D2.jsonl" in e for e in plan["errors"])
+
+    commit = client.post(
+        "/api/v1/import/relational/commit",
+        json={
+            "session_id": plan["session_id"],
+            "kb_id": kb,
+            "primary_keys": {"D1": "术语id", "D2": "id"},
+            "auto_confirm": False,
+        },
+    )
+    assert commit.status_code == 200, commit.text
+    result = commit.json()
+
+    # 成功行照常入库：D1 两行 + D2 两条好行
+    assert result["records"] == 4
+    assert result["entities"] == 4
+    # 坏行被跳过并回报，而不是抛出未定义变量导致 500
+    assert result["failed_rows"] == 1
+    assert len(result["errors"]) == 1
+    detail = result["errors"][0]
+    assert detail["file_name"] == "D2.jsonl"
+    assert detail["row_no"] == 2
+    assert "JSON 解析失败" in detail["message"]
+
+    stats = client.get(f"/api/v1/import/stats?kb_id={kb}").json()
+    assert stats["records"] == 4
+    assert stats["entities"] == 4
+
+
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 def test_cancelling_confirmed_relation_removes_kg_edge(client: TestClient, kb: str):
     """先确认入库、再人工取消：KG 里的对应边必须同步撤掉，不留无法溯源的关系。"""
