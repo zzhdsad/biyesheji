@@ -16,6 +16,9 @@ services:
       - ./backend/alembic:/app/alembic
       # 测试代码也要热更新，否则容器里跑的是镜像内的旧测试
       - ./backend/tests:/app/tests
+      # 开发/测试的上传文件必须与正式环境分离：正式环境挂载 docker-data/uploads，
+      # 开发环境只允许写入 docker-data/uploads_dev，避免清理/覆盖影响正式文件。
+      - ${HOST_DATA_DIR:-./docker-data}/uploads_dev:/app/uploads
     restart: "no"
     environment:
       PYTHONUNBUFFERED: "1"
@@ -27,6 +30,9 @@ services:
       # 向量库同样必须隔离：默认集合 document_chunks 里是生产向量
       # （实测 3518 条），开发/测试往里写会直接污染生产检索结果。
       MILVUS_COLLECTION: "document_chunks_dev"
+      # 缓存与对象存储也按环境分开，避免开发写入污染正式缓存/桶
+      REDIS_URL: "redis://redis:6379/1"
+      MINIO_BUCKET: "documents_dev"
 
   frontend:
     # next dev：编译按需进行，保存即刷新

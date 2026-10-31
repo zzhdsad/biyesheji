@@ -4,9 +4,11 @@
 
 安全约束（脚本强制）：
   1. 默认 Dry Run，必须 -Execute 才改动数据；
-  2. 目标库为主库时必须 -AllowMain，否则退出；
-  3. 执行前必须有可用备份（无备份则先备份，备份失败即中止）；
-  4. 清理后逐表残留校验，不为 0 就报警并给出恢复命令。
+  2. 清理前校验数据库 / 后端连接库 / Milvus 集合 / 上传目录同属一个已登记环境，
+     任一不一致或无法确认即拒绝（不再只看数据库名称）；
+  3. 目标库为主库时必须 -AllowMain，否则退出；
+  4. 执行前必须有可用备份（无备份则先备份，备份失败即中止）；
+  5. 清理后逐表残留校验，不为 0 就报警并给出恢复命令。
 
 用法：
   .\reset-database.ps1                       # Dry Run
@@ -26,6 +28,7 @@ param(
 $ErrorActionPreference = "Continue"
 $PGC = "kp-postgres"; $PGU = "postgres"; $MAIN = "knowledge_platform"; $BE = "kp-backend"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$UploadDir = "/app/uploads"
 
 # 保留：迁移版本 / 模型与系统配置 / 用户（首次部署需能登录）
 $KeepTables = @("alembic_version", "model_configs", "system_configs", "users")
@@ -40,20 +43,75 @@ function ListTables {
     return ($o -split "`n" | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 }
 function Count([string]$T) { $r = Q "SELECT count(*) FROM $T;"; if ($r -match '^\d+$') { return [int]$r }; return -1 }
-function MilvusCount {
+function MilvusCount([string]$Collection) {
     # 用脚本文件而非 -c 内联：多行 Python 经 docker exec 传参容易被引号/换行破坏
     docker cp (Join-Path $ScriptDir "scripts\milvus_count.py") ("{0}:/tmp/milvus_count.py" -f $BE) | Out-Null
-    $o = docker exec $BE python /tmp/milvus_count.py 2>$null | Select-Object -Last 1
+    $o = docker exec $BE python /tmp/milvus_count.py $Collection 2>$null | Select-Object -Last 1
     if ($o -match '^-?\d+$') { return [int]$o }; return -1
 }
 function UploadCount {
-    $o = docker exec $BE sh -c "find /app/uploads -type f 2>/dev/null | wc -l" 2>&1
+    $o = docker exec $BE sh -c "find $UploadDir -type f 2>/dev/null | wc -l" 2>&1
     if ($o -match '^\d+$') { return [int]$o }; return -1
+}
+
+function ContainerEnvValue([string]$Name) {
+    $o = docker exec $BE printenv $Name 2>$null
+    return ($o | Out-String).Trim()
+}
+function BackendDbName {
+    $url = ContainerEnvValue "DATABASE_URL"
+    if ($url -match '/([^/?]+)(\?|$)') { return $Matches[1] }
+    return ""
+}
+function UploadMountSource {
+    # 取容器内 /app/uploads 实际绑定的宿主机目录；未挂载则返回空，由守卫拒绝
+    $o = docker inspect $BE --format '{{range .Mounts}}{{.Destination}}={{.Source}}{{println}}{{end}}' 2>$null
+    foreach ($line in ($o -split "`n")) {
+        $line = $line.Trim()
+        if ($line.StartsWith("$UploadDir=")) { return $line.Substring($UploadDir.Length + 1) }
+    }
+    return ""
+}
+function CheckEnvironment {
+    # 数据库、后端连接库、Milvus 集合、上传目录必须同属一个已登记环境
+    $facts = [ordered]@{
+        db                   = $TargetDb
+        backend_db           = (BackendDbName)
+        milvus_collection    = (ContainerEnvValue "MILVUS_COLLECTION")
+        upload_source        = (UploadMountSource)
+        upload_container_dir = $UploadDir
+        allow_main           = [bool]$AllowMain
+    } | ConvertTo-Json -Compress
+    $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($facts))
+    $guardPath = Join-Path $ScriptDir "backend\src\infrastructure\env_guard.py"
+    if (-not (Test-Path $guardPath)) {
+        return [pscustomobject]@{ allowed = $false; reason = "缺少环境校验模块 env_guard.py"; profile = $null; environment = $null }
+    }
+    docker cp $guardPath ("{0}:/tmp/env_guard.py" -f $BE) 2>$null | Out-Null
+    $out = docker exec $BE python /tmp/env_guard.py --facts-b64 $b64 2>$null | Select-Object -Last 1
+    if (-not $out) {
+        return [pscustomobject]@{ allowed = $false; reason = "无法执行环境校验（后端容器不可用？）"; profile = $null; environment = $null }
+    }
+    try {
+        return $out | ConvertFrom-Json
+    } catch {
+        return [pscustomobject]@{ allowed = $false; reason = "环境校验输出无法解析"; profile = $null; environment = $null }
+    }
 }
 
 Write-Host ""
 Write-Host "==== 空库初始化 ====" -ForegroundColor Yellow
 Write-Host ("目标库: {0}   模式: {1}" -f $TargetDb, $(if ($Restore) { "恢复" } elseif ($Execute) { "执行清理" } else { "Dry Run" }))
+
+# 闸门 0：数据库 / 后端连接库 / Milvus 集合 / 上传目录必须同属一个已登记环境
+$envCheck = CheckEnvironment
+if ($envCheck.allowed) {
+    Write-Host ("[通过] {0}（上传目录: {1}）" -f $envCheck.reason, $envCheck.environment.upload_source) -ForegroundColor Green
+} else {
+    Write-Host ("[拒绝] {0}" -f $envCheck.reason) -ForegroundColor Red
+    Write-Host "        无法确认目标归属或存在共享风险时，脚本不执行任何清理。" -ForegroundColor Red
+    exit 2
+}
 
 # 闸门 1：禁止误操作主库
 if ($TargetDb -eq $MAIN -and -not $AllowMain) {
@@ -88,7 +146,7 @@ $CleanTables = ListTables | Where-Object { $KeepTables -notcontains $_ }
 $snap = @{}
 foreach ($t in $CleanTables) { $n = Count $t; if ($n -gt 0) { $snap[$t] = $n } }
 foreach ($t in $CleanTables) { if ($snap.ContainsKey($t)) { Write-Host ("  {0,-28} {1}" -f $t, $snap[$t]) } }
-Write-Host ("  {0,-28} {1}" -f "Milvus 向量", (MilvusCount))
+Write-Host ("  {0,-28} {1}" -f "Milvus 向量", (MilvusCount $envCheck.environment.milvus_collection))
 Write-Host ("  {0,-28} {1}" -f "上传文件", (UploadCount))
 Write-Host ("  保留不清理: {0}" -f ($KeepTables -join ", "))
 
@@ -109,8 +167,8 @@ if (-not $Execute) {
     Write-Host "== Dry Run 计划（未执行）==" -ForegroundColor Yellow
     Write-Host "  1) 备份 $TargetDb"
     foreach ($t in $CleanTables) { if ($snap.ContainsKey($t)) { Write-Host "  2) TRUNCATE $t ($($snap[$t]) 行)" } }
-    Write-Host "  3) 清空 Milvus 集合全部向量"
-    Write-Host "  4) 清空 /app/uploads"
+    Write-Host "  3) 清空 Milvus 集合 $($envCheck.environment.milvus_collection) 的全部向量"
+    Write-Host "  4) 清空上传目录 $($envCheck.environment.upload_source)"
     Write-Host "  5) 残留校验（表=0 / 向量=0 / 文件=0 / 管理员存在）"
     Write-Host ""
     Write-Host ("确认后执行: .\reset-database.ps1 -Execute -TargetDb {0}" -f $TargetDb) -ForegroundColor Green
@@ -130,20 +188,26 @@ docker exec $PGC rm -f $cd | Out-Null
 if ((Get-Item $file).Length -lt 1KB) { throw "备份文件异常（<1KB），已中止" }
 Write-Host ("  备份完成 {0} ({1:N2} MB)" -f (Split-Path $file -Leaf), ((Get-Item $file).Length / 1MB)) -ForegroundColor Green
 
+# 清理前复检：备份期间容器配置若被切换（如 dev/prod 环境互换），必须中止
+$recheck = CheckEnvironment
+if (-not $recheck.allowed) { throw ("清理前环境复检未通过，已中止：{0}" -f $recheck.reason) }
+
 foreach ($t in $CleanTables) { if ($snap.ContainsKey($t)) { Q "TRUNCATE TABLE $t RESTART IDENTITY CASCADE;" | Out-Null } }
 Write-Host "  PostgreSQL 业务表已清空"
 
 docker cp (Join-Path $ScriptDir "scripts\milvus_clear.py") ("{0}:/tmp/milvus_clear.py" -f $BE) | Out-Null
-docker exec $BE python /tmp/milvus_clear.py 2>$null | Out-Null
+docker exec $BE python /tmp/milvus_clear.py $($envCheck.environment.milvus_collection) 2>$null | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Host "  [警告] Milvus 清理脚本返回非 0，请查看残留校验结果" -ForegroundColor Yellow }
 Write-Host "  Milvus 向量已清空"
-docker exec $BE sh -c "rm -rf /app/uploads/* 2>/dev/null; echo ok" | Out-Null
+docker exec $BE sh -c "rm -rf $UploadDir/* 2>/dev/null" | Out-Null
+if ($LASTEXITCODE -ne 0) { Write-Host "  [警告] 上传目录清理命令返回非 0，请查看残留校验结果" -ForegroundColor Yellow }
 Write-Host "  上传目录已清空"
 
 # 残留校验
 Write-Host "== 残留校验 ==" -ForegroundColor Yellow
 $bad = @()
 foreach ($t in $CleanTables) { $n = Count $t; if ($n -gt 0) { $bad += "$t=$n"; Write-Host ("  [残留] {0,-28} {1}" -f $t, $n) -ForegroundColor Red } }
-$mv = MilvusCount; $up = UploadCount
+$mv = MilvusCount $envCheck.environment.milvus_collection; $up = UploadCount
 Write-Host ("  {0,-28} {1}" -f "Milvus 向量", $mv)
 Write-Host ("  {0,-28} {1}" -f "上传文件", $up)
 if ($mv -ne 0) { $bad += "milvus=$mv" }
