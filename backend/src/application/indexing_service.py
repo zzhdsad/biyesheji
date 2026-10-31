@@ -6,6 +6,7 @@
 
 import asyncio
 import uuid
+from datetime import datetime, timezone
 
 from loguru import logger
 from sqlalchemy import select, update
@@ -13,7 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
 from src.core.exceptions import AppException, NotFoundError
-from src.domain.models import Chunk, Document
+from src.domain.models import (
+    INDEX_STATUS_FAILED,
+    INDEX_STATUS_INDEXED,
+    Chunk,
+    Document,
+)
 from src.infrastructure.embedding import BaseEmbedding, EmbeddingError, get_embedding
 from src.infrastructure.milvus_store import (
     BaseVectorStore,
@@ -102,6 +108,12 @@ class IndexingService:
         doc.error_message = ""
         # 记录"该文档当前向量由哪个模型生成"（切换模型后可据此识别旧向量）
         doc.vector_model = self.model_key
+        # 同步维护可校验的索引状态：写入成功条数由 Milvus 实际返回决定，
+        # 使 documents.index_status/vector_count 可被 IndexStateService 独立校验
+        doc.index_status = INDEX_STATUS_INDEXED
+        doc.vector_count = len(rows)
+        doc.indexed_at = datetime.now(timezone.utc)
+        doc.index_error = ""
         await self.db.commit()
         await self.db.refresh(doc)
 
@@ -147,6 +159,12 @@ class IndexingService:
         await self.db.execute(
             update(Document)
             .where(Document.id == doc_id)
-            .values(parse_status="failed", error_message=message[:2000])
+            .values(
+                parse_status="failed",
+                error_message=message[:2000],
+                # 同步标记索引失败，便于「失败重试」按 index_status 精确定位
+                index_status=INDEX_STATUS_FAILED,
+                index_error=message[:2000],
+            )
         )
         await self.db.commit()

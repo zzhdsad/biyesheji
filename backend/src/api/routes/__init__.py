@@ -19,6 +19,7 @@ from src.api.routes import (
     documents,
     evaluation,
     feedbacks,
+    general_import,  # 通用知识导入（普通 / 关联 / 索引一致性，仅 admin）
     herbs,
     import_center,  # 真实中医知识数据导入中心（仅 admin）
     kg,  # 阶段十三：知识图谱（构建 / 统计 / 检索调试）
@@ -60,6 +61,7 @@ protected_router.include_router(settings.router)  # 模型配置（LLM/Embedding
 protected_router.include_router(users.router)  # 用户管理（仅 admin）
 protected_router.include_router(audit.router)  # 审计日志（仅 admin）
 protected_router.include_router(import_center.router)  # 知识数据导入中心（仅 admin）
+protected_router.include_router(general_import.router)  # 通用知识导入（普通 / 关联 / 索引）
 
 # ── 聚合 ─────────────────────────────────────────────────────────────────────
 api_router = APIRouter()

@@ -1,0 +1,49 @@
+...EEE....                                                               [100%]
+==================================== ERRORS ====================================
+_____________ ERROR at setup of test_general_commit_keeps_records ______________
+E   asyncpg.exceptions.UniqueViolationError: duplicate key value violates unique constraint "ix_users_username"
+    DETAIL:  Key (username)=(admin) already exists.
+
+The above exception was the direct cause of the following exception:
+E   sqlalchemy.dialects.postgresql.asyncpg.AsyncAdapt_asyncpg_dbapi.UniqueViolationError: duplicate key value violates unique constraint "ix_users_username"
+
+The above exception was the direct cause of the following exception:
+E   sqlalchemy.exc.IntegrityError: (sqlalchemy.dialects.postgresql.asyncpg.UniqueViolationError) duplicate key value violates unique constraint "ix_users_username"
+    [SQL: INSERT INTO users (id, email, username, hashed_password, role, name, department, must_change_password, is_active, deleted_at) VALUES ($1::UUID, $2::VARCHAR, $3::VARCHAR, $4::VARCHAR, $5::VARCHAR, $6::VARCHAR, $7::VARCHAR, $8::BOOLEAN, $9::BOOLEAN, $10::TIMESTAMP WITH TIME ZONE) RETURNING users.created_at, users.updated_at]
+    [parameters: (UUID('4e7742e2-d751-4947-b85a-4076c054bbc4'), 'admin@example.com', 'admin', '', 'admin', '测试管理员', '测试部', False, True, None)]
+    (Background on this error at: https://sqlalche.me/e/21/gkpj)
+_____________ ERROR at setup of test_relational_analyze_and_commit _____________
+E   asyncpg.exceptions.UniqueViolationError: duplicate key value violates unique constraint "ix_users_username"
+    DETAIL:  Key (username)=(admin) already exists.
+
+The above exception was the direct cause of the following exception:
+E   sqlalchemy.dialects.postgresql.asyncpg.AsyncAdapt_asyncpg_dbapi.UniqueViolationError: duplicate key value violates unique constraint "ix_users_username"
+
+The above exception was the direct cause of the following exception:
+E   sqlalchemy.exc.IntegrityError: (sqlalchemy.dialects.postgresql.asyncpg.UniqueViolationError) duplicate key value violates unique constraint "ix_users_username"
+    [SQL: INSERT INTO users (id, email, username, hashed_password, role, name, department, must_change_password, is_active, deleted_at) VALUES ($1::UUID, $2::VARCHAR, $3::VARCHAR, $4::VARCHAR, $5::VARCHAR, $6::VARCHAR, $7::VARCHAR, $8::BOOLEAN, $9::BOOLEAN, $10::TIMESTAMP WITH TIME ZONE) RETURNING users.created_at, users.updated_at]
+    [parameters: (UUID('4e7742e2-d751-4947-b85a-4076c054bbc4'), 'admin@example.com', 'admin', '', 'admin', '测试管理员', '测试部', False, True, None)]
+    (Background on this error at: https://sqlalche.me/e/21/gkpj)
+___________ ERROR at setup of test_rejected_relations_are_not_in_kg ____________
+E   asyncpg.exceptions.UniqueViolationError: duplicate key value violates unique constraint "ix_users_username"
+    DETAIL:  Key (username)=(admin) already exists.
+
+The above exception was the direct cause of the following exception:
+E   sqlalchemy.dialects.postgresql.asyncpg.AsyncAdapt_asyncpg_dbapi.UniqueViolationError: duplicate key value violates unique constraint "ix_users_username"
+
+The above exception was the direct cause of the following exception:
+E   sqlalchemy.exc.IntegrityError: (sqlalchemy.dialects.postgresql.asyncpg.UniqueViolationError) duplicate key value violates unique constraint "ix_users_username"
+    [SQL: INSERT INTO users (id, email, username, hashed_password, role, name, department, must_change_password, is_active, deleted_at) VALUES ($1::UUID, $2::VARCHAR, $3::VARCHAR, $4::VARCHAR, $5::VARCHAR, $6::VARCHAR, $7::VARCHAR, $8::BOOLEAN, $9::BOOLEAN, $10::TIMESTAMP WITH TIME ZONE) RETURNING users.created_at, users.updated_at]
+    [parameters: (UUID('4e7742e2-d751-4947-b85a-4076c054bbc4'), 'admin@example.com', 'admin', '', 'admin', '测试管理员', '测试部', False, True, None)]
+    (Background on this error at: https://sqlalche.me/e/21/gkpj)
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/pymilvus/client/__init__.py:6
+  /usr/local/lib/python3.12/site-packages/pymilvus/client/__init__.py:6: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+    from pkg_resources import DistributionNotFound, get_distribution
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+ERROR tests/test_general_import_api.py::test_general_commit_keeps_records - s...
+ERROR tests/test_general_import_api.py::test_relational_analyze_and_commit - ...
+ERROR tests/test_general_import_api.py::test_rejected_relations_are_not_in_kg
+7 passed, 1 warning, 3 errors in 1.07s

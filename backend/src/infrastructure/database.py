@@ -44,18 +44,38 @@ async def get_db() -> AsyncIterator[AsyncSession]:
 
 
 async def init_db() -> None:
-    """开发环境初始化：自动建表 + seed 默认管理员（生产环境请使用 Alembic 迁移）。
+    """开发环境初始化：seed 默认管理员（**不建表**，Schema 统一由 Alembic 管理）。
+
+    变更说明：原先此处会执行 Base.metadata.create_all，导致开发热重载/测试直接
+    按 ORM 元数据改写数据库结构（本次重构中曾因此意外在主库建出 5 张新表）。
+    现在只做「Schema 是否就绪」的校验，缺表时提示执行 alembic upgrade head，
+    不再自动建表；同时校验目标库，避免误连主库写入。
 
     仅当 users 表为空时创建默认管理员，避免覆盖已有数据。
     默认管理员首次登录需强制修改密码。
     """
-    from src.domain.models import Base, User
+    from sqlalchemy import inspect
+
     from src.core.security import hash_password
+    from src.domain.models import User
+    from src.infrastructure.db_safety import assert_safe_database
+
+    assert_safe_database(settings.DATABASE_URL, purpose="应用启动初始化")
 
     engine = get_engine()
+
+    def _table_exists(sync_conn, name: str) -> bool:
+        return inspect(sync_conn).has_table(name)
+
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        logger.info("数据库表结构同步完成（create_all）")
+        if not await conn.run_sync(_table_exists, "users"):
+            logger.error(
+                "users 表不存在：Schema 只能由 Alembic 管理，请先执行 "
+                "`alembic upgrade head`（当前目标库：{}）",
+                engine.url.database,
+            )
+            return
+        logger.info("数据库 Schema 校验通过（由 Alembic 管理，不执行 create_all）")
 
     async with get_session_factory()() as session:
         user_count = await session.scalar(select(func.count()).select_from(User))

@@ -1,0 +1,16 @@
+............F                                                            [100%]
+=================================== FAILURES ===================================
+E   AssertionError: assert 3 == 0
+     +  where 3 = ImportStats(records=8, entities=5, relations=3, kg_nodes=4, kg_edges=3, errors=[RowError(file_name='dataset.csv', row_...'dataset.csv', row_no=3, message='缺少主键值，跳过该行实体'), RowError(file_name='dataset.csv', row_no=4, message='缺少主键值，跳过该行实体')]).failed_rows
+----------------------------- Captured stderr call -----------------------------
+2026-10-31 02:13:00.199 | INFO     | src.application.entity_import_service:sync_confirmed_to_kg:458 - [entity_import] KG 同步完成：kb=adb1d6e0-0573-4029-881d-0f122ed197b9 节点 4 边 3
+/app/tests/test_entity_import_service.py:593: AssertionError: assert 3 == 0
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/pymilvus/client/__init__.py:6
+  /usr/local/lib/python3.12/site-packages/pymilvus/client/__init__.py:6: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+    from pkg_resources import DistributionNotFound, get_distribution
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_entity_import_service.py::test_end_to_end_relational_import_is_idempotent[asyncio]
+1 failed, 12 passed, 1 warning in 7.33s

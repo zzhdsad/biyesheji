@@ -39,19 +39,32 @@ PG_AVAILABLE = _postgres_available()
 
 
 def _init_db_standalone() -> None:
-    """测试环境显式建表 + seed 默认管理员。
+    """测试环境 seed 默认管理员（**不建表**，Schema 由 Alembic 管理）。
 
     使用独立 engine 并在结束后 dispose：不依赖应用 lifespan（TestClient
     的 portal 循环与 pytest 事件循环策略冲突时 lifespan 内 init_db 会失败）。
+
+    变更说明：原先此处执行 Base.metadata.create_all，会把 ORM 元数据直接写进
+    settings.DATABASE_URL 指向的库（指向主库时即污染主库）。现在改为校验
+    目标库 + 校验 Schema 已由 Alembic 就绪，缺表则直接报错提示跑迁移。
     """
+    from sqlalchemy import inspect
+
+    from src.infrastructure.db_safety import assert_safe_database
+
+    assert_safe_database(settings.DATABASE_URL, purpose="自动化测试")
 
     async def _run() -> None:
-        from src.domain.models import Base, User
+        from src.domain.models import User
 
         engine = create_async_engine(settings.DATABASE_URL)
         try:
             async with engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
+                if not await conn.run_sync(lambda c: inspect(c).has_table("users")):
+                    raise RuntimeError(
+                        "测试库缺少 users 表：Schema 只能由 Alembic 管理，"
+                        "请先对测试库执行 `alembic upgrade head`"
+                    )
             async with async_sessionmaker(engine)() as session:
                 exists = await session.scalar(
                     select(User).where(User.email == settings.DEFAULT_ADMIN_EMAIL)

@@ -91,16 +91,34 @@ class KgRetriever:
             entity_texts,
             resource_types=list(analysis.resource_types or []) or None,
             limit=10,
+            kb_ids=list(kb_ids),
         )
         if not matches:
             return [], {}
 
         allowed = await self._mounted_resources(kb_ids)
-        seeds = {
-            node.id: score
-            for node, score in matches
-            if (node.resource_type, node.resource_id) in allowed
-        }
+        kb_scope = {uuid.UUID(str(k)) for k in kb_ids}
+        # node_id → (resource_type, resource_id)：逐跳隔离判定用，按需加载并缓存
+        res_of: dict[uuid.UUID, tuple[str, uuid.UUID]] = {}
+        # node_id → (kb_id, entity_id)：通用导入的实体节点没有挂载资源，
+        # 可见性由所属知识库决定（KB 成员即有权限，与向量检索口径一致）
+        ident_of: dict[uuid.UUID, tuple[uuid.UUID | None, uuid.UUID | None]] = {}
+        # 种子节点已知挂载（构造 seeds 时已加载过 match_nodes 的 node 对象）
+        res_of.update({n.id: (n.resource_type, n.resource_id) for n, _ in matches})
+        ident_of.update({n.id: (n.kb_id, n.entity_id) for n, _ in matches})
+
+        def _mounted(node_id: uuid.UUID) -> bool:
+            res = res_of.get(node_id)
+            if res is not None and res in allowed:
+                return True
+            ident = ident_of.get(node_id)
+            return bool(
+                ident
+                and ident[1] is not None  # 是实体节点
+                and ident[0] in kb_scope  # 且属于本次可访问的知识库
+            )
+
+        seeds = {node.id: score for node, score in matches if _mounted(node.id)}
         if not seeds:
             return [], {}
 
@@ -108,14 +126,6 @@ class KgRetriever:
         facts: dict[uuid.UUID, KgFact] = {}
         visited: set[uuid.UUID] = set(seeds)
         frontier: dict[uuid.UUID, float] = dict(seeds)
-        # node_id → (resource_type, resource_id)：逐跳隔离判定用，按需加载并缓存
-        res_of: dict[uuid.UUID, tuple[str, uuid.UUID]] = {}
-        # 种子节点已知挂载（构造 seeds 时已加载过 match_nodes 的 node 对象）
-        res_of.update({n.id: (n.resource_type, n.resource_id) for n, _ in matches})
-
-        def _mounted(node_id: uuid.UUID) -> bool:
-            res = res_of.get(node_id)
-            return res is not None and res in allowed
 
         for hop in range(1, hops + 1):
             if not frontier:
@@ -133,6 +143,7 @@ class KgRetriever:
                 res_of.update(
                     {n.id: (n.resource_type, n.resource_id) for n in loaded.values()}
                 )
+                ident_of.update({n.id: (n.kb_id, n.entity_id) for n in loaded.values()})
             next_frontier: dict[uuid.UUID, float] = {}
             for edge in edges:
                 if edge.id in facts:

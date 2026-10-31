@@ -56,7 +56,11 @@ class User(Base, TimestampMixin):
     department: Mapped[str] = mapped_column(String(64), default="")  # 部门
     must_change_password: Mapped[bool] = mapped_column(default=False)  # 首次登录强制修改密码
     is_active: Mapped[bool] = mapped_column(default=True)  # 账号启用/禁用（离职=禁用，保留数据可恢复）
-    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)  # 软删除时间（回收站，到期硬删）
+    # 线上库该列为 timestamptz（历史迁移 e6a3b8c1d2f4 调整过）。模型必须与库一致，
+    # 否则每次 autogenerate 都会生成反向的类型变更，污染新迁移。
+    deleted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )  # 软删除时间（回收站，到期硬删）
 
 
 class KnowledgeBase(Base, TimestampMixin):
@@ -146,6 +150,20 @@ class KnowledgeBaseResource(Base):
     )
 
 
+# ── 向量索引状态（与 parse_status 解耦，用于可验证的索引状态管理）─────────────
+# parse_status 只表示「切片是否就绪」；向量是否真的进了 Milvus 由 index_* 单独记录。
+# 历史上二者混用导致「PG 有切片 = 已可检索」的误判（本库曾出现 16.7 万切片但
+# Milvus 仅 3518 条向量的不一致），新字段必须由向量化流程按真实写入结果回填。
+INDEX_STATUS_NOT_INDEXED = "not_indexed"
+INDEX_STATUS_INDEXED = "indexed"
+INDEX_STATUS_STALE = "stale"  # 内容已变更，与已有向量不一致，需重建
+INDEX_STATUS_FAILED = "failed"
+
+# ── 导入模式 ────────────────────────────────────────────────────────────────
+IMPORT_MODE_NORMAL = "normal"  # 普通导入：无跨文件关联
+IMPORT_MODE_RELATIONAL = "relational"  # 关联导入：含主外键/关联表
+
+
 class Document(Base, TimestampMixin):
     __tablename__ = "documents"
 
@@ -177,6 +195,14 @@ class Document(Base, TimestampMixin):
     # 导入溯源：来自哪个数据集、哪一批次（真实数据批次管理用，测试数据/手工录入为空）
     source_dataset: Mapped[str | None] = mapped_column(String(128), nullable=True)
     import_batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # ── Milvus 向量索引的真实状态（由向量化流程回填，可被独立校验）─────────────
+    index_status: Mapped[str] = mapped_column(
+        String(16), default=INDEX_STATUS_NOT_INDEXED, index=True
+    )
+    # 实际写入 Milvus 的向量条数（用于与 chunk_count 比对，发现漏写/孤儿向量）
+    vector_count: Mapped[int] = mapped_column(Integer, default=0)
+    indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    index_error: Mapped[str] = mapped_column(Text, default="")
 
 
 class ImportJob(Base, TimestampMixin):
@@ -199,6 +225,8 @@ class ImportJob(Base, TimestampMixin):
     source_file: Mapped[str] = mapped_column(String(512), default="")
     # herb / prescription / theory / literature / document
     target_type: Mapped[str] = mapped_column(String(16), index=True)
+    # 导入模式：normal（普通）/ relational（关联）。默认 normal，保证既有任务行为不变
+    import_mode: Mapped[str] = mapped_column(String(16), default=IMPORT_MODE_NORMAL, index=True)
     # 导入 documents 时归属的知识库（资源类导入为空）
     kb_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     # pending / processing / completed / failed / cancelled
@@ -908,32 +936,65 @@ KG_PROVENANCE_SOURCE = "resource_source"
 KG_PROVENANCE_SHARED_TAG = "shared_tag"
 
 
-class KgNode(Base, TimestampMixin):
-    """知识图谱节点（TASK-013）：一个资源 = 一个节点。
+# ── 知识图谱：节点类型与关系/实体的确认状态 ────────────────────────────────────
+KG_NODE_TYPE_ENTITY = "entity"
+KG_STATUS_CONFIRMED = "confirmed"
+KG_STATUS_PENDING = "pending"  # 候选、未经人工确认：不参与检索与推理
+KG_STATUS_REJECTED = "rejected"
 
-    - node_type：节点类别，第一版只有 'resource'（业务资源节点）
+
+class KgNode(Base, TimestampMixin):
+    """知识图谱节点：一个资源 = 一个节点；通用导入后一个实体 = 一个节点。
+
+    - node_type：'resource'（业务资源） / 'entity'（通用导入实体）
     - resource_type + resource_id：指回 Herb / Prescription / Theory / Literature
-      本体（多态，不建 FK，与 KnowledgeBaseResource 同风格）
+      本体（多态，不建 FK，与 KnowledgeBaseResource 同风格）；实体节点下为 NULL
+    - entity_id：指向 generic_entities；资源节点下为 NULL
+    - kb_id：**必须隔离**。图谱遍历 / 检索一律按 kb_id 过滤，防止跨知识库关联泄漏
+    - status：confirmed / pending / rejected。候选实体默认 pending，未确认不入检索
     - name / aliases：仅用于图检索的实体匹配，不复制资源正文
-    - 唯一约束 (resource_type, resource_id)：重复构建不产生重复节点
+    - 唯一性改用**部分索引**：资源节点按 (resource_type, resource_id)，
+      实体节点按 (entity_id)，两类节点共存且各自不重复
     """
 
     __tablename__ = "kg_nodes"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
     node_type: Mapped[str] = mapped_column(String(16), default=KG_NODE_TYPE_RESOURCE, index=True)
-    resource_type: Mapped[str] = mapped_column(String(16), index=True)
-    resource_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    kb_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    resource_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    resource_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    # 通用导入实体（node_type='entity' 时非空）
+    entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     name: Mapped[str] = mapped_column(String(128), index=True)
     aliases: Mapped[list[str]] = mapped_column(ARRAY(String(128)), default=list)
+    # 确认状态与候选置信度：低置信度候选默认 pending，确认后才 confirmed
+    status: Mapped[str] = mapped_column(String(16), default=KG_STATUS_CONFIRMED, index=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     __table_args__ = (
-        UniqueConstraint(
-            "resource_type", "resource_id", name="uq_kg_nodes_resource"
+        # 资源节点唯一（与原约束等价，改为部分索引以允许实体节点共存）
+        Index(
+            "uq_kg_nodes_resource",
+            "resource_type",
+            "resource_id",
+            unique=True,
+            postgresql_where=text("resource_type IS NOT NULL"),
+        ),
+        Index(
+            "uq_kg_nodes_entity",
+            "entity_id",
+            unique=True,
+            postgresql_where=text("entity_id IS NOT NULL"),
         ),
         Index("ix_kg_nodes_aliases_gin", "aliases", postgresql_using="gin"),
         # 按类型查节点（构建/统计路径）
         Index("ix_kg_nodes_type_resource_type", "node_type", "resource_type"),
+        # 权限隔离 + 未确认不参与遍历
+        Index("ix_kg_nodes_kb_status", "kb_id", "status"),
     )
 
 
@@ -959,6 +1020,13 @@ class KgEdge(Base, TimestampMixin):
     relation_type: Mapped[str] = mapped_column(String(32), index=True)
     provenance: Mapped[str] = mapped_column(String(64), default="")
     description: Mapped[str] = mapped_column(String(255), default="")
+    # 知识库隔离：图谱遍历必须按 kb_id 过滤，防止跨知识库关系泄漏
+    kb_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    # 确认状态：候选边默认 pending，未经人工确认不参与检索与推理
+    status: Mapped[str] = mapped_column(String(16), default=KG_STATUS_CONFIRMED, index=True)
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     __table_args__ = (
         UniqueConstraint(
@@ -970,4 +1038,199 @@ class KgEdge(Base, TimestampMixin):
         Index(
             "ix_kg_edges_relation_source", "relation_type", "source_node_id"
         ),
+        Index("ix_kg_edges_kb_status", "kb_id", "status"),
+    )
+
+
+# ============================================================================
+# 通用知识导入（普通导入与关联导入共用）
+#
+# 设计要点：
+# - 复用既有 ImportJob 作为任务机，不另起 sessions 表；
+# - import_files 记录文件夹递归的相对路径，支持同名文件区分；
+# - import_records 保留原始 Schema 的每一条记录，不退化成文本块（决策 6）；
+# - generic_entities / generic_relations 支持任意 Schema，不强制映射四类业务表；
+# - 关系与实体一律带 kb_id，保证知识库隔离（决策 7）。
+# ============================================================================
+
+
+class ImportFile(Base, TimestampMixin):
+    """导入文件清单：一次导入任务下的每个文件（含文件夹递归得到的相对路径）。"""
+
+    __tablename__ = "import_files"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("import_jobs.id", ondelete="CASCADE"), index=True
+    )
+    # 文件夹递归导入时保留原始相对路径：区分「文件名相同但路径不同」的文件
+    relative_path: Mapped[str] = mapped_column(String(512), default="")
+    file_name: Mapped[str] = mapped_column(String(255), default="")
+    file_ext: Mapped[str] = mapped_column(String(16), default="")
+    size_bytes: Mapped[int] = mapped_column(BigInteger, default=0)
+    # 内容 sha256：用于重复文件识别与记录幂等
+    file_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
+    # 自动识别的编码（utf-8 / gbk 等）；识别失败留空，由解析阶段给出明确错误
+    encoding: Mapped[str] = mapped_column(String(32), default="")
+    # 识别后的规范格式：csv/tsv/json/jsonl/xlsx/parquet/pdf/docx/txt/md
+    detected_format: Mapped[str] = mapped_column(String(16), default="", index=True)
+    # 结构化文件的记录数（文档类为 0）
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    # pending / parsed / imported / failed / skipped
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+
+    __table_args__ = (
+        UniqueConstraint("job_id", "relative_path", name="uq_import_files_job_path"),
+    )
+
+
+class ImportRecord(Base, TimestampMixin):
+    """原始结构化记录：导入的每一行原文，保留完整字段，不拼接成文本块。
+
+    record_key = sha256(file_hash:row_no) 是**稳定的源记录标识**：
+    同一份文件重复导入时 record_key 不变，据此实现导入幂等（决策 7）。
+    """
+
+    __tablename__ = "import_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    job_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("import_jobs.id", ondelete="CASCADE"), index=True
+    )
+    file_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("import_files.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    kb_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    # 行号（1 基），与文件内位置对应，便于溯源到「哪个文件第几行」
+    row_no: Mapped[int] = mapped_column(Integer)
+    record_key: Mapped[str] = mapped_column(String(64), index=True)
+    # 原始行的完整字段：不做类型转换、不丢字段、不翻译
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # 该行被映射成的实体类型（可为空 = 未映射）
+    entity_type: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+    __table_args__ = (
+        # 同一任务内同一源记录只存一份
+        Index(
+            "uq_import_records_job_record_key", "job_id", "record_key", unique=True
+        ),
+        # 同一知识库内同一源记录只存一份：重复导入天然幂等
+        Index(
+            "uq_import_records_kb_record_key",
+            "kb_id",
+            "record_key",
+            unique=True,
+            postgresql_where=text("kb_id IS NOT NULL"),
+        ),
+        Index("ix_import_records_kb_entity", "kb_id", "entity_type"),
+    )
+
+
+class GenericEntity(Base, TimestampMixin):
+    """通用实体：任意 Schema 的导入实体，不强制映射到中药/方剂/理论/文献四类表。"""
+
+    __tablename__ = "generic_entities"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
+    )
+    # 用户/模板定义的类型标签，如 compound / target / disease / 中药 / 方剂
+    entity_type: Mapped[str] = mapped_column(String(64), index=True)
+    name: Mapped[str] = mapped_column(String(255), default="", index=True)
+    # 原始字段全量保留（不丢字段、不改类型、不翻译）
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # 溯源：来自哪个文件的哪一行
+    source_file_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("import_files.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source_row_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 与 import_records.record_key 一致的稳定标识（用于幂等 upsert）
+    record_key: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    # 原始主键值：关系连接用，保留原样不做猜测
+    source_pk: Mapped[str] = mapped_column(String(255), default="", index=True)
+    import_batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        Index(
+            "uq_generic_entities_kb_type_record_key",
+            "kb_id",
+            "entity_type",
+            "record_key",
+            unique=True,
+            postgresql_where=text("record_key IS NOT NULL"),
+        ),
+        Index("ix_generic_entities_kb_type", "kb_id", "entity_type"),
+        # 关系解析时按 (kb, 类型, 原始主键) 定位实体
+        Index("ix_generic_entities_kb_pk", "kb_id", "entity_type", "source_pk"),
+    )
+
+
+class GenericRelation(Base, TimestampMixin):
+    """通用关系：实体之间的关联。**必须带 kb_id**，保证知识库隔离与权限控制。"""
+
+    __tablename__ = "generic_relations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
+    )
+    source_entity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("generic_entities.id", ondelete="CASCADE"), index=True
+    )
+    target_entity_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("generic_entities.id", ondelete="CASCADE"), index=True
+    )
+    relation_type: Mapped[str] = mapped_column(String(64), index=True)
+    # 关系载荷（如用量、角色、来源字段值）
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # 候选置信度 0~1：低于阈值的候选保持 pending，未经人工确认不进入 KG
+    confidence: Mapped[float] = mapped_column(Float, default=1.0)
+    # pending / confirmed / rejected
+    status: Mapped[str] = mapped_column(String(16), default=KG_STATUS_PENDING, index=True)
+    # 关系来源：发现规则 + 文件 + 字段，供审计与回溯
+    provenance: Mapped[str] = mapped_column(String(255), default="")
+    import_batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "kb_id",
+            "source_entity_id",
+            "target_entity_id",
+            "relation_type",
+            name="uq_generic_relations_kb_src_dst_type",
+        ),
+        Index("ix_generic_relations_kb_status", "kb_id", "status"),
+        Index("ix_generic_relations_kb_type", "kb_id", "relation_type"),
+    )
+
+
+class ImportMappingTemplate(Base, TimestampMixin):
+    """导入映射模板：相同 Schema 的数据集可复用字段映射与关系定义。
+
+    schema_fingerprint = sha256(有序字段名列表 的规范化表示)。
+    """
+
+    __tablename__ = "import_mapping_templates"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    # 归属知识库；为空表示全局模板
+    kb_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    name: Mapped[str] = mapped_column(String(128), index=True)
+    schema_fingerprint: Mapped[str] = mapped_column(String(64), index=True)
+    # 模板内容：字段映射 / 实体类型 / 主键 / 关系定义
+    config: Mapped[dict] = mapped_column(JSONB, default=dict)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("name", "schema_fingerprint", name="uq_import_mapping_name_fp"),
     )

@@ -1725,3 +1725,288 @@ export async function fetchUploadImportJob(
   );
   return data.job;
 }
+
+// ─────────────────────────── 通用知识导入 ───────────────────────────
+
+export interface ScannedFile {
+  path: string;
+  file_name: string;
+  size_bytes: number;
+  detected_format: string;
+  encoding: string;
+  row_count: number;
+  fields: { name: string; type: string; is_unique: boolean; null_ratio: number }[];
+  primary_key_candidates: {
+    fields: string[];
+    uniqueness: number;
+    confidence: number;
+    reason: string;
+  }[];
+  preview: { row_no: number; data: Record<string, unknown> }[];
+  error: string | null;
+  supported: boolean;
+}
+
+export interface ScanResult {
+  session_id: string;
+  files: ScannedFile[];
+  errors: string[];
+}
+
+/**
+ * 扫描上传文件：识别类型/编码/记录数并返回预览（只读，不写业务数据）。
+ * paths 与 files 顺序一致，用于文件夹递归时保留目录结构。
+ */
+export async function scanGeneralFiles(
+  files: File[],
+  paths: string[],
+): Promise<ScanResult> {
+  const form = new FormData();
+  files.forEach((file) => form.append('files', file));
+  form.append('paths', JSON.stringify(paths));
+  const { data } = await api.post<ScanResult>('/import/scan', form, {
+    timeout: 300000,
+  });
+  return data;
+}
+
+/** 普通导入落库：文档走 RAG 链路，结构化文件按记录入库。 */
+export async function commitGeneralImport(payload: {
+  session_id: string;
+  kb_id: string;
+  files: { path: string; entity_type: string; pk_field?: string | null }[];
+  import_documents?: boolean;
+}): Promise<{
+  job_id: string;
+  documents: number;
+  records: number;
+  entities: number;
+  failed: number;
+  errors: { path: string; row_no: number; message: string }[];
+}> {
+  const { data } = await api.post('/import/general/commit', payload, {
+    timeout: 600000,
+  });
+  return data;
+}
+
+export interface RelationalField {
+  name: string;
+  type: string;
+  null_ratio: number;
+  unique_ratio: number;
+  is_unique: boolean;
+}
+
+export interface RelationalTable {
+  table: string;
+  file: string;
+  row_count: number;
+  analyzed_rows: number;
+  sampled: boolean;
+  fields: RelationalField[];
+  primary_key_candidates: {
+    fields: string[];
+    uniqueness: number;
+    confidence: number;
+    reason: string;
+  }[];
+  preview: { row_no: number; data: Record<string, unknown> }[];
+}
+
+export interface ForeignKeyItem {
+  child_table: string;
+  child_field: string;
+  parent_table: string;
+  parent_field: string;
+  cardinality: string;
+  confidence: number;
+  coverage: number;
+  evidence: string;
+  status: string;
+}
+
+export interface JunctionItem {
+  table: string;
+  left_table: string;
+  left_field: string;
+  right_table: string;
+  right_field: string;
+  label: string;
+  confidence: number;
+  evidence: string;
+  relation_type: string;
+  status: string;
+}
+
+export interface RelationalAnalyzeResult {
+  session_id: string;
+  tables: RelationalTable[];
+  primary_keys: Record<string, string[]>;
+  foreign_keys: ForeignKeyItem[];
+  junctions: JunctionItem[];
+  errors: string[];
+}
+
+/** 关联导入分析：Schema + 主外键候选 + 关联表候选。 */
+export async function analyzeRelationalFiles(
+  files: File[],
+  paths: string[],
+): Promise<RelationalAnalyzeResult> {
+  const form = new FormData();
+  files.forEach((file) => form.append('files', file));
+  form.append('paths', JSON.stringify(paths));
+  const { data } = await api.post<RelationalAnalyzeResult>(
+    '/import/relational/analyze',
+    form,
+    { timeout: 300000 },
+  );
+  return data;
+}
+
+/** 关联导入落库：实体 + 关系 +（确认后）知识图谱。 */
+export async function commitRelationalImport(payload: {
+  session_id: string;
+  kb_id: string;
+  primary_keys: Record<string, string>;
+  foreign_keys: {
+    child_table: string;
+    child_field: string;
+    parent_table: string;
+    parent_field: string;
+    relation_type?: string;
+  }[];
+  junctions: {
+    table: string;
+    left_table: string;
+    left_field: string;
+    right_table: string;
+    right_field: string;
+    relation_type?: string;
+  }[];
+  auto_confirm?: boolean;
+}): Promise<{
+  job_id: string;
+  records: number;
+  entities: number;
+  relations: number;
+  kg_nodes: number;
+  kg_edges: number;
+  failed_rows: number;
+  errors: { file_name: string; row_no: number; message: string }[];
+}> {
+  const { data } = await api.post('/import/relational/commit', payload, {
+    timeout: 600000,
+  });
+  return data;
+}
+
+/** 人工确认 / 取消 / 拒绝关系。 */
+export async function setRelationsStatus(payload: {
+  kb_id: string;
+  relation_ids: string[];
+  status: 'pending' | 'confirmed' | 'rejected';
+}): Promise<{ updated: number; status: string; kg_nodes: number; kg_edges: number }> {
+  const { data } = await api.post('/import/relations/status', payload);
+  return data;
+}
+
+export interface RelationRow {
+  id: string;
+  source: { name: string; type: string } | null;
+  target: { name: string; type: string } | null;
+  relation_type: string;
+  status: string;
+  confidence: number;
+  provenance: string;
+}
+
+/** 按知识库列出关系（确认界面与 ER 图数据源）。 */
+export async function fetchRelations(
+  kbId: string,
+  status?: string,
+  limit = 100,
+): Promise<RelationRow[]> {
+  const { data } = await api.get<{ items: RelationRow[] }>('/import/relations', {
+    params: { kb_id: kbId, ...(status ? { status } : {}), limit },
+  });
+  return data.items;
+}
+
+export interface ImportStats {
+  entities: number;
+  records: number;
+  relations_total: number;
+  relations_pending: number;
+  relations_confirmed: number;
+  relations_rejected: number;
+}
+
+/** 导入后统计：实体 / 关系（按状态）/ 记录 / 失败。 */
+export async function fetchImportStats(kbId: string): Promise<ImportStats> {
+  const { data } = await api.get<ImportStats>('/import/stats', {
+    params: { kb_id: kbId },
+  });
+  return data;
+}
+
+export interface IndexDiffReport {
+  kb_id: string | null;
+  scanned_documents: number;
+  milvus_available: boolean;
+  error: string;
+  clean: boolean;
+  totals: {
+    missing_vectors: number;
+    orphan_vectors: number;
+    duplicate_vectors: number;
+    inaccurate_flags: number;
+  };
+  documents: {
+    doc_id: string;
+    file_name: string;
+    expected_chunks: number;
+    actual_vectors: number;
+    missing_count: number;
+    orphan_count: number;
+    duplicate_count: number;
+    current_status: string;
+    suggested_status: string;
+    flag_inaccurate: boolean;
+  }[];
+}
+
+/** 索引差异报告（只读）。 */
+export async function fetchIndexDiff(kbId?: string): Promise<IndexDiffReport> {
+  const { data } = await api.get<IndexDiffReport>('/import/index/diff', {
+    params: kbId ? { kb_id: kbId } : {},
+  });
+  return data;
+}
+
+/** 按报告修复索引状态；删除向量必须 confirmed=true，否则后端返回 400。 */
+export async function applyIndexFix(payload: {
+  kb_id?: string;
+  fix_flags?: boolean;
+  delete_orphans?: boolean;
+  delete_duplicates?: boolean;
+  confirmed?: boolean;
+}): Promise<{
+  flags_updated: number;
+  orphans_deleted: number;
+  duplicates_deleted: number;
+  rebuild_marked: number;
+  skipped_deletions: number;
+}> {
+  const { data } = await api.post('/import/index/apply', payload);
+  return data;
+}
+
+/** 标记缺失文档重建 / 重置失败文档重试。 */
+export async function rebuildIndex(payload: {
+  kb_id?: string;
+  retry_failed?: boolean;
+}): Promise<{ rebuild_marked?: number; retry_failed?: number }> {
+  const { data } = await api.post('/import/index/rebuild', payload);
+  return data;
+}

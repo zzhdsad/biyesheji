@@ -20,9 +20,68 @@ import src.core.deps as deps_mod  # noqa: E402
 from src.core.deps import get_current_user as _REAL_GET_CURRENT_USER  # noqa: E402
 from src.domain.models import User  # noqa: E402
 from src.infrastructure import milvus_store, redis_client  # noqa: E402
+from src.infrastructure.db_safety import assert_safe_database  # noqa: E402
 from src.main import app  # noqa: E402
 from tests.test_upload import PG_AVAILABLE, _init_db_standalone  # noqa: E402
 
+
+# ── 测试套件级保险：禁止在未显式放行时连接主库 ──────────────────────────────
+# 集成测试会真实建知识库 / 上传文档 / 写导入记录，过去直接连 settings.DATABASE_URL，
+# 指向主库时即污染生产数据。这里在收集阶段就拦截，需连主库时必须显式 DB_ALLOW_MAIN=1。
+assert_safe_database(settings.DATABASE_URL, purpose="pytest 测试套件")
+
+
+def _ensure_test_user() -> None:
+    """把测试模式的固定 TEST_USER 真正落库。
+
+    为什么必须有这一步：测试模式下的当前用户是 deps.TEST_USER（**游离对象，
+    不在 users 表**），而 knowledge_bases.owner_id 有外键约束。
+    过去测试能跑通，是因为历史测试直接连主库、把 TEST_USER 这行写进了主库——
+    即测试依赖生产库里的残留数据，换成隔离库后立即 ForeignKeyViolation。
+    这里在套件启动时按目标库补齐，使测试不再依赖任何外部残留。
+    """
+    import asyncio
+
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from src.core.deps import TEST_USER
+
+    async def _run() -> None:
+        engine = create_async_engine(settings.DATABASE_URL)
+        try:
+            async with async_sessionmaker(engine)() as session:
+                existing = await session.scalar(select(User).where(User.id == TEST_USER.id))
+                if existing is not None:
+                    return
+                same_name = await session.scalar(
+                    select(User).where(User.username == TEST_USER.username)
+                )
+                if same_name is not None:
+                    # 库里已有同名管理员（init_db seed）：对齐 id，避免重复插入
+                    TEST_USER.id = same_name.id
+                    return
+                session.add(
+                    User(
+                        id=TEST_USER.id,
+                        email=TEST_USER.email,
+                        username=TEST_USER.username,
+                        hashed_password="",
+                        role="admin",
+                        name="测试管理员",
+                        department="测试部",
+                        must_change_password=False,
+                    )
+                )
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_run())
+
+
+if PG_AVAILABLE:
+    _ensure_test_user()
 
 # ── 启用测试模式（全局开关，无需 patch Depends）──────────────────────────────
 # deps.get_current_user 内部会检查这个全局变量

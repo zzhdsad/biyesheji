@@ -1,0 +1,49 @@
+# 开发模式覆盖层：必须与 docker-compose.yml 组合使用（单独使用无效）。
+#
+# 启动：dev.bat
+#   → docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d backend frontend
+# 切回：dev-stop.bat
+#   → docker compose -f docker-compose.yml up -d backend frontend
+#
+# 目的：改 backend/src、frontend/src 下的代码即时生效，避免每次改代码都重建镜像。
+# 只覆盖命令与挂载，不改任何生产行为；正式发布仍走 build.ps1 构建镜像。
+services:
+  backend:
+    # uvicorn --reload：监听源码变化自动重启
+    command: ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/alembic:/app/alembic
+      # 测试代码也要热更新，否则容器里跑的是镜像内的旧测试
+      - ./backend/tests:/app/tests
+    restart: "no"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      # 开发环境默认连接**隔离库** kp_dev，绝不指向主库 knowledge_platform。
+      # 理由：开发热重载与自动化测试会真实建知识库 / 上传文档 / 写导入记录，
+      # 过去直连主库既污染生产数据，也曾因 create_all 在主库意外建表。
+      # Schema 由 Alembic 管理，启动前需对 kp_dev 执行：alembic upgrade head
+      DATABASE_URL: "postgresql+asyncpg://postgres:postgres@postgres:5432/kp_dev"
+      # 向量库同样必须隔离：默认集合 document_chunks 里是生产向量
+      # （实测 3518 条），开发/测试往里写会直接污染生产检索结果。
+      MILVUS_COLLECTION: "document_chunks_dev"
+
+  frontend:
+    # next dev：编译按需进行，保存即刷新
+    command: ["npm", "run", "dev", "--", "-H", "0.0.0.0"]
+    # 正式镜像里 NODE_ENV=production，与 next dev 冲突会告警，开发模式显式覆盖
+    environment:
+      NODE_ENV: "development"
+      # Windows 上 Docker 绑定挂载不转发 inotify 事件，Next 的 watcher 收不到变更，
+      # 会出现「改了源码但页面跑的是旧 bundle」（端到端验收时实测：编译产物里
+      # 根本没有新代码，只有重启容器才生效）。开启轮询彻底解决。
+      WATCHPACK_POLLING: "true"
+    volumes:
+      - ./frontend/src:/app/src
+      # 正式镜像最终阶段只保留了 package.json/node_modules/.next，
+      # dev 模式需要这些配置才能启动，逐个挂载而不整目录挂载（避免覆盖 node_modules）
+      - ./frontend/next.config.mjs:/app/next.config.mjs
+      - ./frontend/tsconfig.json:/app/tsconfig.json
+      - ./frontend/postcss.config.mjs:/app/postcss.config.mjs
+      - ./frontend/tailwind.config.ts:/app/tailwind.config.ts
+    restart: "no"

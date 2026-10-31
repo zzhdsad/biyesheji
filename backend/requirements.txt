@@ -29,6 +29,10 @@ pypdf>=4.0
 python-docx>=1.1
 # 导入中心 Parquet 数据集扫描
 pyarrow>=15.0
+# 通用导入：XLSX 解析（openpyxl 提供 read_only 流式读取，可直接取单元格与行号）
+openpyxl>=3.1
+# 通用导入：编码自动识别（GBK/Big5 等中文编码文件）
+charset-normalizer>=3.3
 
 # AI 依赖
 # openai：HyDE 假设答案生成走 OpenAI 兼容 SDK（DeepSeek/Qwen/Ollama 等）

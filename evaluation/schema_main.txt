@@ -1,0 +1,363 @@
+alembic_version.version_num : character varying
+audit_logs.created_at : timestamp with time zone
+audit_logs.detail : jsonb
+audit_logs.id : uuid
+audit_logs.ip : character varying
+audit_logs.operation : character varying
+audit_logs.operator_id : uuid
+audit_logs.operator_name : character varying
+audit_logs.target_id : character varying
+audit_logs.target_type : character varying
+categories.created_at : timestamp with time zone
+categories.deleted_at : timestamp with time zone
+categories.description : text
+categories.id : uuid
+categories.name : character varying
+categories.parent_id : uuid
+categories.resource_type : character varying
+categories.sort_order : integer
+categories.updated_at : timestamp with time zone
+chunks.chunk_index : integer
+chunks.content : text
+chunks.created_at : timestamp with time zone
+chunks.credibility_level : smallint
+chunks.doc_id : uuid
+chunks.id : uuid
+chunks.kb_id : uuid
+chunks.page_num : integer
+chunks.source_type : character varying
+chunks.title_path : character varying
+chunks.token_count : integer
+chunks.updated_at : timestamp with time zone
+conversations.created_at : timestamp with time zone
+conversations.id : uuid
+conversations.kb_ids : ARRAY
+conversations.title : character varying
+conversations.updated_at : timestamp with time zone
+conversations.user_id : uuid
+documents.chunk_count : integer
+documents.created_at : timestamp with time zone
+documents.credibility_level : smallint
+documents.deleted_at : timestamp without time zone
+documents.era : character varying
+documents.error_message : text
+documents.file_name : character varying
+documents.file_size : bigint
+documents.file_type : character varying
+documents.id : uuid
+documents.import_batch_id : character varying
+documents.kb_id : uuid
+documents.parse_status : character varying
+documents.progress_percent : integer
+documents.source_dataset : character varying
+documents.source_type : character varying
+documents.storage_path : character varying
+documents.updated_at : timestamp with time zone
+documents.vector_model : character varying
+evaluation_results.answer : text
+evaluation_results.answer_correctness : double precision
+evaluation_results.context_relevancy : double precision
+evaluation_results.created_at : timestamp with time zone
+evaluation_results.dataset_version : character varying
+evaluation_results.error : text
+evaluation_results.experiment_name : character varying
+evaluation_results.faithfulness : double precision
+evaluation_results.gate_decision : character varying
+evaluation_results.gate_version : character varying
+evaluation_results.id : uuid
+evaluation_results.question_type : character varying
+evaluation_results.reflection_decision : character varying
+evaluation_results.reflection_reason : character varying
+evaluation_results.reflection_retry_strategy : character varying
+evaluation_results.reflection_version : character varying
+evaluation_results.retrieval_strategy : character varying
+evaluation_results.retrieved_contexts : jsonb
+evaluation_results.retry_strategy : character varying
+evaluation_results.run_id : character varying
+evaluation_results.test_case_id : uuid
+evaluation_results.updated_at : timestamp with time zone
+evaluation_runs.answer_correctness : double precision
+evaluation_runs.by_question_type : jsonb
+evaluation_runs.case_count : integer
+evaluation_runs.config_snapshot : jsonb
+evaluation_runs.context_relevancy : double precision
+evaluation_runs.created_at : timestamp with time zone
+evaluation_runs.dataset_version : character varying
+evaluation_runs.evaluated_count : integer
+evaluation_runs.experiment_name : character varying
+evaluation_runs.failed_count : integer
+evaluation_runs.id : uuid
+evaluation_runs.idempotency_key : character varying
+evaluation_runs.kb_id : uuid
+evaluation_runs.passed : boolean
+evaluation_runs.retrieval_strategy : character varying
+evaluation_runs.skipped_count : integer
+evaluation_runs.threshold : double precision
+evaluation_runs.updated_at : timestamp with time zone
+feedbacks.comment : text
+feedbacks.created_at : timestamp with time zone
+feedbacks.id : uuid
+feedbacks.message_id : uuid
+feedbacks.rating : integer
+feedbacks.updated_at : timestamp with time zone
+feedbacks.user_id : uuid
+generic_entities.created_at : timestamp with time zone
+generic_entities.created_by : uuid
+generic_entities.deleted_at : timestamp without time zone
+generic_entities.entity_type : character varying
+generic_entities.id : uuid
+generic_entities.import_batch_id : character varying
+generic_entities.kb_id : uuid
+generic_entities.name : character varying
+generic_entities.payload : jsonb
+generic_entities.record_key : character varying
+generic_entities.source_file_id : uuid
+generic_entities.source_pk : character varying
+generic_entities.source_row_no : integer
+generic_entities.updated_at : timestamp with time zone
+generic_relations.confidence : double precision
+generic_relations.created_at : timestamp with time zone
+generic_relations.created_by : uuid
+generic_relations.deleted_at : timestamp without time zone
+generic_relations.id : uuid
+generic_relations.import_batch_id : character varying
+generic_relations.kb_id : uuid
+generic_relations.payload : jsonb
+generic_relations.provenance : character varying
+generic_relations.relation_type : character varying
+generic_relations.source_entity_id : uuid
+generic_relations.status : character varying
+generic_relations.target_entity_id : uuid
+generic_relations.updated_at : timestamp with time zone
+herb_tags.herb_id : uuid
+herb_tags.tag_id : uuid
+herbs.aliases : ARRAY
+herbs.category_id : uuid
+herbs.channels : ARRAY
+herbs.created_at : timestamp with time zone
+herbs.deleted_at : timestamp with time zone
+herbs.description : text
+herbs.effects : text
+herbs.id : uuid
+herbs.import_batch_id : character varying
+herbs.name : character varying
+herbs.properties : character varying
+herbs.source : character varying
+herbs.source_dataset : character varying
+herbs.updated_at : timestamp with time zone
+import_files.created_at : timestamp with time zone
+import_files.detected_format : character varying
+import_files.encoding : character varying
+import_files.error_message : text
+import_files.file_ext : character varying
+import_files.file_hash : character varying
+import_files.file_name : character varying
+import_files.id : uuid
+import_files.job_id : uuid
+import_files.relative_path : character varying
+import_files.row_count : integer
+import_files.size_bytes : bigint
+import_files.status : character varying
+import_files.updated_at : timestamp with time zone
+import_jobs.batch_id : character varying
+import_jobs.created_at : timestamp with time zone
+import_jobs.created_by : uuid
+import_jobs.dataset_id : character varying
+import_jobs.dataset_name : character varying
+import_jobs.error_message : text
+import_jobs.failed : integer
+import_jobs.failed_items : jsonb
+import_jobs.finished_at : timestamp with time zone
+import_jobs.id : uuid
+import_jobs.kb_id : uuid
+import_jobs.processed : integer
+import_jobs.skipped : integer
+import_jobs.source_file : character varying
+import_jobs.started_at : timestamp with time zone
+import_jobs.status : character varying
+import_jobs.succeeded : integer
+import_jobs.target_type : character varying
+import_jobs.total : integer
+import_jobs.updated_at : timestamp with time zone
+import_mapping_templates.config : jsonb
+import_mapping_templates.created_at : timestamp with time zone
+import_mapping_templates.created_by : uuid
+import_mapping_templates.id : uuid
+import_mapping_templates.kb_id : uuid
+import_mapping_templates.name : character varying
+import_mapping_templates.schema_fingerprint : character varying
+import_mapping_templates.updated_at : timestamp with time zone
+import_records.created_at : timestamp with time zone
+import_records.entity_type : character varying
+import_records.file_id : uuid
+import_records.id : uuid
+import_records.job_id : uuid
+import_records.kb_id : uuid
+import_records.payload : jsonb
+import_records.record_key : character varying
+import_records.row_no : integer
+import_records.updated_at : timestamp with time zone
+kb_members.created_at : timestamp with time zone
+kb_members.kb_id : uuid
+kb_members.role : character varying
+kb_members.updated_at : timestamp with time zone
+kb_members.user_id : uuid
+kg_edges.created_at : timestamp with time zone
+kg_edges.description : character varying
+kg_edges.id : uuid
+kg_edges.provenance : character varying
+kg_edges.relation_type : character varying
+kg_edges.source_node_id : uuid
+kg_edges.target_node_id : uuid
+kg_edges.updated_at : timestamp with time zone
+kg_nodes.aliases : ARRAY
+kg_nodes.created_at : timestamp with time zone
+kg_nodes.id : uuid
+kg_nodes.name : character varying
+kg_nodes.node_type : character varying
+kg_nodes.resource_id : uuid
+kg_nodes.resource_type : character varying
+kg_nodes.updated_at : timestamp with time zone
+knowledge_base_resources.created_at : timestamp with time zone
+knowledge_base_resources.id : uuid
+knowledge_base_resources.knowledge_base_id : uuid
+knowledge_base_resources.resource_id : uuid
+knowledge_base_resources.resource_type : character varying
+knowledge_bases.created_at : timestamp with time zone
+knowledge_bases.deleted_at : timestamp without time zone
+knowledge_bases.description : text
+knowledge_bases.id : uuid
+knowledge_bases.name : character varying
+knowledge_bases.owner_id : uuid
+knowledge_bases.updated_at : timestamp with time zone
+knowledge_bases.visibility : character varying
+literature_tags.literature_id : uuid
+literature_tags.tag_id : uuid
+literatures.aliases : ARRAY
+literatures.author : character varying
+literatures.category_id : uuid
+literatures.content : text
+literatures.created_at : timestamp with time zone
+literatures.deleted_at : timestamp with time zone
+literatures.dynasty : character varying
+literatures.id : uuid
+literatures.import_batch_id : character varying
+literatures.name : character varying
+literatures.source : character varying
+literatures.source_dataset : character varying
+literatures.summary : character varying
+literatures.updated_at : timestamp with time zone
+messages.citations : jsonb
+messages.content : text
+messages.conversation_id : uuid
+messages.created_at : timestamp with time zone
+messages.id : uuid
+messages.role : character varying
+messages.updated_at : timestamp with time zone
+model_configs.created_at : timestamp with time zone
+model_configs.embedding_backend : character varying
+model_configs.embedding_device : character varying
+model_configs.embedding_model : character varying
+model_configs.hyde_backend : character varying
+model_configs.hyde_base_url : character varying
+model_configs.hyde_enabled : boolean
+model_configs.hyde_model : character varying
+model_configs.id : integer
+model_configs.llm_api_key : character varying
+model_configs.llm_base_url : character varying
+model_configs.llm_model : character varying
+model_configs.llm_provider : character varying
+model_configs.rerank_backend : character varying
+model_configs.rerank_device : character varying
+model_configs.rerank_model : character varying
+model_configs.updated_at : timestamp with time zone
+prescription_ingredients.amount : numeric
+prescription_ingredients.herb_id : uuid
+prescription_ingredients.id : uuid
+prescription_ingredients.prescription_id : uuid
+prescription_ingredients.processing : character varying
+prescription_ingredients.role : character varying
+prescription_ingredients.sort_order : integer
+prescription_ingredients.unit : character varying
+prescription_tags.prescription_id : uuid
+prescription_tags.tag_id : uuid
+prescriptions.aliases : ARRAY
+prescriptions.category_id : uuid
+prescriptions.created_at : timestamp with time zone
+prescriptions.deleted_at : timestamp with time zone
+prescriptions.description : text
+prescriptions.efficacy : text
+prescriptions.id : uuid
+prescriptions.import_batch_id : character varying
+prescriptions.indications : text
+prescriptions.name : character varying
+prescriptions.source : character varying
+prescriptions.source_dataset : character varying
+prescriptions.updated_at : timestamp with time zone
+prescriptions.usage_method : character varying
+revectorize_jobs.created_at : timestamp with time zone
+revectorize_jobs.created_by : uuid
+revectorize_jobs.error_message : text
+revectorize_jobs.failed : integer
+revectorize_jobs.failed_doc_ids : jsonb
+revectorize_jobs.finished_at : timestamp with time zone
+revectorize_jobs.id : uuid
+revectorize_jobs.kb_id : uuid
+revectorize_jobs.previous_model : character varying
+revectorize_jobs.processed : integer
+revectorize_jobs.started_at : timestamp with time zone
+revectorize_jobs.status : character varying
+revectorize_jobs.succeeded : integer
+revectorize_jobs.target_model : character varying
+revectorize_jobs.total : integer
+revectorize_jobs.updated_at : timestamp with time zone
+system_configs.history_window : integer
+system_configs.id : integer
+system_configs.max_file_size_mb : integer
+system_configs.recall_top_k : integer
+system_configs.relevance_threshold : double precision
+system_configs.rerank_top_n : integer
+system_configs.trash_retention_days : integer
+tags.color : character varying
+tags.created_at : timestamp with time zone
+tags.deleted_at : timestamp with time zone
+tags.description : text
+tags.id : uuid
+tags.name : character varying
+tags.updated_at : timestamp with time zone
+test_cases.created_at : timestamp with time zone
+test_cases.dataset_version : character varying
+test_cases.golden_answer : text
+test_cases.golden_contexts : jsonb
+test_cases.id : uuid
+test_cases.kb_id : uuid
+test_cases.needs_review : boolean
+test_cases.question : text
+test_cases.question_type : character varying
+test_cases.source_reference : text
+test_cases.updated_at : timestamp with time zone
+theories.aliases : ARRAY
+theories.category_id : uuid
+theories.content : text
+theories.created_at : timestamp with time zone
+theories.deleted_at : timestamp with time zone
+theories.id : uuid
+theories.import_batch_id : character varying
+theories.name : character varying
+theories.source : character varying
+theories.source_dataset : character varying
+theories.updated_at : timestamp with time zone
+theory_tags.tag_id : uuid
+theory_tags.theory_id : uuid
+users.created_at : timestamp with time zone
+users.deleted_at : timestamp with time zone
+users.department : character varying
+users.email : character varying
+users.hashed_password : character varying
+users.id : uuid
+users.is_active : boolean
+users.must_change_password : boolean
+users.name : character varying
+users.role : character varying
+users.updated_at : timestamp with time zone
+users.username : character varying

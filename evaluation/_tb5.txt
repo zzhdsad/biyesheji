@@ -1,0 +1,15 @@
+............F                                                            [100%]
+=================================== FAILURES ===================================
+E   assert 3 == 8
+----------------------------- Captured stderr call -----------------------------
+2026-10-31 02:13:42.911 | INFO     | src.application.entity_import_service:sync_confirmed_to_kg:458 - [entity_import] KG 同步完成：kb=e8798e51-b045-4973-92d9-79c5358fc8a8 节点 4 边 3
+/app/tests/test_entity_import_service.py:601: assert 3 == 8
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/pymilvus/client/__init__.py:6
+  /usr/local/lib/python3.12/site-packages/pymilvus/client/__init__.py:6: UserWarning: pkg_resources is deprecated as an API. See https://setuptools.pypa.io/en/latest/pkg_resources.html. The pkg_resources package is slated for removal as early as 2025-11-30. Refrain from using this package or pin to Setuptools<81.
+    from pkg_resources import DistributionNotFound, get_distribution
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_entity_import_service.py::test_end_to_end_relational_import_is_idempotent[asyncio]
+1 failed, 12 passed, 1 warning in 3.64s

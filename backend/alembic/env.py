@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.core.config import settings  # noqa: E402
 from src.domain.models import Base  # noqa: E402
+from src.infrastructure.db_safety import assert_safe_database  # noqa: E402
 
 config = context.config
 
@@ -32,8 +33,14 @@ target_metadata = Base.metadata
 
 
 def _database_url() -> str:
-    """优先使用应用配置（.env 注入）；为空时回退 alembic.ini 的 sqlalchemy.url。"""
-    return settings.DATABASE_URL or config.get_main_option("sqlalchemy.url")
+    """优先使用应用配置（.env 注入）；为空时回退 alembic.ini 的 sqlalchemy.url。
+
+    同时校验目标库：迁移会改表结构，指向受保护主库时必须显式 DB_ALLOW_MAIN=1，
+    避免开发/测试环境一次误操作改写主库结构。
+    """
+    url = settings.DATABASE_URL or config.get_main_option("sqlalchemy.url")
+    assert_safe_database(url, purpose="Alembic 迁移")
+    return url
 
 
 def run_migrations_offline() -> None:

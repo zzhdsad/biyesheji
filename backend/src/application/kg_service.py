@@ -25,7 +25,7 @@ import uuid
 from collections import defaultdict
 
 from loguru import logger
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.resource_vector_service import RESOURCE_TYPES
@@ -421,6 +421,7 @@ class KgService:
         texts: list[str],
         resource_types: list[str] | None = None,
         limit: int = 10,
+        kb_ids: list[uuid.UUID] | None = None,
     ) -> list[tuple[KgNode, float]]:
         """按实体文本匹配节点：名称/别名精确命中优先，其次子串包含。
 
@@ -438,6 +439,14 @@ class KgService:
         stmt = select(KgNode)
         if resource_types:
             stmt = stmt.where(KgNode.resource_type.in_(list(resource_types)))
+        if kb_ids:
+            # 只在本库（或无 kb_id 的旧资源节点）范围内匹配。
+            # 不限制的话，同名节点会跨库挤占 limit 名额：实测某库有 10+ 个同名
+            # 「脾胃虚弱」节点（历史测试库残留），本库节点直接被挤出候选，
+            # 导致已确认关系检索不到任何事实；生产环境则表现为跨库串扰。
+            stmt = stmt.where(
+                or_(KgNode.kb_id.in_(list(kb_ids)), KgNode.kb_id.is_(None))
+            )
         nodes = (await self.db.scalars(stmt)).all()
 
         matched: dict[uuid.UUID, tuple[KgNode, float]] = {}
