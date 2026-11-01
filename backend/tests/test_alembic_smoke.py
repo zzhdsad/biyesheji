@@ -56,6 +56,14 @@ EXPECTED_TABLES = {
     "kg_edges",
     # BGE-M3 切换体验优化：批量重新向量化任务表
     "revectorize_jobs",
+    # 真实中医知识数据导入中心
+    "import_jobs",
+    # 通用导入：文件 / 原始记录 / 实体 / 关系 / 映射模板
+    "import_files",
+    "import_records",
+    "generic_entities",
+    "generic_relations",
+    "import_mapping_templates",
 }
 
 SMOKE_DB_NAME = "knowledge_platform_alembic_smoke"
@@ -228,7 +236,7 @@ def test_upgrade_downgrade_roundtrip(monkeypatch) -> None:
     head_id = ScriptDirectory.from_config(cfg).get_heads()[0]
 
     try:
-        # upgrade head → 15 业务表 + alembic_version
+        # upgrade head → 35 业务表 + alembic_version
         command.upgrade(cfg, "head")
         tables = _list_public_tables(smoke_url)
         assert tables == EXPECTED_TABLES | {"alembic_version"}
