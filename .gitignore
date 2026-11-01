@@ -7,8 +7,15 @@ venv/
 .ruff_cache/
 logs/
 uploads/
+# 本地数据库转储与备份（仅离线保留，禁止入库）
+/backups/
+*.dump
+*.backup
+*.bak
+
 # Docker 绑定挂载的本地持久化数据（数据库 / 向量库 / 上传文件）
 docker-data/
+docker-data.mixed-*/
 
 # Node / Next.js
 node_modules/
@@ -52,5 +59,14 @@ backend/.modelscope/
 
 # Docker 构建用：本机预置模型权重（4.3GB，由脚本从 HF 缓存整理）
 backend/prebuilt-models/
+# 大体积模型权重（防止误提交）
+# Dockerfile、模型配置、tokenizer 及两个小型 .pt（colbert_linear/sparse_linear）仍需跟踪
+backend/models-image/prebuilt-models/**/*.pt
+!backend/models-image/prebuilt-models/bge-m3/colbert_linear.pt
+!backend/models-image/prebuilt-models/bge-m3/sparse_linear.pt
+*.pth
+*.onnx
+*.gguf
+*.ckpt
 # 构建日志
 *.log
