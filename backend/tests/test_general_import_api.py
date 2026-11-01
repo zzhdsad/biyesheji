@@ -332,6 +332,138 @@ def test_relational_commit_skips_malformed_rows_and_reports_them(client: TestCli
 
 
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_mapping_template_match_save_and_apply(client: TestClient, kb: str):
+    """模板保存 → 自动匹配 → 提交时由模板补齐映射；不兼容时明确拒绝套用。"""
+    analyze = _upload(
+        client,
+        "/api/v1/import/relational/analyze",
+        [
+            ("files", ("D1.csv", CSV_TERMS.encode("utf-8"), "text/csv")),
+            ("files", ("D2.csv", CSV_MEDICINES.encode("utf-8"), "text/csv")),
+            ("files", ("D3.csv", CSV_LINKS.encode("utf-8"), "text/csv")),
+        ],
+        paths=["D1.csv", "D2.csv", "D3.csv"],
+    )
+    assert analyze.status_code == 200, analyze.text
+    plan = analyze.json()
+    fingerprint = plan["dataset_fingerprint"]
+    assert fingerprint, "分析结果必须返回数据集指纹"
+    junction = plan["junctions"][0]
+
+    tables = {table["table"]: [f["name"] for f in table["fields"]] for table in plan["tables"]}
+
+    # 没有模板时必须返回 none，而不是伪造匹配结果
+    match_none = client.post(
+        "/api/v1/import/templates/match",
+        json={"kb_id": kb, "tables": tables},
+    )
+    assert match_none.status_code == 200, match_none.text
+    assert match_none.json()["status"] == "none"
+
+    config = {
+        "version": 2,
+        "tables": {
+            "D1": {"table": "D1", "entity_type": "术语", "pk_field": "术语id"},
+            "D2": {"table": "D2", "entity_type": "中成药", "pk_field": "中成药id"},
+            "D3": {"table": "D3", "entity_type": "关联", "pk_field": None},
+        },
+        "relations": [],
+        "junctions": [
+            {
+                "table": "D3",
+                "left_table": junction["left_table"],
+                "left_field": junction["left_field"],
+                "right_table": junction["right_table"],
+                "right_field": junction["right_field"],
+                "relation_type": "含术语",
+            }
+        ],
+    }
+    saved = client.post(
+        "/api/v1/import/templates",
+        json={
+            "kb_id": kb,
+            "name": "D1-D3 测试模板",
+            "fingerprint": fingerprint,
+            "config": config,
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    template_id = saved.json()["id"]
+    assert saved.json()["fingerprint"] == fingerprint
+
+    # 相同数据集再次匹配：exact + 模板回显
+    match_exact = client.post(
+        "/api/v1/import/templates/match",
+        json={"kb_id": kb, "tables": tables},
+    )
+    assert match_exact.status_code == 200, match_exact.text
+    exact = match_exact.json()
+    assert exact["status"] == "exact"
+    assert exact["usable"] is True
+    assert exact["template_id"] == template_id
+    assert exact["missing_fields"] == {}
+
+    # 模板依赖字段缺失：明确 mismatch 且不可用，前端据此禁止套用
+    broken = {name: list(fields) for name, fields in tables.items()}
+    broken["D1"] = ["术语名称"]
+    match_broken = client.post(
+        "/api/v1/import/templates/match",
+        json={"kb_id": kb, "tables": broken},
+    )
+    assert match_broken.status_code == 200, match_broken.text
+    broken_result = match_broken.json()
+    assert broken_result["status"] == "mismatch"
+    assert broken_result["usable"] is False
+    assert "术语id" in broken_result["missing_fields"]["D1"]
+
+    # 模板属于其他知识库时不得跨库应用（用独立会话，避免影响后续提交）
+    other_kb = client.post(
+        "/api/v1/kb", json={"name": f"模板跨库测试-{uuid.uuid4().hex[:8]}"}
+    ).json()["id"]
+    cross_analyze = _upload(
+        client,
+        "/api/v1/import/relational/analyze",
+        [
+            ("files", ("D1.csv", CSV_TERMS.encode("utf-8"), "text/csv")),
+            ("files", ("D2.csv", CSV_MEDICINES.encode("utf-8"), "text/csv")),
+            ("files", ("D3.csv", CSV_LINKS.encode("utf-8"), "text/csv")),
+        ],
+        paths=["D1.csv", "D2.csv", "D3.csv"],
+    )
+    assert cross_analyze.status_code == 200, cross_analyze.text
+    cross = client.post(
+        "/api/v1/import/relational/commit",
+        json={
+            "session_id": cross_analyze.json()["session_id"],
+            "kb_id": other_kb,
+            "primary_keys": {},
+            "template_id": template_id,
+            "auto_confirm": False,
+        },
+    )
+    assert cross.status_code == 200, cross.text
+    assert "其他知识库" in cross.json()["error"]
+
+    # 由模板补齐主键与关联关系后提交：不显式给映射也能导入
+    commit = client.post(
+        "/api/v1/import/relational/commit",
+        json={
+            "session_id": plan["session_id"],
+            "kb_id": kb,
+            "primary_keys": {},
+            "auto_confirm": False,
+            "template_id": template_id,
+        },
+    )
+    assert commit.status_code == 200, commit.text
+    result = commit.json()
+    assert result["entities"] == 4
+    assert result["relations"] == 3
+    assert result["failed_rows"] == 0
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 def test_cancelling_confirmed_relation_removes_kg_edge(client: TestClient, kb: str):
     """先确认入库、再人工取消：KG 里的对应边必须同步撤掉，不留无法溯源的关系。"""
     analyze = _upload(
@@ -420,6 +552,80 @@ def test_index_apply_safe_fix_is_allowed(client: TestClient):
 
 
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_index_environment_reports_destructive_permission(client: TestClient, monkeypatch):
+    monkeypatch.setattr(settings, "MILVUS_COLLECTION", "document_chunks_dev")
+    monkeypatch.setattr(settings, "ENV", "dev")
+    resp = client.get("/api/v1/import/index/environment")
+    assert resp.status_code == 200, resp.text
+    facts = resp.json()
+    assert facts["milvus_collection"] == "document_chunks_dev"
+    assert facts["isolated_collection"] is True
+    assert facts["destructive_allowed"] is True
+
+    monkeypatch.setattr(settings, "MILVUS_COLLECTION", "document_chunks")
+    resp = client.get("/api/v1/import/index/environment")
+    facts = resp.json()
+    assert facts["isolated_collection"] is False
+    assert facts["destructive_allowed"] is False
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_index_apply_rejects_stale_collection(client: TestClient):
+    """前端绑定的集合与后端不一致时必须拒绝，防止跨环境操作正式索引。"""
+    resp = client.post(
+        "/api/v1/import/index/apply",
+        json={
+            "fix_flags": True,
+            "expected_milvus_collection": "document_chunks_prod",
+        },
+    )
+    assert resp.status_code == 409, resp.text
+    assert "milvus" in resp.json()["detail"].lower()
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_index_rebuild_rejects_stale_collection(client: TestClient):
+    resp = client.post(
+        "/api/v1/import/index/rebuild",
+        json={
+            "retry_failed": True,
+            "expected_milvus_collection": "document_chunks_prod",
+        },
+    )
+    assert resp.status_code == 409, resp.text
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_index_diff_rejects_stale_collection(client: TestClient):
+    resp = client.get(
+        "/api/v1/import/index/diff",
+        params={"expected_milvus_collection": "document_chunks_prod"},
+    )
+    assert resp.status_code == 409, resp.text
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_index_apply_refuses_deletion_outside_isolated_env(
+    client: TestClient, monkeypatch
+):
+    """即便已确认，正式集合上的删除也必须拒绝。"""
+    monkeypatch.setattr(settings, "MILVUS_COLLECTION", "document_chunks")
+    monkeypatch.setattr(settings, "ENV", "dev")
+    resp = client.post(
+        "/api/v1/import/index/apply",
+        json={
+            "fix_flags": True,
+            "delete_orphans": True,
+            "delete_duplicates": True,
+            "confirmed": True,
+            "expected_milvus_collection": "document_chunks",
+        },
+    )
+    assert resp.status_code == 403, resp.text
+    assert "隔离环境" in resp.json()["detail"]
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 def test_general_import_requires_admin():
     """非管理员不得访问导入接口（服务端校验，不依赖前端隐藏按钮）。"""
     import src.core.deps as deps
@@ -429,7 +635,15 @@ def test_general_import_requires_admin():
     deps.TEST_MODE_ENABLED = False
     try:
         with TestClient(app) as guest:
-            resp = guest.get("/api/v1/import/index/diff")
-            assert resp.status_code in (401, 403)
+            for method, path in (
+                ("get", "/api/v1/import/index/diff"),
+                ("get", "/api/v1/import/index/environment"),
+                ("get", "/api/v1/import/templates"),
+                ("post", "/api/v1/import/templates/match"),
+            ):
+                resp = getattr(guest, method)(
+                    path, **({"json": {"tables": {}}} if method == "post" else {})
+                )
+                assert resp.status_code in (401, 403), f"{method} {path}: {resp.status_code}"
     finally:
         deps.TEST_MODE_ENABLED = True

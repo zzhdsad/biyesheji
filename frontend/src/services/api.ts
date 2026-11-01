@@ -1845,6 +1845,8 @@ export interface RelationalAnalyzeResult {
   primary_keys: Record<string, string[]>;
   foreign_keys: ForeignKeyItem[];
   junctions: JunctionItem[];
+  /** 数据集级指纹：用于匹配可复用的映射模板。 */
+  dataset_fingerprint: string;
   errors: string[];
 }
 
@@ -1885,6 +1887,10 @@ export async function commitRelationalImport(payload: {
     relation_type?: string;
   }[];
   auto_confirm?: boolean;
+  /** 复用已有模板：未显式指定的主键/关系由模板补齐。 */
+  template_id?: string;
+  /** 导入完成后另存为新模板。 */
+  save_as_template?: string;
 }): Promise<{
   job_id: string;
   records: number;
@@ -1894,10 +1900,103 @@ export async function commitRelationalImport(payload: {
   kg_edges: number;
   failed_rows: number;
   errors: { file_name: string; row_no: number; message: string }[];
+  template?: { id: string; name: string } | null;
 }> {
   const { data } = await api.post('/import/relational/commit', payload, {
     timeout: 600000,
   });
+  return data;
+}
+
+export interface ImportTemplateTableMapping {
+  table: string;
+  entity_type: string;
+  pk_field: string | null;
+  display_field?: string | null;
+}
+
+export interface ImportTemplateRelationMapping {
+  child_table: string;
+  child_field: string;
+  parent_table: string;
+  parent_field: string;
+  relation_type: string;
+}
+
+export interface ImportTemplateJunctionMapping {
+  table: string;
+  left_table: string;
+  left_field: string;
+  right_table: string;
+  right_field: string;
+  relation_type: string;
+}
+
+export interface ImportTemplateConfig {
+  version: number;
+  tables: Record<string, ImportTemplateTableMapping>;
+  relations: ImportTemplateRelationMapping[];
+  junctions: ImportTemplateJunctionMapping[];
+}
+
+export interface ImportTemplateSummary {
+  id: string;
+  name: string;
+  kb_id: string | null;
+  fingerprint: string;
+  config: ImportTemplateConfig;
+  created_at: string | null;
+}
+
+/** 模板匹配状态：exact 指纹一致；compatible 可用但有新增表；mismatch 缺字段；incompatible 版本不可解释。 */
+export type ImportTemplateMatchStatus =
+  | 'none'
+  | 'exact'
+  | 'compatible'
+  | 'mismatch'
+  | 'incompatible';
+
+export interface ImportTemplateMatchResult {
+  template_id: string | null;
+  template_name: string | null;
+  fingerprint: string;
+  status: ImportTemplateMatchStatus;
+  usable: boolean;
+  missing_fields: Record<string, string[]>;
+  extra_fields: Record<string, string[]>;
+  message: string;
+  config: ImportTemplateConfig | null;
+}
+
+/** 列出知识库内模板 + 全局共享模板。 */
+export async function fetchImportTemplates(kbId?: string): Promise<ImportTemplateSummary[]> {
+  const { data } = await api.get<{ items: ImportTemplateSummary[] }>('/import/templates', {
+    params: kbId ? { kb_id: kbId } : {},
+  });
+  return data.items;
+}
+
+/** 按当前数据集字段匹配模板，返回可用性与字段差异。 */
+export async function matchImportTemplate(payload: {
+  kb_id?: string;
+  tables: Record<string, string[]>;
+}): Promise<ImportTemplateMatchResult> {
+  const { data } = await api.post<ImportTemplateMatchResult>(
+    '/import/templates/match',
+    payload,
+  );
+  return data;
+}
+
+/** 保存映射模板（同名同指纹覆盖）。 */
+export async function saveImportTemplate(payload: {
+  kb_id?: string;
+  name: string;
+  fingerprint?: string;
+  tables?: Record<string, string[]>;
+  config: ImportTemplateConfig;
+}): Promise<{ id: string; name: string; fingerprint: string; error?: string }> {
+  const { data } = await api.post('/import/templates', payload);
   return data;
 }
 
@@ -1950,6 +2049,23 @@ export async function fetchImportStats(kbId: string): Promise<ImportStats> {
   return data;
 }
 
+export interface IndexDiffDocument {
+  doc_id: string;
+  file_name: string;
+  expected_chunks: number;
+  actual_vectors: number;
+  missing_count: number;
+  orphan_count: number;
+  duplicate_count: number;
+  /** 明细最多返回 50 条（后端 MAX_ID_DETAIL）。 */
+  missing_chunk_ids: string[];
+  orphan_vector_ids: string[];
+  duplicate_vector_ids: string[];
+  current_status: string;
+  suggested_status: string;
+  flag_inaccurate: boolean;
+}
+
 export interface IndexDiffReport {
   kb_id: string | null;
   scanned_documents: number;
@@ -1962,35 +2078,47 @@ export interface IndexDiffReport {
     duplicate_vectors: number;
     inaccurate_flags: number;
   };
-  documents: {
-    doc_id: string;
-    file_name: string;
-    expected_chunks: number;
-    actual_vectors: number;
-    missing_count: number;
-    orphan_count: number;
-    duplicate_count: number;
-    current_status: string;
-    suggested_status: string;
-    flag_inaccurate: boolean;
-  }[];
+  documents: IndexDiffDocument[];
 }
 
-/** 索引差异报告（只读）。 */
-export async function fetchIndexDiff(kbId?: string): Promise<IndexDiffReport> {
+export interface IndexEnvironment {
+  env: string;
+  database: string;
+  milvus_collection: string;
+  isolated_collection: boolean;
+  destructive_allowed: boolean;
+}
+
+/** 当前后端的索引环境（只读）：集合、环境与是否允许删除向量。 */
+export async function fetchIndexEnvironment(): Promise<IndexEnvironment> {
+  const { data } = await api.get<IndexEnvironment>('/import/index/environment');
+  return data;
+}
+
+/** 索引差异报告（只读）。expectedMilvusCollection 与后端不一致时后端返回 409。 */
+export async function fetchIndexDiff(
+  kbId?: string,
+  expectedMilvusCollection?: string,
+): Promise<IndexDiffReport> {
   const { data } = await api.get<IndexDiffReport>('/import/index/diff', {
-    params: kbId ? { kb_id: kbId } : {},
+    params: {
+      ...(kbId ? { kb_id: kbId } : {}),
+      ...(expectedMilvusCollection
+        ? { expected_milvus_collection: expectedMilvusCollection }
+        : {}),
+    },
   });
   return data;
 }
 
-/** 按报告修复索引状态；删除向量必须 confirmed=true，否则后端返回 400。 */
+/** 按报告修复索引状态；删除向量必须 confirmed=true 且在隔离环境。 */
 export async function applyIndexFix(payload: {
   kb_id?: string;
   fix_flags?: boolean;
   delete_orphans?: boolean;
   delete_duplicates?: boolean;
   confirmed?: boolean;
+  expected_milvus_collection?: string;
 }): Promise<{
   flags_updated: number;
   orphans_deleted: number;
@@ -2006,6 +2134,7 @@ export async function applyIndexFix(payload: {
 export async function rebuildIndex(payload: {
   kb_id?: string;
   retry_failed?: boolean;
+  expected_milvus_collection?: string;
 }): Promise<{ rebuild_marked?: number; retry_failed?: number }> {
   const { data } = await api.post('/import/index/rebuild', payload);
   return data;

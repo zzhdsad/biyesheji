@@ -1,6 +1,6 @@
 'use client';
 
-import { ApartmentOutlined, ImportOutlined, SearchOutlined } from '@ant-design/icons';
+import { ImportOutlined, SearchOutlined } from '@ant-design/icons';
 import {
   Alert,
   Button,
@@ -10,6 +10,7 @@ import {
   Divider,
   Empty,
   Input,
+  Modal,
   Progress,
   Select,
   Space,
@@ -20,7 +21,7 @@ import {
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
 import { AdminHeaderRight } from '@/components/layout/AppSider';
@@ -33,12 +34,24 @@ import {
   fetchImportStats,
   fetchKnowledgeBases,
   fetchRelations,
+  matchImportTemplate,
+  saveImportTemplate,
   setRelationsStatus,
   type ForeignKeyItem,
+  type ImportTemplateMatchResult,
   type JunctionItem,
   type RelationRow,
   type RelationalTable,
 } from '@/services/api';
+import {
+  buildTemplateConfig,
+  canApplyTemplate,
+  diffTemplate,
+  tablesFieldMap,
+  templateDependencyFields,
+  templatePrimaryKeys,
+  type TemplateFieldDiff,
+} from '@/utils/importTemplate';
 
 const STATUS_COLOR: Record<string, string> = {
   pending: 'orange',
@@ -51,6 +64,26 @@ const STATUS_LABEL: Record<string, string> = {
   rejected: '已拒绝',
 };
 
+const TEMPLATE_STATUS: Record<
+  string,
+  { color: string; label: string; alert: 'success' | 'info' | 'warning' | 'error' }
+> = {
+  exact: { color: 'green', label: '完全匹配', alert: 'success' },
+  compatible: { color: 'blue', label: '可用（Schema 有新增）', alert: 'warning' },
+  mismatch: { color: 'red', label: '不兼容：缺少字段', alert: 'error' },
+  incompatible: { color: 'red', label: '模板版本不可解释', alert: 'error' },
+  none: { color: 'default', label: '未匹配到模板', alert: 'info' },
+};
+
+/** 稳定键：不随候选顺序变化，避免用数组下标标记选择导致错选。 */
+function fkKey(item: ForeignKeyItem): string {
+  return `${item.child_table}.${item.child_field}->${item.parent_table}.${item.parent_field}`;
+}
+
+function junctionKey(item: JunctionItem): string {
+  return item.table;
+}
+
 export default function RelationalImportPage() {
   const [picked, setPicked] = useState<PickedFile[]>([]);
   const [kbId, setKbId] = useState<string>();
@@ -62,9 +95,18 @@ export default function RelationalImportPage() {
   const [foreignKeys, setForeignKeys] = useState<ForeignKeyItem[]>([]);
   const [junctions, setJunctions] = useState<JunctionItem[]>([]);
   const [analyzeErrors, setAnalyzeErrors] = useState<string[]>([]);
-  const [selectedFks, setSelectedFks] = useState<number[]>([]);
-  const [selectedJunctions, setSelectedJunctions] = useState<number[]>([]);
+  const [selectedFks, setSelectedFks] = useState<string[]>([]);
+  const [selectedJunctions, setSelectedJunctions] = useState<string[]>([]);
   const [relationTypes, setRelationTypes] = useState<Record<string, string>>({});
+  const [templateFingerprint, setTemplateFingerprint] = useState('');
+  const [templateMatch, setTemplateMatch] = useState<ImportTemplateMatchResult | null>(null);
+  const [matchingTemplate, setMatchingTemplate] = useState(false);
+  const [appliedTemplateId, setAppliedTemplateId] = useState<string | null>(null);
+  const [templateDetailsOpen, setTemplateDetailsOpen] = useState(false);
+  const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
+  const [saveTemplateName, setSaveTemplateName] = useState('');
+  const [savingTemplate, setSavingTemplate] = useState(false);
+  const templateMatchSeq = useRef(0);
   const [autoConfirm, setAutoConfirm] = useState(false);
   const [committing, setCommitting] = useState(false);
   const [relations, setRelations] = useState<RelationRow[]>([]);
@@ -91,6 +133,36 @@ export default function RelationalImportPage() {
     enabled: Boolean(kbId),
   });
 
+  const runTemplateMatch = useCallback(
+    async (targetKb: string | undefined, tableList: RelationalTable[]) => {
+      if (tableList.length === 0) {
+        setTemplateMatch(null);
+        return;
+      }
+      const seq = templateMatchSeq.current + 1;
+      templateMatchSeq.current = seq;
+      // 重新匹配意味着当前记忆的“已套用模板”可能已过期：
+      // 在结果返回前先撤销，防止旧 template_id 继续左右提交内容。
+      setAppliedTemplateId(null);
+      setMatchingTemplate(true);
+      try {
+        const result = await matchImportTemplate({
+          kb_id: targetKb,
+          tables: tablesFieldMap(tableList),
+        });
+        if (templateMatchSeq.current !== seq) return;
+        setTemplateMatch(result);
+      } catch (error) {
+        if (templateMatchSeq.current !== seq) return;
+        setTemplateMatch(null);
+        message.warning(`模板匹配失败：${(error as Error).message}`);
+      } finally {
+        if (templateMatchSeq.current === seq) setMatchingTemplate(false);
+      }
+    },
+    [],
+  );
+
   const runAnalyze = async () => {
     if (picked.length === 0) {
       message.warning('请先选择文件或文件夹');
@@ -108,15 +180,19 @@ export default function RelationalImportPage() {
       setForeignKeys(data.foreign_keys);
       setJunctions(data.junctions);
       setAnalyzeErrors(data.errors);
+      setTemplateFingerprint(data.dataset_fingerprint);
+      setTemplateMatch(null);
+      setAppliedTemplateId(null);
       // 默认采用置信度最高的主键候选，用户可改
       const pks: Record<string, string> = {};
       Object.entries(data.primary_keys).forEach(([table, fields]) => {
         if (fields.length > 0) pks[table] = fields[0];
       });
       setPrimaryKeys(pks);
-      setSelectedFks(data.foreign_keys.map((_, index) => index));
-      setSelectedJunctions(data.junctions.map((_, index) => index));
+      setSelectedFks(data.foreign_keys.map(fkKey));
+      setSelectedJunctions(data.junctions.map(junctionKey));
       setProgress(100);
+      void runTemplateMatch(kbId, data.tables);
       message.success(
         `分析完成：${data.tables.length} 张表，${data.foreign_keys.length} 个外键候选，${data.junctions.length} 个关联表`,
       );
@@ -128,6 +204,126 @@ export default function RelationalImportPage() {
     }
   };
 
+  const templateDiff: TemplateFieldDiff | null = useMemo(
+    () => (templateMatch?.config ? diffTemplate(templateMatch.config, tablesFieldMap(tables)) : null),
+    [templateMatch, tables],
+  );
+
+  const templateApplicable = Boolean(
+    templateMatch &&
+      templateDiff &&
+      templateMatch.template_id &&
+      canApplyTemplate(templateMatch.status, templateDiff),
+  );
+
+  const markMappingEdited = () => {
+    if (appliedTemplateId) setAppliedTemplateId(null);
+  };
+
+  const changeKb = (value: string | undefined) => {
+    setKbId(value);
+    setAppliedTemplateId(null);
+    if (tables.length > 0) void runTemplateMatch(value, tables);
+  };
+
+  const applyTemplate = () => {
+    if (!templateMatch?.config || !templateApplicable) {
+      message.error('模板与当前数据不兼容，已阻止套用（请查看字段差异）');
+      return;
+    }
+    const config = templateMatch.config;
+    setPrimaryKeys((prev) => ({ ...prev, ...templatePrimaryKeys(config) }));
+    setSelectedFks(
+      foreignKeys
+        .filter((fk) =>
+          config.relations.some(
+            (relation) =>
+              relation.child_table === fk.child_table &&
+              relation.child_field === fk.child_field &&
+              relation.parent_table === fk.parent_table &&
+              relation.parent_field === fk.parent_field,
+          ),
+        )
+        .map(fkKey),
+    );
+    setSelectedJunctions(
+      junctions
+        .filter((junction) => config.junctions.some((item) => item.table === junction.table))
+        .map(junctionKey),
+    );
+    const nextTypes: Record<string, string> = { ...relationTypes };
+    for (const fk of foreignKeys) {
+      const relation = config.relations.find(
+        (item) =>
+          item.child_table === fk.child_table &&
+          item.child_field === fk.child_field &&
+          item.parent_table === fk.parent_table &&
+          item.parent_field === fk.parent_field,
+      );
+      if (relation) nextTypes[fkKey(fk)] = relation.relation_type;
+    }
+    for (const junction of junctions) {
+      const item = config.junctions.find((j) => j.table === junction.table);
+      if (item) nextTypes[junctionKey(junction)] = item.relation_type;
+    }
+    setRelationTypes(nextTypes);
+    setAppliedTemplateId(templateMatch.template_id);
+    message.success(`已套用模板「${templateMatch.template_name}」，可继续修改映射`);
+  };
+
+  const openSaveTemplate = () => {
+    setSaveTemplateName(
+      templateMatch?.template_name ? `${templateMatch.template_name}（副本）` : '',
+    );
+    setSaveTemplateOpen(true);
+  };
+
+  const saveAsTemplate = async () => {
+    const name = saveTemplateName.trim();
+    if (!name) {
+      message.warning('请输入模板名称');
+      return;
+    }
+    const selectedFkItems = foreignKeys.filter((fk) => selectedFks.includes(fkKey(fk)));
+    const selectedJunctionItems = junctions.filter((j) =>
+      selectedJunctions.includes(junctionKey(j)),
+    );
+    const config = buildTemplateConfig({
+      tables: tables.map((table) => table.table),
+      primaryKeys,
+      foreignKeys: selectedFkItems.map((fk) => ({
+        ...fk,
+        relation_type: relationTypes[fkKey(fk)] ?? 'related_to',
+      })),
+      junctions: selectedJunctionItems.map((junction) => ({
+        ...junction,
+        relation_type:
+          relationTypes[junctionKey(junction)] ?? junction.relation_type ?? 'related_to',
+      })),
+    });
+    setSavingTemplate(true);
+    try {
+      const data = await saveImportTemplate({
+        kb_id: kbId,
+        name,
+        fingerprint: templateFingerprint || undefined,
+        tables: tablesFieldMap(tables),
+        config,
+      });
+      if (data.error) {
+        message.error(data.error);
+        return;
+      }
+      message.success(`模板「${data.name}」已保存`);
+      setSaveTemplateOpen(false);
+      await runTemplateMatch(kbId, tables);
+    } catch (error) {
+      message.error(`保存模板失败：${(error as Error).message}`);
+    } finally {
+      setSavingTemplate(false);
+    }
+  };
+
   const runCommit = async () => {
     if (!kbId) {
       message.warning('请选择目标知识库');
@@ -135,32 +331,34 @@ export default function RelationalImportPage() {
     }
     setCommitting(true);
     try {
+      const selectedFkItems = foreignKeys.filter((fk) => selectedFks.includes(fkKey(fk)));
+      const selectedJunctionItems = junctions.filter((j) =>
+        selectedJunctions.includes(junctionKey(j)),
+      );
       const data = await commitRelationalImport({
         session_id: sessionId,
         kb_id: kbId,
         primary_keys: primaryKeys,
-        foreign_keys: selectedFks.map((index) => {
-          const fk = foreignKeys[index];
-          return {
-            child_table: fk.child_table,
-            child_field: fk.child_field,
-            parent_table: fk.parent_table,
-            parent_field: fk.parent_field,
-            relation_type: relationTypes[`fk-${index}`] ?? 'related_to',
-          };
-        }),
-        junctions: selectedJunctions.map((index) => {
-          const junction = junctions[index];
-          return {
-            table: junction.table,
-            left_table: junction.left_table,
-            left_field: junction.left_field,
-            right_table: junction.right_table,
-            right_field: junction.right_field,
-            relation_type: relationTypes[`jn-${index}`] ?? junction.relation_type,
-          };
-        }),
+        foreign_keys: selectedFkItems.map((fk) => ({
+          child_table: fk.child_table,
+          child_field: fk.child_field,
+          parent_table: fk.parent_table,
+          parent_field: fk.parent_field,
+          relation_type: relationTypes[fkKey(fk)] ?? 'related_to',
+        })),
+        junctions: selectedJunctionItems.map((junction) => ({
+          table: junction.table,
+          left_table: junction.left_table,
+          left_field: junction.left_field,
+          right_table: junction.right_table,
+          right_field: junction.right_field,
+          relation_type:
+            relationTypes[junctionKey(junction)] ?? junction.relation_type,
+        })),
         auto_confirm: autoConfirm,
+        // 仅当模板未被修改时才随请求发送：改过映射就按当前选择导入，
+        // 避免后端再用模板补齐用户已经取消的关系。
+        template_id: appliedTemplateId ?? undefined,
       });
       setCommitResult(data);
       refetchStats();
@@ -255,19 +453,22 @@ export default function RelationalImportPage() {
       title: '主键',
       width: 200,
       render: (_, record) => (
-        <Select
-          size="small"
-          style={{ width: 180 }}
-          placeholder="选择主键"
-          value={primaryKeys[record.table]}
-          onChange={(value) =>
-            setPrimaryKeys((prev) => ({ ...prev, [record.table]: value }))
-          }
-          options={record.fields.map((field) => ({
-            label: `${field.name}（唯一 ${(field.unique_ratio * 100).toFixed(0)}%）`,
-            value: field.name,
-          }))}
-        />
+        <span data-testid={`pk-select-${record.table}`}>
+          <Select
+            size="small"
+            style={{ width: 180 }}
+            placeholder="选择主键"
+            value={primaryKeys[record.table]}
+            onChange={(value) => {
+              markMappingEdited();
+              setPrimaryKeys((prev) => ({ ...prev, [record.table]: value }));
+            }}
+            options={record.fields.map((field) => ({
+              label: `${field.name}（唯一 ${(field.unique_ratio * 100).toFixed(0)}%）`,
+              value: field.name,
+            }))}
+          />
+        </span>
       ),
     },
     {
@@ -308,16 +509,18 @@ export default function RelationalImportPage() {
           <FilePicker onChange={setPicked} accept=".csv,.tsv,.json,.jsonl,.xlsx,.parquet" />
         </Card>
 
-        <Card title="2. Schema 与关系分析">
+        <Card title="2. Schema 与关系分析" data-testid="schema-card">
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
             <Space wrap>
-              <Select
-                style={{ width: 260 }}
-                placeholder="选择目标知识库"
-                value={kbId}
-                onChange={setKbId}
-                options={kbs.map((kb) => ({ label: kb.name, value: kb.id }))}
-              />
+              <span data-testid="kb-select">
+                <Select
+                  style={{ width: 260 }}
+                  placeholder="选择目标知识库"
+                  value={kbId}
+                  onChange={changeKb}
+                  options={kbs.map((kb) => ({ label: kb.name, value: kb.id }))}
+                />
+              </span>
               <Button
                 type="primary"
                 icon={<SearchOutlined />}
@@ -371,17 +574,19 @@ export default function RelationalImportPage() {
                 {junctions.length === 0 ? (
                   <Empty description="未发现关联表" />
                 ) : (
-                  junctions.map((junction, index) => (
+                  junctions.map((junction) => (
                     <Space key={junction.table} wrap style={{ marginBottom: 8 }}>
                       <Checkbox
-                        checked={selectedJunctions.includes(index)}
-                        onChange={(e) =>
+                        checked={selectedJunctions.includes(junctionKey(junction))}
+                        onChange={(e) => {
+                          markMappingEdited();
+                          const key = junctionKey(junction);
                           setSelectedJunctions((prev) =>
                             e.target.checked
-                              ? [...prev, index]
-                              : prev.filter((i) => i !== index),
-                          )
-                        }
+                              ? [...prev, key]
+                              : prev.filter((item) => item !== key),
+                          );
+                        }}
                       >
                         {junction.label}
                       </Checkbox>
@@ -394,12 +599,13 @@ export default function RelationalImportPage() {
                         style={{ width: 140 }}
                         placeholder="关系类型"
                         defaultValue={junction.relation_type}
-                        onChange={(e) =>
+                        onChange={(e) => {
+                          markMappingEdited();
                           setRelationTypes((prev) => ({
                             ...prev,
-                            [`jn-${index}`]: e.target.value,
-                          }))
-                        }
+                            [junctionKey(junction)]: e.target.value,
+                          }));
+                        }}
                       />
                       <Typography.Text type="secondary">{junction.evidence}</Typography.Text>
                     </Space>
@@ -414,22 +620,15 @@ export default function RelationalImportPage() {
                 ) : (
                   <Table
                     size="small"
-                    rowKey={(record) => `${record.child_table}.${record.child_field}`}
+                    rowKey={fkKey}
                     dataSource={foreignKeys}
                     pagination={false}
                     rowSelection={{
-                      selectedRowKeys: selectedFks.map((i) => `${foreignKeys[i].child_table}.${foreignKeys[i].child_field}`),
-                      onChange: (_keys, rows) =>
-                        setSelectedFks(
-                          rows.map(
-                            (row) =>
-                              foreignKeys.findIndex(
-                                (fk) =>
-                                  fk.child_table === row.child_table &&
-                                  fk.child_field === row.child_field,
-                              ),
-                          ),
-                        ),
+                      selectedRowKeys: selectedFks,
+                      onChange: (keys) => {
+                        markMappingEdited();
+                        setSelectedFks(keys.map(String));
+                      },
                     }}
                     columns={[
                       {
@@ -456,7 +655,131 @@ export default function RelationalImportPage() {
           </Space>
         </Card>
 
-        <Card title="3. 确认并导入">
+        <Card
+          title="3. 映射模板"
+          data-testid="template-card"
+          extra={
+            <Space>
+              <Button
+                size="small"
+                loading={matchingTemplate}
+                disabled={tables.length === 0}
+                onClick={() => void runTemplateMatch(kbId, tables)}
+              >
+                重新匹配
+              </Button>
+              <Button
+                size="small"
+                disabled={tables.length === 0}
+                onClick={openSaveTemplate}
+                data-testid="save-template"
+              >
+                另存为新模板
+              </Button>
+            </Space>
+          }
+        >
+          {tables.length === 0 ? (
+            <Empty description="完成结构分析后，系统会自动匹配可复用的映射模板" />
+          ) : (
+            <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+              <Space wrap>
+                <Tag
+                  color={TEMPLATE_STATUS[templateMatch?.status ?? 'none'].color}
+                  data-testid="template-status"
+                >
+                  {TEMPLATE_STATUS[templateMatch?.status ?? 'none'].label}
+                </Tag>
+                {templateMatch?.template_name && (
+                  <Typography.Text strong>{templateMatch.template_name}</Typography.Text>
+                )}
+                <Typography.Text type="secondary">
+                  数据集指纹 {templateFingerprint ? `${templateFingerprint.slice(0, 16)}…` : '—'}
+                </Typography.Text>
+                {appliedTemplateId && (
+                  <Tag color="green" data-testid="template-applied">
+                    已套用模板
+                  </Tag>
+                )}
+                {templateMatch?.template_id && !appliedTemplateId && (
+                  <Tag color="orange" data-testid="template-not-applied">
+                    模板未套用（当前按手动映射）
+                  </Tag>
+                )}
+              </Space>
+
+              {templateMatch ? (
+                <Alert
+                  type={TEMPLATE_STATUS[templateMatch.status].alert}
+                  showIcon
+                  message={templateMatch.message}
+                  description={
+                    templateDiff &&
+                    (Object.keys(templateDiff.missing_fields).length > 0 ||
+                      Object.keys(templateDiff.extra_fields).length > 0) ? (
+                      <Space direction="vertical" size={2}>
+                        {Object.entries(templateDiff.missing_fields).map(([table, fields]) => (
+                          <Typography.Text key={table} type="danger">
+                            缺少：{table} → {fields.join('、')}
+                          </Typography.Text>
+                        ))}
+                        {Object.entries(templateDiff.extra_fields).map(([table, fields]) => (
+                          <Typography.Text key={table} type="secondary">
+                            模板未覆盖：{table}（{fields.join('、') || '无字段'}）
+                          </Typography.Text>
+                        ))}
+                      </Space>
+                    ) : undefined
+                  }
+                />
+              ) : (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="未匹配到可复用的映射模板，将按当前自动识别的映射导入。"
+                />
+              )}
+
+              <Space wrap>
+                <Button
+                  disabled={!templateMatch?.config}
+                  onClick={() => setTemplateDetailsOpen(true)}
+                  data-testid="template-details"
+                >
+                  查看映射详情
+                </Button>
+                <Button
+                  type="primary"
+                  disabled={!templateApplicable}
+                  onClick={applyTemplate}
+                  data-testid="apply-template"
+                >
+                  套用模板
+                </Button>
+                {!templateApplicable && templateMatch?.status !== 'none' && (
+                  <Typography.Text type="danger">
+                    模板不兼容，已禁止套用（避免静默使用错误映射）
+                  </Typography.Text>
+                )}
+              </Space>
+
+              {appliedTemplateId && (
+                <Alert
+                  type="success"
+                  showIcon
+                  message="已套用模板：主键与关系已按模板填充。修改任一映射后将不再随导入提交模板，按当前选择导入。"
+                />
+              )}
+              {!appliedTemplateId && templateMatch?.template_id && (
+                <Typography.Text type="secondary">
+                  修改主键或勾选关系后，导入只使用当前显式映射；需要模板兜底时请重新套用。
+                </Typography.Text>
+              )}
+            </Space>
+          )}
+        </Card>
+
+        <Card title="4. 确认并导入">
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
             <Space wrap>
               <Checkbox
@@ -471,6 +794,7 @@ export default function RelationalImportPage() {
                 loading={committing}
                 disabled={!kbId || tables.length === 0}
                 onClick={runCommit}
+                data-testid="commit-button"
               >
                 开始导入
               </Button>
@@ -541,7 +865,7 @@ export default function RelationalImportPage() {
         </Card>
 
         <Card
-          title="4. 关系确认与维护"
+          title="5. 关系确认与维护"
           extra={
             <Space>
               <Select
@@ -643,6 +967,164 @@ export default function RelationalImportPage() {
             />
           </Space>
         </Card>
+
+        <Modal
+          open={templateDetailsOpen}
+          title="映射模板详情"
+          width={900}
+          footer={<Button onClick={() => setTemplateDetailsOpen(false)}>关闭</Button>}
+          onCancel={() => setTemplateDetailsOpen(false)}
+        >
+          {templateMatch?.config ? (
+            <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+              <Descriptions
+                size="small"
+                bordered
+                column={2}
+                items={[
+                  { key: 'name', label: '模板', children: templateMatch.template_name ?? '—' },
+                  {
+                    key: 'status',
+                    label: '匹配状态',
+                    children: TEMPLATE_STATUS[templateMatch.status].label,
+                  },
+                  {
+                    key: 'fingerprint',
+                    label: '指纹',
+                    children: templateFingerprint || '—',
+                  },
+                  {
+                    key: 'scope',
+                    label: '作用范围',
+                    children: templateMatch.template_id
+                      ? kbId
+                        ? '当前知识库（含全局共享模板）'
+                        : '全局共享模板'
+                      : '—',
+                  },
+                ]}
+              />
+              <Divider orientation="left" plain>
+                表映射
+              </Divider>
+              <Table
+                size="small"
+                rowKey="table"
+                pagination={false}
+                dataSource={Object.values(templateMatch.config.tables)}
+                columns={[
+                  { title: '表', dataIndex: 'table' },
+                  { title: '实体类型', dataIndex: 'entity_type' },
+                  {
+                    title: '主键',
+                    dataIndex: 'pk_field',
+                    render: (value: string | null) => value ?? '—',
+                  },
+                  {
+                    title: '显示字段',
+                    dataIndex: 'display_field',
+                    render: (value: string | null) => value ?? '—',
+                  },
+                ]}
+              />
+              <Divider orientation="left" plain>
+                关系映射
+              </Divider>
+              <Table
+                size="small"
+                rowKey={(row) =>
+                  `${row.child_table}.${row.child_field}->${row.parent_table}.${row.parent_field}`
+                }
+                pagination={false}
+                dataSource={templateMatch.config.relations}
+                locale={{ emptyText: '模板未声明外键关系' }}
+                columns={[
+                  {
+                    title: '子表字段',
+                    render: (_, row) => `${row.child_table}.${row.child_field}`,
+                  },
+                  {
+                    title: '父表字段',
+                    render: (_, row) => `${row.parent_table}.${row.parent_field}`,
+                  },
+                  { title: '关系类型', dataIndex: 'relation_type', width: 140 },
+                ]}
+              />
+              <Divider orientation="left" plain>
+                关联表映射
+              </Divider>
+              <Table
+                size="small"
+                rowKey="table"
+                pagination={false}
+                dataSource={templateMatch.config.junctions}
+                locale={{ emptyText: '模板未声明关联表' }}
+                columns={[
+                  { title: '关联表', dataIndex: 'table' },
+                  {
+                    title: '左表字段',
+                    render: (_, row) => `${row.left_table}.${row.left_field}`,
+                  },
+                  {
+                    title: '右表字段',
+                    render: (_, row) => `${row.right_table}.${row.right_field}`,
+                  },
+                  { title: '关系类型', dataIndex: 'relation_type', width: 140 },
+                ]}
+              />
+              <Divider orientation="left" plain>
+                模板依赖字段
+              </Divider>
+              <Table
+                size="small"
+                rowKey={(row) => `${row.table}.${row.field}.${row.kind}`}
+                pagination={false}
+                dataSource={templateDependencyFields(templateMatch.config)}
+                columns={[
+                  { title: '表', dataIndex: 'table' },
+                  { title: '字段', dataIndex: 'field' },
+                  { title: '用途', dataIndex: 'kind', width: 120 },
+                ]}
+              />
+            </Space>
+          ) : (
+            <Empty description="当前没有可展示的模板配置" />
+          )}
+        </Modal>
+
+        <Modal
+          open={saveTemplateOpen}
+          title="另存为新模板"
+          okText="保存"
+          confirmLoading={savingTemplate}
+          onOk={() => void saveAsTemplate()}
+          onCancel={() => setSaveTemplateOpen(false)}
+        >
+          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <Typography.Text type="secondary">
+              模板将保存到{kbId ? '当前知识库（仅该库及管理员可见）' : '全局共享范围'}，
+              保存的是「当前」主键与关系选择；下次导入相同数据集时自动匹配。
+            </Typography.Text>
+            <Input
+              placeholder="模板名称，例如：D1-D7 标准映射"
+              value={saveTemplateName}
+              onChange={(e) => setSaveTemplateName(e.target.value)}
+              onPressEnter={() => void saveAsTemplate()}
+              maxLength={80}
+            />
+            <Typography.Text type="secondary">
+              数据集指纹：{templateFingerprint || '（由服务端按当前字段计算）'}
+            </Typography.Text>
+            {Object.keys(templateDiff?.missing_fields ?? {}).length > 0 && (
+              <Alert
+                type="warning"
+                showIcon
+                message="当前模板与数据集存在字段差异"
+                description="另存会以当前手动映射为准；保存前请确认缺失字段对应的表已被正确配置。"
+              />
+            )}
+          </Space>
+        </Modal>
       </Space>
     </AppLayout>
   );

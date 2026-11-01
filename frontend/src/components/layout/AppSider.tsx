@@ -43,6 +43,7 @@ import {
   PlusOutlined,
   ProfileOutlined,
   ReadOutlined,
+  SafetyCertificateOutlined,
   SettingOutlined,
   TeamOutlined,
   UserOutlined,
@@ -125,6 +126,11 @@ const ADMIN_NAV_ITEMS: Required<MenuProps>['items'] = [
             key: '/admin/import/relational',
             icon: <ApartmentOutlined />,
             label: '关联数据导入',
+          },
+          {
+            key: '/admin/index-consistency',
+            icon: <SafetyCertificateOutlined />,
+            label: '索引一致性',
           },
           { key: '/evaluation', icon: <ExperimentOutlined />, label: '评估面板' },
         ],
@@ -237,7 +243,13 @@ function defaultOpenKeysFor(pathname: string | null | undefined): string[] {
   if (ADMIN_CHILDREN.some((p) => path === p || path.startsWith(`${p}/`))) {
     keys.push('admin-center');
   }
-  const DATA_MGMT_CHILDREN = ['/documents', '/taxonomy', '/admin/import', '/evaluation'];
+  const DATA_MGMT_CHILDREN = [
+    '/documents',
+    '/taxonomy',
+    '/admin/import',
+    '/admin/index-consistency',
+    '/evaluation',
+  ];
   if (DATA_MGMT_CHILDREN.some((p) => path === p || path.startsWith(`${p}/`))) {
     keys.push('data-mgmt');
   }

@@ -24,10 +24,11 @@ import uuid
 from io import BytesIO
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
@@ -47,7 +48,8 @@ from src.application.relation_discovery import (
     JunctionCandidate,
     discover_relations,
 )
-from src.core.deps import get_db, require_admin
+from src.core.config import settings
+from src.core.deps import get_db, require_admin, require_kb_read, require_kb_write
 from src.domain.models import (
     KG_STATUS_CONFIRMED,
     KG_STATUS_PENDING,
@@ -94,6 +96,65 @@ def _safe_rel(rel: str) -> str:
     if not parts:
         raise ValueError(f"非法相对路径：{rel!r}")
     return "/".join(parts)
+
+
+def _index_environment() -> dict[str, Any]:
+    """当前索引环境事实（供前端展示与删除前的环境门禁）。
+
+    只有集合名带 ``_dev`` / ``_test`` 后缀、且 ENV 不是 prod 时，才认为删除
+    Milvus 向量是允许的：修复接口能删向量，绝不能因为前端传了 kb_id 就跨到
+    正式集合上操作。
+    """
+    collection = (settings.MILVUS_COLLECTION or "").strip()
+    env = (settings.ENV or "").strip().lower()
+    isolated = collection.endswith("_dev") or collection.endswith("_test")
+    try:
+        database = make_url(settings.DATABASE_URL).database or ""
+    except Exception:  # noqa: BLE001 - 仅用于展示，解析失败不应阻断接口
+        database = ""
+    return {
+        "env": env,
+        "database": database,
+        "milvus_collection": collection,
+        "isolated_collection": isolated,
+        "destructive_allowed": isolated and env != "prod",
+    }
+
+
+def _ensure_expected_collection(expected: str | None) -> None:
+    """客户端声明的目标集合必须与当前后端一致（409，防跨环境误操作）。"""
+    if not expected:
+        return
+    actual = (settings.MILVUS_COLLECTION or "").strip()
+    if expected.strip() != actual:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"目标 Milvus 集合与环境不一致：前端为 {expected!r}，"
+                f"当前后端为 {actual!r}，请刷新环境信息后重试"
+            ),
+        )
+
+
+def _ensure_destructive_allowed() -> None:
+    """删除向量前校验环境：正式集合/生产环境一律拒绝。"""
+    facts = _index_environment()
+    if not facts["destructive_allowed"]:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "当前环境不允许删除向量："
+                f"ENV={facts['env']}，集合={facts['milvus_collection']}。"
+                "删除仅允许在隔离环境（*_dev / *_test 集合且非生产）执行"
+            ),
+        )
+
+
+async def _ensure_kb_read(db: AsyncSession, request: Request, kb_id: uuid.UUID | None) -> None:
+    """指定知识库时二次校验读权限（admin 已隐含全库权限，此处保留显式边界）。"""
+    if kb_id is None:
+        return
+    await require_kb_read(db, _admin(request), kb_id)
 
 
 class FilePlan(BaseModel):
@@ -154,11 +215,14 @@ class IndexApplyRequest(BaseModel):
     delete_orphans: bool = False
     delete_duplicates: bool = False
     confirmed: bool = False
+    # 前端展示/操作时绑定的集合：与后端不一致时拒绝，防止跨环境误操作
+    expected_milvus_collection: str | None = None
 
 
 class IndexRebuildRequest(BaseModel):
     kb_id: uuid.UUID | None = None
     retry_failed: bool = False
+    expected_milvus_collection: str | None = None
 
 
 # ── 上传与识别 ──────────────────────────────────────────────────────────────
@@ -669,6 +733,8 @@ async def commit_relational(
         template = await db.get(ImportMappingTemplate, payload.template_id)
         if template is None:
             return {"error": "映射模板不存在"}
+        if template.kb_id is not None and template.kb_id != payload.kb_id:
+            return {"error": "该模板属于其他知识库，不能跨库应用"}
         try:
             config = TemplateConfig.from_dict(template.config or {})
         except TemplateError as exc:
@@ -798,7 +864,9 @@ async def list_templates(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """列出可用模板（知识库内 + 全局）。"""
-    _admin(request)
+    user = _admin(request)
+    if kb_id is not None:
+        await require_kb_read(db, user, kb_id)
     svc = MappingTemplateService(db)
     rows = await svc.list_templates(kb_id)
     return {
@@ -824,6 +892,8 @@ async def save_template(
 ) -> dict:
     """保存映射模板（同名同指纹覆盖）。"""
     user = _admin(request)
+    if payload.kb_id is not None:
+        await require_kb_write(db, user, payload.kb_id)
     if not payload.fingerprint and not payload.tables:
         return {"error": "必须提供 fingerprint 或 tables"}
     fingerprint = payload.fingerprint or dataset_fingerprint(payload.tables or {})
@@ -848,7 +918,9 @@ async def match_template(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """按当前数据集字段匹配模板，返回可用性与字段差异。"""
-    _admin(request)
+    user = _admin(request)
+    if payload.kb_id is not None:
+        await require_kb_read(db, user, payload.kb_id)
     result = await MappingTemplateService(db).match(payload.kb_id, payload.tables)
     return result.to_dict()
 
@@ -979,14 +1051,24 @@ async def import_stats(
 # ── 索引一致性 ──────────────────────────────────────────────────────────────
 
 
+@router.get("/index/environment")
+async def index_environment(request: Request) -> dict:
+    """当前后端的索引环境（只读）：环境、数据库、集合与是否允许删除向量。"""
+    _admin(request)
+    return _index_environment()
+
+
 @router.get("/index/diff")
 async def index_diff(
     request: Request,
     kb_id: uuid.UUID | None = None,
+    expected_milvus_collection: str | None = None,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """PG 与 Milvus 的索引差异报告（只读，可直接审阅）。"""
     _admin(request)
+    _ensure_expected_collection(expected_milvus_collection)
+    await _ensure_kb_read(db, request, kb_id)
     report = await IndexStateService(db).diff(kb_id=kb_id)
     return report.to_dict()
 
@@ -997,8 +1079,22 @@ async def index_apply(
     payload: IndexApplyRequest,
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """按报告修复索引状态；删除向量必须 confirmed=True。"""
+    """按报告修复索引状态；删除向量必须 confirmed=True 且在隔离环境。"""
     _admin(request)
+    _ensure_expected_collection(payload.expected_milvus_collection)
+    await _ensure_kb_read(db, request, payload.kb_id)
+    wants_delete = payload.delete_orphans or payload.delete_duplicates
+    if wants_delete and not payload.confirmed:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "删除 Milvus 向量属不可逆操作：请先审查差异报告，"
+                "再以 confirmed=True 显式确认"
+            ),
+        )
+    if wants_delete:
+        _ensure_destructive_allowed()
+
     svc = IndexStateService(db)
     report = await svc.diff(kb_id=payload.kb_id)
     try:
@@ -1010,8 +1106,6 @@ async def index_apply(
             confirmed=payload.confirmed,
         )
     except ValueError as exc:
-        from fastapi import HTTPException
-
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
     return result.to_dict()
@@ -1025,6 +1119,8 @@ async def index_rebuild(
 ) -> dict:
     """标记缺失向量的文档重建（或重置失败文档重试）。"""
     _admin(request)
+    _ensure_expected_collection(payload.expected_milvus_collection)
+    await _ensure_kb_read(db, request, payload.kb_id)
     svc = IndexStateService(db)
     if payload.retry_failed:
         count = await svc.retry_failed(payload.kb_id)
