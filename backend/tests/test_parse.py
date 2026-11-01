@@ -169,6 +169,7 @@ def test_reparse_is_idempotent(client):
     assert [c["content"] for c in second] == [c["content"] for c in first]
 
 
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 def test_parse_missing_document_returns_404(client):
     import uuid
 
