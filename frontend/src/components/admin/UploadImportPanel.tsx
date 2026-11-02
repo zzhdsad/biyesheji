@@ -43,6 +43,7 @@ import {
   type ImportTargetType,
   type ImportUploadPreview,
 } from '@/services/api';
+import { describeApiError } from '@/utils/apiError';
 import type { KnowledgeBase } from '@/types';
 
 const TYPE_LABEL: Record<string, string> = {
@@ -124,9 +125,7 @@ export default function UploadImportPanel() {
         message.success(`已识别为「${TYPE_LABEL[res.target_type]}」，共 ${res.total_rows} 条`);
       }
     } catch (err) {
-      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data
-        ?.detail;
-      message.error(detail ?? (err as Error).message ?? '文件解析失败');
+      message.error(describeApiError(err));
     } finally {
       setUploading(false);
     }
@@ -148,9 +147,8 @@ export default function UploadImportPanel() {
         ),
       );
     } catch (err) {
-      message.error((err as Error).message ?? '重新预览失败');
-    }
-  };
+      message.error(describeApiError(err));
+    }  };
 
   const effectiveType = preview?.target_type ?? 'unknown';
   const canImport =
@@ -179,13 +177,16 @@ export default function UploadImportPanel() {
       });
       setResult(res);
       setConfirmOpen(false);
-      message.success(
-        `导入完成：新增 ${res.inserted}，更新 ${res.updated}，跳过 ${res.skipped}，失败 ${res.failed}`,
-      );
+      const summary = `新增 ${res.inserted}，更新 ${res.updated}，跳过 ${res.skipped}，失败 ${res.failed}`;
+      if (res.status === 'failed' || (res.failed > 0 && res.inserted + res.updated === 0)) {
+        message.error(`导入失败：${summary}`);
+      } else if (res.failed > 0 || res.status === 'partial_success') {
+        message.warning(`导入完成但存在失败：${summary}`);
+      } else {
+        message.success(`导入完成：${summary}`);
+      }
     } catch (err) {
-      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data
-        ?.detail;
-      message.error(detail ?? (err as Error).message ?? '导入失败');
+      message.error(describeApiError(err));
     } finally {
       setCommitting(false);
     }

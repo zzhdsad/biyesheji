@@ -1754,6 +1754,18 @@ export interface ScanResult {
 }
 
 /**
+ * 兼容历史 200 + {error} 响应：即使 HTTP 成功也必须进入失败分支，
+ * 否则前端会把“后端已拒绝”的请求继续当作导入成功展示。
+ */
+function assertNoBusinessError<T>(data: T): T {
+  const legacy = data as { error?: unknown } | null | undefined;
+  if (typeof legacy?.error === 'string' && legacy.error) {
+    throw new Error(legacy.error);
+  }
+  return data;
+}
+
+/**
  * 扫描上传文件：识别类型/编码/记录数并返回预览（只读，不写业务数据）。
  * paths 与 files 顺序一致，用于文件夹递归时保留目录结构。
  */
@@ -1787,7 +1799,7 @@ export async function commitGeneralImport(payload: {
   const { data } = await api.post('/import/general/commit', payload, {
     timeout: 600000,
   });
-  return data;
+  return assertNoBusinessError(data);
 }
 
 export interface RelationalField {
@@ -1863,7 +1875,12 @@ export async function analyzeRelationalFiles(
     form,
     { timeout: 300000 },
   );
-  return data;
+  const result = assertNoBusinessError(data);
+  // 没有表就没有可映射的内容，不能落到“分析成功”分支
+  if (result.tables.length === 0) {
+    throw new Error(result.errors?.[0] || '没有可分析的结构化文件');
+  }
+  return result;
 }
 
 /** 关联导入落库：实体 + 关系 +（确认后）知识图谱。 */
@@ -1905,7 +1922,7 @@ export async function commitRelationalImport(payload: {
   const { data } = await api.post('/import/relational/commit', payload, {
     timeout: 600000,
   });
-  return data;
+  return assertNoBusinessError(data);
 }
 
 export interface ImportTemplateTableMapping {

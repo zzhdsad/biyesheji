@@ -1,9 +1,10 @@
 """应用配置：所有敏感信息通过 .env 注入，禁止硬编码。"""
 
 import os
+import re
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 仅用于本地开发/测试的默认密钥；生产环境必须经环境变量 SECRET_KEY 覆盖，
@@ -19,14 +20,143 @@ WEAK_SECRET_KEYS = frozenset({
     "admin",
 })
 
+# 支持的环境名称（大小写与首尾空白不敏感）。
+# production 归一化为 prod，避免下游 settings.ENV == "prod" 判断被绕过；
+# 未知值直接拒绝，避免拼写错误（如 prodution）被当作非生产环境放行。
+ENV_DEV = "dev"
+ENV_TEST = "test"
+ENV_TESTING = "testing"
+ENV_PROD = "prod"
+ENV_PRODUCTION = "production"
+ENV_ALIASES = {ENV_PRODUCTION: ENV_PROD}
+SUPPORTED_ENVS = frozenset({ENV_DEV, ENV_TEST, ENV_TESTING, ENV_PROD, ENV_PRODUCTION})
+
+# 开发 / 示例默认凭据：生产环境只按字段拒绝，错误信息不回显具体值
+DEV_DEFAULT_DB_PASSWORD = "postgres"
+DEV_DEFAULT_MINIO_ACCESS_KEY = "minioadmin"
+DEV_DEFAULT_MINIO_SECRET_KEY = "minioadmin"
+DEV_DEFAULT_ADMIN_PASSWORD = "admin123456"
+
+# 生产环境服务/管理员密码黑名单（大小写不敏感）
+WEAK_PASSWORDS = frozenset({
+    "postgres",
+    "password",
+    "changeme",
+    "change-me",
+    "secret",
+    "admin",
+    "admin123456",
+    "minioadmin",
+    "root",
+    "123456",
+    "12345678",
+})
+
+MIN_PROD_DB_PASSWORD_LENGTH = 12
+MIN_PROD_MINIO_SECRET_LENGTH = 12
+MIN_PROD_ADMIN_PASSWORD_LENGTH = 12
+
+# 明显占位符标记：归一化（小写、去除非字母数字）后做子串匹配，
+# 因此 CHANGE_ME、change me、CHANGE-ME-ACCESS、Your_Password 等都能识别。
+PLACEHOLDER_MARKERS = (
+    "changeme",
+    "replaceme",
+    "replacethis",
+    "yourpassword",
+    "yoursecret",
+    "youraccesskey",
+    "yourkey",
+    "placeholder",
+    "dummy",
+    "examplepassword",
+    "examplesecret",
+    "examplekey",
+)
+
+# Compose 把 POSTGRES_* 原样拼进 DATABASE_URL，不做百分号编码。
+# 主机名只接受常规字符；出现 @ 等字符说明密码未转义并污染了主机部分。
+SAFE_DB_HOST = re.compile(r"^[A-Za-z0-9._-]+$")
+URL_PERCENT_ESCAPE = re.compile(r"%[0-9A-Fa-f]{2}")
+
+
+def _looks_like_placeholder(value: str) -> bool:
+    """判断是否为明显占位符（忽略大小写、首尾空白与分隔符）。"""
+    normalized = re.sub(r"[^a-z0-9]", "", (value or "").lower())
+    return bool(normalized) and any(marker in normalized for marker in PLACEHOLDER_MARKERS)
+
+
+def _database_url_problem(
+    database_url: str,
+    expected_user: str | None,
+    expected_password: str | None,
+    expected_database: str | None,
+) -> str | None:
+    """检查 Compose 直接拼接 DATABASE_URL 时的 URL 字符兼容性。
+
+    返回问题描述（不含具体凭据），无问题时返回 None。Compose 只做原样插入：
+    - 密码含 "@" 会截断密码并把 "@..." 混入主机；
+    - "%XX" 会被 make_url() 解码，与实际数据库密码不一致。
+    POSTGRES_* 可见时逐项比对解析结果与原始值；不可见时退回结构检查。
+    """
+    from sqlalchemy.engine import make_url
+
+    try:
+        parsed = make_url(database_url)
+    except Exception:
+        return "DATABASE_URL 必须可解析"
+
+    host = parsed.host or ""
+    if not host or not SAFE_DB_HOST.fullmatch(host):
+        return (
+            "DATABASE_URL 主机部分异常，用户名或密码可能包含未转义的 "
+            "@ 等 URL 保留字符"
+        )
+
+    if expected_user is not None and (parsed.username or "") != expected_user:
+        return "DATABASE_URL 用户名与 POSTGRES_USER 不一致（必须使用 URL 安全字符）"
+    if expected_password is not None and (parsed.password or "") != expected_password:
+        return (
+            "DATABASE_URL 密码与 POSTGRES_PASSWORD 不一致"
+            "（Compose 拼接不支持 @ / % 等 URL 保留字符）"
+        )
+    if expected_database is not None and (parsed.database or "") != expected_database:
+        return "DATABASE_URL 库名与 POSTGRES_DB 不一致（必须使用 URL 安全字符）"
+
+    # 缺少原始密码值时无法判断 %XX 是否被解码，生产环境保守拒绝。
+    if expected_password is None and URL_PERCENT_ESCAPE.search(database_url):
+        return "DATABASE_URL 含 URL 百分号转义，无法确认与真实数据库密码一致"
+    return None
+
+
+def _database_password(database_url: str) -> str | None:
+    """返回 DATABASE_URL 中的明文密码；无法解析时返回 None。
+
+    SQLAlchemy 的 make_url() 已对 userinfo 完成一次 URL 解码，这里不能再调用
+    unquote()：密码中的字面量 "%2F"（URL 里写作 %252F）会被二次解码成 "/"，
+    使弱口令判定与实际连接密码不一致。异常信息不携带 URL，避免泄露凭据。
+    """
+    from sqlalchemy.engine import make_url
+
+    try:
+        parsed = make_url(database_url)
+    except Exception:
+        return None
+    return parsed.password or ""
+
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        # 校验失败时不回显输入值，避免启动日志/pytest 输出泄露真实凭据
+        hide_input_in_errors=True,
+    )
 
     # 应用
     APP_NAME: str = "Knowledge Platform API"
     VERSION: str = "0.1.0"
-    ENV: str = "dev"  # dev / test / prod
+    ENV: str = "dev"  # dev / test / testing / prod / production（production 归一为 prod）
     API_PREFIX: str = "/api/v1"
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
     LOG_LEVEL: str = "INFO"
@@ -35,6 +165,11 @@ class Settings(BaseSettings):
     DATABASE_URL: str = (
         "postgresql+asyncpg://postgres:postgres@localhost:5432/knowledge_platform"
     )
+    # 仅用于生产环境校验 Compose 拼接后 DATABASE_URL 的一致性（Compose 会经
+    # env_file 把 .env 中的同名变量传入）；未提供时退回 URL 结构检查。
+    POSTGRES_USER: str | None = None
+    POSTGRES_PASSWORD: str | None = None
+    POSTGRES_DB: str | None = None
     REDIS_URL: str = "redis://localhost:6379/0"
     MILVUS_URI: str = "http://localhost:19530"
     MILVUS_COLLECTION: str = "document_chunks"
@@ -149,8 +284,8 @@ class Settings(BaseSettings):
     # 文件存储：local（本地磁盘）/ minio（S3 兼容对象存储）
     STORAGE_BACKEND: str = "local"
     MINIO_ENDPOINT: str = "localhost:9000"
-    MINIO_ACCESS_KEY: str = "minioadmin"
-    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_ACCESS_KEY: str = DEV_DEFAULT_MINIO_ACCESS_KEY
+    MINIO_SECRET_KEY: str = DEV_DEFAULT_MINIO_SECRET_KEY
     MINIO_BUCKET: str = "documents"
 
     # ── 真实知识数据导入中心（仅扫描本机目录，不接收浏览器大文件上传）────────
@@ -166,25 +301,118 @@ class Settings(BaseSettings):
     # 开发环境默认管理员（系统首次启动时若 users 表为空则自动创建）
     DEFAULT_ADMIN_EMAIL: str = "admin@company.com"
     DEFAULT_ADMIN_USERNAME: str = "admin"
-    DEFAULT_ADMIN_PASSWORD: str = "admin123456"
+    DEFAULT_ADMIN_PASSWORD: str = DEV_DEFAULT_ADMIN_PASSWORD
 
     # 评估质量门禁（AGENTS.md：answer_correctness ≥ 0.75 才允许合入）
     EVAL_ACCURACY_THRESHOLD: float = 0.75
 
+    @field_validator("ENV", mode="before")
+    @classmethod
+    def _normalize_env(cls, value: object) -> str:
+        """归一化并校验环境名称，未知值直接拒绝。
+
+        支持 dev / test / testing / prod / production（大小写与首尾空白不敏感）；
+        production 归一化为 prod，保证下游对 settings.ENV 的比较（启动种子、
+        测试模式、破坏性操作门禁）行为一致，不会因别名写法绕过生产限制。
+        """
+        env = str(value or "").strip().lower()
+        if env not in SUPPORTED_ENVS:
+            raise ValueError(
+                "ENV 配置非法：仅支持 dev / test / testing / prod / production"
+            )
+        return ENV_ALIASES.get(env, env)
+
     @model_validator(mode="after")
-    def _check_production_secret(self) -> "Settings":
-        """生产环境禁止使用默认/占位/过短密钥（否则任何人都能签发管理员 JWT）。"""
-        if self.ENV == "prod":
-            secret = (self.SECRET_KEY or "").strip()
-            if (
-                secret == DEV_DEFAULT_SECRET_KEY
-                or secret.lower() in WEAK_SECRET_KEYS
-                or len(secret) < 32
+    def _check_production_security(self) -> "Settings":
+        """生产环境拒绝示例密钥、默认服务凭据和不完整的管理员初始化配置。
+
+        ENV 已在字段校验阶段归一化为 prod（含 production 别名），错误信息只包含
+        字段名和规则，不回显字段值；配合 hide_input_in_errors 防止启动日志输出
+        真实凭据。
+
+        生产启动不会自动执行 init_db()，管理员字段仅服务于一次性初始化；
+        这里仍做保守校验，避免后续手工种子或误切回 dev 时使用默认密码。
+        """
+        if self.ENV != ENV_PROD:
+            return self
+
+        problems: list[str] = []
+
+        secret = (self.SECRET_KEY or "").strip()
+        if (
+            secret.lower() == DEV_DEFAULT_SECRET_KEY.lower()
+            or secret.lower() in WEAK_SECRET_KEYS
+            or _looks_like_placeholder(secret)
+            or len(secret) < 32
+        ):
+            problems.append(
+                "SECRET_KEY 必须为独立随机值（至少 32 字符，禁止内置默认值或占位值）"
+            )
+
+        db_problem = _database_url_problem(
+            self.DATABASE_URL,
+            self.POSTGRES_USER,
+            self.POSTGRES_PASSWORD,
+            self.POSTGRES_DB,
+        )
+        if db_problem:
+            problems.append(db_problem)
+        else:
+            db_password = _database_password(self.DATABASE_URL)
+            # _database_url_problem 已保证 URL 可解析
+            if not db_password:
+                problems.append("DATABASE_URL 必须包含非空密码")
+            elif (
+                db_password.strip().lower() in WEAK_PASSWORDS
+                or _looks_like_placeholder(db_password)
+                or len(db_password) < MIN_PROD_DB_PASSWORD_LENGTH
             ):
-                raise ValueError(
-                    "生产环境（ENV=prod）必须通过环境变量 SECRET_KEY 配置独立随机密钥"
-                    "（至少 32 字符，禁止内置默认值 / change-me-in-production 等占位值）"
+                problems.append(
+                    "PostgreSQL 密码必须为非默认值、非占位值且至少 "
+                    f"{MIN_PROD_DB_PASSWORD_LENGTH} 字符"
                 )
+
+        # 即使当前 STORAGE_BACKEND=local 也校验：Compose 中的 MinIO 仍服务于 Milvus，
+        # 且后续切换对象存储时不应重新引入默认凭据。
+        minio_access = (self.MINIO_ACCESS_KEY or "").strip()
+        minio_secret = (self.MINIO_SECRET_KEY or "").strip()
+        if (
+            not minio_access
+            or minio_access.lower() in WEAK_PASSWORDS
+            or _looks_like_placeholder(minio_access)
+        ):
+            problems.append("MINIO_ACCESS_KEY 必须为非默认值、非占位值")
+        if (
+            not minio_secret
+            or minio_secret.lower() in WEAK_PASSWORDS
+            or _looks_like_placeholder(minio_secret)
+            or len(minio_secret) < MIN_PROD_MINIO_SECRET_LENGTH
+        ):
+            problems.append(
+                "MINIO_SECRET_KEY 必须为非默认值、非占位值且至少 "
+                f"{MIN_PROD_MINIO_SECRET_LENGTH} 字符"
+            )
+
+        admin_email = (self.DEFAULT_ADMIN_EMAIL or "").strip()
+        admin_username = (self.DEFAULT_ADMIN_USERNAME or "").strip()
+        admin_password = (self.DEFAULT_ADMIN_PASSWORD or "").strip()
+        if not admin_email or "@" not in admin_email:
+            problems.append("DEFAULT_ADMIN_EMAIL 必须为非空合法邮箱")
+        if not admin_username or any(ch.isspace() for ch in admin_username):
+            problems.append("DEFAULT_ADMIN_USERNAME 必须为非空且不含空白字符")
+        if (
+            not admin_password
+            or admin_password.lower() in WEAK_PASSWORDS
+            or _looks_like_placeholder(admin_password)
+            or len(admin_password) < MIN_PROD_ADMIN_PASSWORD_LENGTH
+        ):
+            problems.append(
+                "DEFAULT_ADMIN_PASSWORD 必须为非默认值、非占位值且至少 "
+                f"{MIN_PROD_ADMIN_PASSWORD_LENGTH} 字符"
+            )
+
+        if problems:
+            raise ValueError("生产环境配置不安全：" + "；".join(problems))
         return self
 
 

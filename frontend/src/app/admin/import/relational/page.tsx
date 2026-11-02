@@ -43,6 +43,7 @@ import {
   type RelationRow,
   type RelationalTable,
 } from '@/services/api';
+import { describeApiError } from '@/utils/apiError';
 import {
   buildTemplateConfig,
   canApplyTemplate,
@@ -193,11 +194,18 @@ export default function RelationalImportPage() {
       setSelectedJunctions(data.junctions.map(junctionKey));
       setProgress(100);
       void runTemplateMatch(kbId, data.tables);
-      message.success(
-        `分析完成：${data.tables.length} 张表，${data.foreign_keys.length} 个外键候选，${data.junctions.length} 个关联表`,
-      );
+      const summary = `${data.tables.length} 张表，${data.foreign_keys.length} 个外键候选，${data.junctions.length} 个关联表`;
+      if (data.tables.length === 0) {
+        message.error(
+          `分析失败：没有可分析的结构化文件${data.errors.length > 0 ? `（${data.errors[0]}）` : ''}`,
+        );
+      } else if (data.errors.length > 0) {
+        message.warning(`分析完成，但 ${data.errors.length} 个文件无法分析：${summary}`);
+      } else {
+        message.success(`分析完成：${summary}`);
+      }
     } catch (error) {
-      message.error(`分析失败：${(error as Error).message}`);
+      message.error(`分析失败：${describeApiError(error)}`);
       setProgress(0);
     } finally {
       setAnalyzing(false);
@@ -365,11 +373,16 @@ export default function RelationalImportPage() {
       // 必须同时刷新关系列表：导入后关系状态（pending/confirmed）已变化，
       // 只刷新统计会让「关系确认」区仍显示空表（浏览器验收时实测到）。
       await loadRelations();
-      message.success(
-        `导入完成：实体 ${data.entities}、关系 ${data.relations}、图谱边 ${data.kg_edges}`,
-      );
+      const summary = `实体 ${data.entities}、关系 ${data.relations}、图谱边 ${data.kg_edges}`;
+      if (data.failed_rows > 0 && data.entities === 0 && data.records === 0) {
+        message.error(`导入失败：${summary}，失败行 ${data.failed_rows}`);
+      } else if (data.failed_rows > 0) {
+        message.warning(`导入完成但存在失败：${summary}，失败行 ${data.failed_rows}`);
+      } else {
+        message.success(`导入完成：${summary}`);
+      }
     } catch (error) {
-      message.error(`导入失败：${(error as Error).message}`);
+      message.error(`导入失败：${describeApiError(error)}`);
     } finally {
       setCommitting(false);
     }

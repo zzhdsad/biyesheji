@@ -1,0 +1,150 @@
+{
+  "alembic_version": "465081816093",
+  "business_table_count": 35,
+  "tables": [
+    "alembic_version",
+    "audit_logs",
+    "categories",
+    "chunks",
+    "conversations",
+    "documents",
+    "evaluation_results",
+    "evaluation_runs",
+    "feedbacks",
+    "generic_entities",
+    "generic_relations",
+    "herb_tags",
+    "herbs",
+    "import_files",
+    "import_jobs",
+    "import_mapping_templates",
+    "import_records",
+    "kb_members",
+    "kg_edges",
+    "kg_nodes",
+    "knowledge_base_resources",
+    "knowledge_bases",
+    "literature_tags",
+    "literatures",
+    "messages",
+    "model_configs",
+    "prescription_ingredients",
+    "prescription_tags",
+    "prescriptions",
+    "revectorize_jobs",
+    "system_configs",
+    "tags",
+    "test_cases",
+    "theories",
+    "theory_tags",
+    "users"
+  ],
+  "column_count": 376,
+  "index_count": 156,
+  "constraint_count": 87,
+  "fk_count": 44,
+  "failures": [],
+  "warnings": [
+    "ORM/DB nullability drift in 12 columns: import_jobs.dataset_name, import_jobs.source_file, import_jobs.status, import_jobs.total, import_jobs.processed, import_jobs.succeeded, import_jobs.failed, import_jobs.skipped, import_jobs.failed_items, import_jobs.error_message, import_jobs.created_at, import_jobs.updated_at",
+    "import_jobs.created_at has no DB default while ORM relies on server_default",
+    "import_jobs.updated_at has no DB default while ORM relies on server_default"
+  ],
+  "nullability_drift": [
+    {
+      "table": "import_jobs",
+      "column": "dataset_name",
+      "orm_nullable": false,
+      "db_nullable": true,
+      "db_type": "character varying",
+      "db_default": null
+    },
+    {
+      "table": "import_jobs",
+      "column": "source_file",
+      "orm_nullable": false,
+      "db_nullable": true,
+      "db_type": "character varying",
+      "db_default": null
+    },
+    {
+      "table": "import_jobs",
+      "column": "status",
+      "orm_nullable": false,
+      "db_nullable": true,
+      "db_type": "character varying",
+      "db_default": null
+    },
+    {
+      "table": "import_jobs",
+      "column": "total",
+      "orm_nullable": false,
+      "db_nullable": true,
+      "db_type": "integer",
+      "db_default": null
+    },
+    {
+      "table": "import_jobs",
+      "column": "processed",
+      "orm_nullable": false,
+      "db_nullable": true,
+      "db_type": "integer",
+      "db_default": null
+    },
+    {
+      "table": "import_jobs",
+      "column": "succeeded",
+      "orm_nullable": false,
+      "db_nullable": true,
+      "db_type": "integer",
+      "db_default": null
+    },
+    {
+      "table": "import_jobs",
+      "column": "failed",
+      "orm_nullable": false,
+      "db_nullable": true,
+      "db_type": "integer",
+      "db_default": null
+    },
+    {
+      "table": "import_jobs",
+      "column": "skipped",
+      "orm_nullable": false,
+      "db_nullable": true,
+      "db_type": "integer",
+      "db_default": null
+    },
+    {
+      "table": "import_jobs",
+      "column": "failed_items",
+      "orm_nullable": false,
+      "db_nullable": true,
+      "db_type": "jsonb",
+      "db_default": null
+    },
+    {
+      "table": "import_jobs",
+      "column": "error_message",
+      "orm_nullable": false,
+      "db_nullable": true,
+      "db_type": "text",
+      "db_default": null
+    },
+    {
+      "table": "import_jobs",
+      "column": "created_at",
+      "orm_nullable": false,
+      "db_nullable": true,
+      "db_type": "timestamp with time zone",
+      "db_default": null
+    },
+    {
+      "table": "import_jobs",
+      "column": "updated_at",
+      "orm_nullable": false,
+      "db_nullable": true,
+      "db_type": "timestamp with time zone",
+      "db_default": null
+    }
+  ]
+}

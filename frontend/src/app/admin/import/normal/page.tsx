@@ -34,6 +34,7 @@ import {
   scanGeneralFiles,
   type ScannedFile,
 } from '@/services/api';
+import { describeApiError } from '@/utils/apiError';
 import { useQuery } from '@tanstack/react-query';
 
 const DOC_FORMATS = ['pdf', 'docx', 'txt', 'md'];
@@ -125,9 +126,15 @@ export default function NormalImportPage() {
       setSettings(nextSettings);
       setProgress(100);
       const usable = data.files.filter((f) => f.supported).length;
-      message.success(`扫描完成：${usable} / ${data.files.length} 个文件可用`);
+      if (usable === 0) {
+        message.error(`扫描失败：0 / ${data.files.length} 个文件可用`);
+      } else if (usable < data.files.length) {
+        message.warning(`扫描完成：${usable} / ${data.files.length} 个文件可用，其余文件存在错误`);
+      } else {
+        message.success(`扫描完成：${usable} 个文件可用`);
+      }
     } catch (error) {
-      message.error(`扫描失败：${(error as Error).message}`);
+      message.error(`扫描失败：${describeApiError(error)}`);
       setProgress(0);
     } finally {
       setScanning(false);
@@ -159,11 +166,17 @@ export default function NormalImportPage() {
         }),
       });
       setResult(data);
-      message.success(
-        `导入完成：文档 ${data.documents}、记录 ${data.records}、实体 ${data.entities}，失败 ${data.failed}`,
-      );
+      const imported = data.documents + data.records;
+      const summary = `文档 ${data.documents}、记录 ${data.records}、实体 ${data.entities}，失败 ${data.failed}`;
+      if (data.failed > 0 && imported === 0) {
+        message.error(`导入失败：${summary}`);
+      } else if (data.failed > 0) {
+        message.warning(`导入完成但存在失败：${summary}`);
+      } else {
+        message.success(`导入完成：${summary}`);
+      }
     } catch (error) {
-      message.error(`导入失败：${(error as Error).message}`);
+      message.error(`导入失败：${describeApiError(error)}`);
     } finally {
       setCommitting(false);
     }

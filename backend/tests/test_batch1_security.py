@@ -398,21 +398,31 @@ def test_must_change_password_blocks_business_api(auth_client):
 def test_prod_rejects_default_secret_key():
     """生产环境使用内置默认密钥 / 模板占位值 / 过短密钥 → 直接拒绝启动。"""
     with pytest.raises(Exception) as exc:
-        Settings(ENV="prod", SECRET_KEY=DEV_DEFAULT_SECRET_KEY)
+        Settings(_env_file=None, ENV="prod", SECRET_KEY=DEV_DEFAULT_SECRET_KEY)
     assert "SECRET_KEY" in str(exc.value)
 
     with pytest.raises(Exception) as exc:
-        Settings(ENV="prod", SECRET_KEY="change-me-in-production")
+        Settings(_env_file=None, ENV="prod", SECRET_KEY="change-me-in-production")
     assert "SECRET_KEY" in str(exc.value)
 
     with pytest.raises(Exception):
-        Settings(ENV="prod", SECRET_KEY="short")
+        Settings(_env_file=None, ENV="prod", SECRET_KEY="short")
 
-    ok = Settings(ENV="prod", SECRET_KEY="x" * 48)
+    ok = Settings(
+        _env_file=None,
+        ENV="prod",
+        SECRET_KEY="x" * 48,
+        DATABASE_URL=(
+            "postgresql+asyncpg://kp_app:ProdDbPassw0rd2026@db:5432/knowledge_platform"
+        ),
+        MINIO_ACCESS_KEY="kp-prod-access-2026",
+        MINIO_SECRET_KEY="ProdMinioSecret2026",
+        DEFAULT_ADMIN_PASSWORD="ProdAdminPassw0rd2026",
+    )
     assert ok.SECRET_KEY == "x" * 48
 
     # 非生产环境仍可使用默认值（开发/测试不受影响）
-    dev = Settings(ENV="dev", SECRET_KEY=DEV_DEFAULT_SECRET_KEY)
+    dev = Settings(_env_file=None, ENV="dev", SECRET_KEY=DEV_DEFAULT_SECRET_KEY)
     assert dev.SECRET_KEY == DEV_DEFAULT_SECRET_KEY
 
 

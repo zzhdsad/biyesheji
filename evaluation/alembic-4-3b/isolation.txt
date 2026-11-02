@@ -1,0 +1,26 @@
+== docker ps -a (after creation) ==
+159169b69452 | kp-alembic-4-3b | postgres:15-alpine | Up 2 minutes | 127.0.0.1:55433->5432/tcp
+528e6236ebc0 | kp-backend | biyesheji-backend | Exited (0) 18 hours ago | 
+4c69d3c4c4e2 | kp-postgres | postgres:15-alpine | Up 2 minutes (healthy) | 0.0.0.0:5432->5432/tcp, [::]:5432->5432/tcp
+0b500bbba5ac | kp-redis | redis:7-alpine | Up 2 minutes (healthy) | 0.0.0.0:6379->6379/tcp, [::]:6379->6379/tcp
+41762cad35e8 | kp-frontend | biyesheji-frontend | Exited (0) 18 hours ago | 
+f7fba62529b7 | kp-milvus | milvusdb/milvus:v2.4.15 | Up 2 minutes | 0.0.0.0:9091->9091/tcp, [::]:9091->9091/tcp, 0.0.0.0:19530->19530/tcp, [::]:19530->19530/tcp
+ff763b94676b | kp-minio | minio/minio:RELEASE.2024-05-28T17-19-04Z | Up 2 minutes | 0.0.0.0:9000->9000/tcp, [::]:9000->9000/tcp
+b6f794fffa7f | kp-etcd | quay.io/coreos/etcd:v3.5.14 | Up 2 minutes | 2379-2380/tcp
+
+== kp-alembic-4-3b inspect ==
+ID=159169b6945206abb5a76a0a4933554737f7c37fb40fdf91ec0a0fa873bf1aaf
+Name=/kp-alembic-4-3b
+Image=postgres:15-alpine
+Created=2026-11-01T01:53:17.16550024Z
+RestartPolicy=no
+PortBindings={"5432/tcp":[{"HostIp":"127.0.0.1","HostPort":"55433"}]}
+Networks={"kp-alembic-4-3b-net":{"Aliases":null,"DNSNames":["kp-alembic-4-3b","159169b69452"],"DriverOpts":null,"EndpointID":"47ea0721c543b5f2f712830339ef8763c7b1282a279630d57686bbd673ab8aed","Gateway":"172.21.0.1","GlobalIPv6Address":"","GlobalIPv6PrefixLen":0,"GwPriority":0,"IPAMConfig":null,"IPAddress":"172.21.0.2","IPPrefixLen":16,"IPv6Gateway":"","Links":null,"MacAddress":"6e:16:4b:36:13:42","NetworkID":"b0b1dca5540b8303531668fec5cd552124ef7b5fc1ff87baa134145d63a08cbb"}}
+Mounts=[{"Destination":"/var/lib/postgresql/data","Driver":"local","Mode":"z","Name":"kp-alembic-4-3b-data","Propagation":"","RW":true,"Source":"/var/lib/docker/volumes/kp-alembic-4-3b-data/_data","Type":"volume"}]
+
+== port mapping ==
+5432/tcp -> 127.0.0.1:55433
+
+== selected env ==
+POSTGRES_DB=kp_ci_4_3b
+POSTGRES_USER=ci_user

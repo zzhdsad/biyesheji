@@ -1,0 +1,8 @@
+{
+  "database": "kp_ci_4_3b2_empty",
+  "mode": "empty",
+  "alembic_version": "7d1e9c4b2a60",
+  "table_count": 35,
+  "column_count": 376,
+  "drift": []
+}

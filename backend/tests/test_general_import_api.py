@@ -332,6 +332,126 @@ def test_relational_commit_skips_malformed_rows_and_reports_them(client: TestCli
 
 
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_relational_analyze_rejects_same_table_name_from_different_dirs(client: TestClient):
+    """不同目录的同名 CSV 会映射到同一张表：分析阶段必须明确拒绝。"""
+    resp = _upload(
+        client,
+        "/api/v1/import/relational/analyze",
+        [
+            ("files", ("D1.csv", CSV_TERMS.encode("utf-8"), "text/csv")),
+            ("files", ("D1.csv", CSV_MEDICINES.encode("utf-8"), "text/csv")),
+        ],
+        paths=["甲/D1.csv", "乙/D1.csv"],
+    )
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert "甲/D1.csv" in detail
+    assert "乙/D1.csv" in detail
+    assert "静默覆盖" in detail
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_relational_commit_rejects_duplicate_table_names_without_writing(
+    client: TestClient, kb: str
+):
+    """即使绕过分析直接提交，同名表也必须被拒绝且不落库。"""
+    scan = _upload(
+        client,
+        "/api/v1/import/scan",
+        [
+            ("files", ("D1.csv", CSV_TERMS.encode("utf-8"), "text/csv")),
+            ("files", ("D1.csv", CSV_MEDICINES.encode("utf-8"), "text/csv")),
+        ],
+        paths=["甲/D1.csv", "乙/D1.csv"],
+    )
+    assert scan.status_code == 200, scan.text
+
+    resp = client.post(
+        "/api/v1/import/relational/commit",
+        json={
+            "session_id": scan.json()["session_id"],
+            "kb_id": kb,
+            "primary_keys": {"D1": "术语id"},
+            "auto_confirm": False,
+        },
+    )
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert "甲/D1.csv" in detail
+    assert "乙/D1.csv" in detail
+
+    stats = client.get(f"/api/v1/import/stats?kb_id={kb}").json()
+    assert stats["records"] == 0
+    assert stats["entities"] == 0
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_duplicate_relative_paths_are_rejected_before_staging(client: TestClient):
+    """路径完全相同意味着无法区分来源，扫描与分析都必须整批拒绝。"""
+    files = [
+        ("files", ("同名.csv", CSV_TERMS.encode("utf-8"), "text/csv")),
+        ("files", ("同名.csv", CSV_MEDICINES.encode("utf-8"), "text/csv")),
+    ]
+    scan = _upload(client, "/api/v1/import/scan", files, paths=["同名.csv", "同名.csv"])
+    assert scan.status_code == 400, scan.text
+    assert "重复的上传路径" in scan.json()["detail"]
+
+    analyze = _upload(
+        client,
+        "/api/v1/import/relational/analyze",
+        files,
+        paths=["同名.csv", "同名.csv"],
+    )
+    assert analyze.status_code == 400, analyze.text
+    assert "重复的上传路径" in analyze.json()["detail"]
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_import_total_failures_return_4xx(client: TestClient, kb: str):
+    """整体失败必须返回 4xx，不能以 200 + error 冒充成功。"""
+    missing_session = client.post(
+        "/api/v1/import/general/commit",
+        json={"session_id": "missing-session", "kb_id": kb, "files": []},
+    )
+    assert missing_session.status_code == 400, missing_session.text
+    assert "会话不存在" in missing_session.json()["detail"]
+
+    missing_rel = client.post(
+        "/api/v1/import/relational/commit",
+        json={"session_id": "missing-session", "kb_id": kb},
+    )
+    assert missing_rel.status_code == 400, missing_rel.text
+    assert "会话不存在" in missing_rel.json()["detail"]
+
+    no_structured = _upload(
+        client,
+        "/api/v1/import/relational/analyze",
+        [("files", ("说明.txt", "这是普通文本".encode("utf-8"), "text/plain"))],
+        paths=["说明.txt"],
+    )
+    assert no_structured.status_code == 400, no_structured.text
+    assert "没有可分析的结构化文件" in no_structured.json()["detail"]
+
+    analyze = _upload(
+        client,
+        "/api/v1/import/relational/analyze",
+        [("files", ("D1.csv", CSV_TERMS.encode("utf-8"), "text/csv"))],
+        paths=["D1.csv"],
+    )
+    assert analyze.status_code == 200, analyze.text
+    missing_template = client.post(
+        "/api/v1/import/relational/commit",
+        json={
+            "session_id": analyze.json()["session_id"],
+            "kb_id": kb,
+            "template_id": str(uuid.uuid4()),
+        },
+    )
+    assert missing_template.status_code == 400, missing_template.text
+    assert "映射模板不存在" in missing_template.json()["detail"]
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 def test_mapping_template_match_save_and_apply(client: TestClient, kb: str):
     """模板保存 → 自动匹配 → 提交时由模板补齐映射；不兼容时明确拒绝套用。"""
     analyze = _upload(
@@ -442,8 +562,9 @@ def test_mapping_template_match_save_and_apply(client: TestClient, kb: str):
             "auto_confirm": False,
         },
     )
-    assert cross.status_code == 200, cross.text
-    assert "其他知识库" in cross.json()["error"]
+    # 跨库模板属于请求错误，必须用 4xx 返回，前端才会走失败提示
+    assert cross.status_code == 400, cross.text
+    assert "其他知识库" in cross.json()["detail"]
 
     # 由模板补齐主键与关联关系后提交：不显式给映射也能导入
     commit = client.post(

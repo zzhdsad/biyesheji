@@ -243,9 +243,9 @@ async def scan_files(
     """
     _admin(request)
     if not files:
-        return {"session_id": "", "files": [], "errors": ["未选择任何文件"]}
+        raise HTTPException(status_code=400, detail="未选择任何文件")
     if len(files) > MAX_FILES:
-        return {"session_id": "", "files": [], "errors": [f"一次最多上传 {MAX_FILES} 个文件"]}
+        raise HTTPException(status_code=400, detail=f"一次最多上传 {MAX_FILES} 个文件")
 
     import json as _json
 
@@ -263,6 +263,8 @@ async def scan_files(
     os.makedirs(session_dir, exist_ok=True)
 
     scanned: list[dict[str, Any]] = []
+    seen_rel_paths: set[str] = set()
+    duplicate_paths: list[str] = []
     for index, upload in enumerate(files):
         rel = rel_paths[index] if index < len(rel_paths) else (upload.filename or f"file-{index}")
         try:
@@ -270,6 +272,12 @@ async def scan_files(
         except ValueError as exc:
             scanned.append({"path": rel, "error": str(exc), "supported": False})
             continue
+        if rel in seen_rel_paths:
+            # 单文件选择器不带目录信息时，同名文件会落到同一路径；
+            # 继续写入只会让后者覆盖前者，因此整批拒绝。
+            duplicate_paths.append(rel)
+            continue
+        seen_rel_paths.add(rel)
 
         data = await upload.read()
         if not data:
@@ -350,6 +358,9 @@ async def scan_files(
             }
         )
 
+    if duplicate_paths:
+        raise HTTPException(status_code=400, detail=_duplicate_path_detail(duplicate_paths))
+
     return {
         "session_id": session_id,
         "files": scanned,
@@ -359,6 +370,37 @@ async def scan_files(
 
 def _session_dir(session_id: str) -> str:
     return os.path.join(_staging_root(), _safe_rel(session_id))
+
+
+def _duplicate_path_detail(paths: list[str]) -> str:
+    """重复的相对路径无法区分来源，必须明确拒绝而不是让后上传的覆盖前者。"""
+    shown = "、".join(sorted(set(paths))[:10])
+    return (
+        f"检测到重复的上传路径，无法区分不同目录下的同名文件：{shown}。"
+        "请改用「选择文件夹（递归）」保留目录结构，或重命名文件后重试。"
+    )
+
+
+def _duplicate_table_detail(collisions: dict[str, list[str]]) -> str:
+    """同名结构化文件会映射到同一张表，拒绝时列出全部来源路径。"""
+    parts: list[str] = []
+    for table_name in sorted(collisions)[:10]:
+        paths = sorted(collisions[table_name])
+        shown = "、".join(paths[:5])
+        if len(paths) > 5:
+            shown += f" 等 {len(paths)} 个文件"
+        parts.append(f"{table_name}（{shown}）")
+    return (
+        "检测到不同目录下的同名结构化文件，无法安全区分表名："
+        + "；".join(parts)
+        + "。请重命名文件或分批导入，系统不会静默覆盖。"
+    )
+
+
+def _raise_if_duplicate_tables(table_sources: dict[str, list[str]]) -> None:
+    collisions = {name: paths for name, paths in table_sources.items() if len(paths) > 1}
+    if collisions:
+        raise HTTPException(status_code=400, detail=_duplicate_table_detail(collisions))
 
 
 # ── 普通导入提交 ────────────────────────────────────────────────────────────
@@ -374,7 +416,7 @@ async def commit_general(
     user = _admin(request)
     session_dir = _session_dir(payload.session_id)
     if not os.path.isdir(session_dir):
-        return {"error": "会话不存在或已过期，请重新上传文件"}
+        raise HTTPException(status_code=400, detail="会话不存在或已过期，请重新上传文件")
 
     svc = EntityImportService(db)
     await svc.require_write(user, payload.kb_id)
@@ -516,7 +558,7 @@ async def analyze_relational(
     """关联导入分析：Schema + 主键候选 + 外键候选 + 关联表候选（只读）。"""
     _admin(request)
     if not files:
-        return {"session_id": "", "tables": [], "errors": ["未选择任何文件"]}
+        raise HTTPException(status_code=400, detail="未选择任何文件")
 
     import json as _json
 
@@ -536,6 +578,9 @@ async def analyze_relational(
     tables: list[dict[str, Any]] = []
     rows_by_table: dict[str, list] = {}
     errors: list[str] = []
+    seen_rel_paths: set[str] = set()
+    duplicate_paths: list[str] = []
+    table_sources: dict[str, list[str]] = {}
 
     for index, upload in enumerate(files):
         rel = rel_paths[index] if index < len(rel_paths) else (upload.filename or f"file-{index}")
@@ -544,6 +589,10 @@ async def analyze_relational(
         except ValueError as exc:
             errors.append(str(exc))
             continue
+        if rel in seen_rel_paths:
+            duplicate_paths.append(rel)
+            continue
+        seen_rel_paths.add(rel)
         data = await upload.read()
         target = os.path.join(session_dir, rel)
         os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -555,6 +604,10 @@ async def analyze_relational(
         table_name = os.path.splitext(name)[0] or f"table-{index}"
         if not fts.is_structured(fmt):
             errors.append(f"{name}：{fts.describe_unsupported(name, fmt)}")
+            continue
+        table_sources.setdefault(table_name, []).append(rel)
+        if len(table_sources[table_name]) > 1:
+            # 同名表不能合并也不能覆盖：先记下冲突，循环结束后整批拒绝
             continue
         encoding = fts.detect_encoding(data)
         try:
@@ -597,8 +650,14 @@ async def analyze_relational(
             }
         )
 
+    if duplicate_paths:
+        raise HTTPException(status_code=400, detail=_duplicate_path_detail(duplicate_paths))
+    _raise_if_duplicate_tables(table_sources)
     if not rows_by_table:
-        return {"session_id": session_id, "tables": tables, "errors": errors or ["没有可分析的结构化文件"]}
+        detail = "没有可分析的结构化文件"
+        if errors:
+            detail += "：" + "；".join(errors[:10])
+        raise HTTPException(status_code=400, detail=detail)
 
     profiles = [
         schema_analyzer.analyze_rows(rows, table_name=name, sample_size=ANALYZE_SAMPLE)
@@ -657,11 +716,12 @@ async def commit_relational(
     user = _admin(request)
     session_dir = _session_dir(payload.session_id)
     if not os.path.isdir(session_dir):
-        return {"error": "会话不存在或已过期，请重新上传文件"}
+        raise HTTPException(status_code=400, detail="会话不存在或已过期，请重新上传文件")
 
     # 从暂存目录重新解析（服务端以文件为准，避免前端篡改分析结果）
     rows_by_table: dict[str, list] = {}
     files_by_table: dict[str, Any] = {}
+    table_sources: dict[str, list[str]] = {}
     # 解析级错误（坏行被跳过、整文件解析失败），需与入库错误一起返回给前端
     commit_errors: list[dict[str, Any]] = []
     job = ImportJob(
@@ -686,6 +746,10 @@ async def commit_relational(
             if not fts.is_structured(fmt):
                 continue
             table_name = os.path.splitext(name)[0]
+            table_sources.setdefault(table_name, []).append(rel)
+            if len(table_sources[table_name]) > 1:
+                # 同名表不解析、不覆盖；循环结束后整批拒绝，避免静默丢数据
+                continue
             encoding = fts.detect_encoding(data)
             try:
                 rows_by_table[table_name] = list(
@@ -719,12 +783,14 @@ async def commit_relational(
             await db.flush()
             files_by_table[table_name] = import_file
 
+    _raise_if_duplicate_tables(table_sources)
     if not rows_by_table:
-        job.status = "failed"
-        job.error_message = "没有可用于导入的结构化文件"
-        job.failed = len(commit_errors)
-        await db.commit()
-        return {"error": job.error_message, "errors": commit_errors[:50]}
+        detail = "没有可用于导入的结构化文件"
+        if commit_errors:
+            detail += "：" + "；".join(
+                f"{item['file_name']}：{item['message']}" for item in commit_errors[:10]
+            )
+        raise HTTPException(status_code=400, detail=detail)
 
     svc = EntityImportService(db)
 
@@ -732,13 +798,13 @@ async def commit_relational(
     if payload.template_id is not None:
         template = await db.get(ImportMappingTemplate, payload.template_id)
         if template is None:
-            return {"error": "映射模板不存在"}
+            raise HTTPException(status_code=400, detail="映射模板不存在")
         if template.kb_id is not None and template.kb_id != payload.kb_id:
-            return {"error": "该模板属于其他知识库，不能跨库应用"}
+            raise HTTPException(status_code=400, detail="该模板属于其他知识库，不能跨库应用")
         try:
             config = TemplateConfig.from_dict(template.config or {})
         except TemplateError as exc:
-            return {"error": f"映射模板不可用：{exc}"}
+            raise HTTPException(status_code=400, detail=f"映射模板不可用：{exc}") from exc
         plan = MappingTemplateService.to_plan(config)
         for table, pk in plan["primary_keys"].items():
             payload.primary_keys.setdefault(table, pk)
@@ -895,7 +961,7 @@ async def save_template(
     if payload.kb_id is not None:
         await require_kb_write(db, user, payload.kb_id)
     if not payload.fingerprint and not payload.tables:
-        return {"error": "必须提供 fingerprint 或 tables"}
+        raise HTTPException(status_code=400, detail="必须提供 fingerprint 或 tables")
     fingerprint = payload.fingerprint or dataset_fingerprint(payload.tables or {})
     try:
         template = await MappingTemplateService(db).save(
@@ -906,7 +972,7 @@ async def save_template(
             user=user,
         )
     except TemplateError as exc:
-        return {"error": str(exc)}
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     await db.commit()
     return {"id": str(template.id), "name": template.name, "fingerprint": fingerprint}
 

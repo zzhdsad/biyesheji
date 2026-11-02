@@ -7,16 +7,18 @@ services:
     # 异常退出 / 宿主机重启后自动拉起
     restart: always
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-knowledge_platform}
+      # 三项与 backend 的 DATABASE_URL 共用同一来源；缺失时 compose 直接报错，
+      # 不再回退到 postgres/postgres 这类弱默认值。
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB is required}
     ports:
       - "5432:5432"
     volumes:
       # 绑定到宿主机目录：容器删除 / 重建后数据仍在
       - ${HOST_DATA_DIR:-./docker-data}/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -56,8 +58,10 @@ services:
     container_name: kp-minio
     restart: always
     environment:
-      MINIO_ACCESS_KEY: minioadmin
-      MINIO_SECRET_KEY: minioadmin
+      # 同一组值同时注入 backend 与 Milvus；MinIO 使用现行 ROOT_* 变量名，
+      # 凭据全部来自 .env，compose 内不再保留任何默认密码。
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required}
     command: minio server /minio_data
     ports:
       - "9000:9000"
@@ -72,6 +76,9 @@ services:
     environment:
       ETCD_ENDPOINTS: etcd:2379
       MINIO_ADDRESS: minio:9000
+      # Milvus 独立用 *_KEY_ID / *_SECRET_ACCESS_KEY 命名；必须与 MinIO 服务一致
+      MINIO_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required}
     depends_on:
       - etcd
       - minio
@@ -87,9 +94,15 @@ services:
     restart: always
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-knowledge_platform}
+      # 与 postgres 服务共用同一组 POSTGRES_*：密码含 @ : / ? # % 等保留字符时
+      # 需改用 URL 安全字符，否则 URL 解析结果与真实密码不一致。
+      DATABASE_URL: "postgresql+asyncpg://${POSTGRES_USER:?POSTGRES_USER is required}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}@postgres:5432/${POSTGRES_DB:?POSTGRES_DB is required}"
       REDIS_URL: redis://redis:6379/0
       MILVUS_URI: http://milvus:19530
+      # 容器内必须使用服务名；.env 里的 localhost:9000 只适用于宿主机直跑后端
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY is required}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY is required}
       HF_ENDPOINT: https://hf-mirror.com
       EMBEDDING_MODEL_PATH: /app/models/bge-m3
       RERANK_MODEL_PATH: /app/models/bge-reranker-v2-m3
