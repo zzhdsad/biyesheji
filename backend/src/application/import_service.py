@@ -66,7 +66,7 @@ _NAME_KEYS = [
 _ALIAS_KEYS = ["Chinese_synonyms", "work_family", "aliases"]
 _AUTHOR_KEYS = ["author"]
 _DYNASTY_KEYS = ["dynasty"]
-_CONTENT_KEYS = ["content.0.text", "text", "content"]
+_CONTENT_KEYS = ["content.0.text", "text", "content", "English_definition_description"]
 _SOURCE_ID_KEYS = ["id", "CHP_ID", "CPM_ID", "TCMT_ID", "Herb_ID"]
 
 # 中药业务字段候选键（AromaTCM herb_basic 等带功效/性味/归经的数据集）：

@@ -21,6 +21,7 @@ import {
   message,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 
@@ -28,6 +29,7 @@ import { AdminHeaderRight } from '@/components/layout/AppSider';
 import { AppLayout } from '@/components/layout/AppLayout';
 import ErDiagram, { type ErRelation, type ErTable } from '@/components/admin/ErDiagram';
 import FilePicker, { type PickedFile } from '@/components/admin/FilePicker';
+import ImportProgressBar from '@/components/admin/ImportProgressBar';
 import {
   analyzeRelationalFiles,
   commitRelationalImport,
@@ -38,11 +40,13 @@ import {
   saveImportTemplate,
   setRelationsStatus,
   type ForeignKeyItem,
-  type ImportTemplateMatchResult,
   type JunctionItem,
   type RelationRow,
+  type RelationalCommitResult,
   type RelationalTable,
 } from '@/services/api';
+import { useImportProgressPolling } from '@/hooks/useImportProgressPolling';
+import { useRelationalImportStore } from '@/stores/importStore';
 import { describeApiError } from '@/utils/apiError';
 import {
   buildTemplateConfig,
@@ -86,43 +90,43 @@ function junctionKey(item: JunctionItem): string {
 }
 
 export default function RelationalImportPage() {
+  const {
+    kbId,
+    sessionId,
+    tables,
+    primaryKeys,
+    foreignKeys,
+    junctions,
+    analyzeErrors,
+    selectedFks,
+    selectedJunctions,
+    relationTypes,
+    templateFingerprint,
+    templateMatch,
+    appliedTemplateId,
+    autoConfirm,
+    committing,
+    commitProgress,
+    commitResult,
+    patch,
+    reset,
+  } = useRelationalImportStore();
+
   const [picked, setPicked] = useState<PickedFile[]>([]);
-  const [kbId, setKbId] = useState<string>();
+  // FilePicker 的文件列表在组件内部，重置时需要重建才能一起清空
+  const [pickerKey, setPickerKey] = useState(0);
   const [analyzing, setAnalyzing] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [sessionId, setSessionId] = useState('');
-  const [tables, setTables] = useState<RelationalTable[]>([]);
-  const [primaryKeys, setPrimaryKeys] = useState<Record<string, string>>({});
-  const [foreignKeys, setForeignKeys] = useState<ForeignKeyItem[]>([]);
-  const [junctions, setJunctions] = useState<JunctionItem[]>([]);
-  const [analyzeErrors, setAnalyzeErrors] = useState<string[]>([]);
-  const [selectedFks, setSelectedFks] = useState<string[]>([]);
-  const [selectedJunctions, setSelectedJunctions] = useState<string[]>([]);
-  const [relationTypes, setRelationTypes] = useState<Record<string, string>>({});
-  const [templateFingerprint, setTemplateFingerprint] = useState('');
-  const [templateMatch, setTemplateMatch] = useState<ImportTemplateMatchResult | null>(null);
   const [matchingTemplate, setMatchingTemplate] = useState(false);
-  const [appliedTemplateId, setAppliedTemplateId] = useState<string | null>(null);
   const [templateDetailsOpen, setTemplateDetailsOpen] = useState(false);
   const [saveTemplateOpen, setSaveTemplateOpen] = useState(false);
   const [saveTemplateName, setSaveTemplateName] = useState('');
   const [savingTemplate, setSavingTemplate] = useState(false);
   const templateMatchSeq = useRef(0);
-  const [autoConfirm, setAutoConfirm] = useState(false);
-  const [committing, setCommitting] = useState(false);
   const [relations, setRelations] = useState<RelationRow[]>([]);
   const [relationFilter, setRelationFilter] = useState<string>('');
   const [selectedRelationIds, setSelectedRelationIds] = useState<string[]>([]);
   const [updatingRelations, setUpdatingRelations] = useState(false);
-  const [commitResult, setCommitResult] = useState<{
-    records: number;
-    entities: number;
-    relations: number;
-    kg_nodes: number;
-    kg_edges: number;
-    failed_rows: number;
-    errors: { file_name: string; row_no: number; message: string }[];
-  }>();
 
   const { data: kbs = [] } = useQuery({
     queryKey: ['knowledge-bases'],
@@ -137,14 +141,14 @@ export default function RelationalImportPage() {
   const runTemplateMatch = useCallback(
     async (targetKb: string | undefined, tableList: RelationalTable[]) => {
       if (tableList.length === 0) {
-        setTemplateMatch(null);
+        patch({ templateMatch: null });
         return;
       }
       const seq = templateMatchSeq.current + 1;
       templateMatchSeq.current = seq;
       // 重新匹配意味着当前记忆的“已套用模板”可能已过期：
       // 在结果返回前先撤销，防止旧 template_id 继续左右提交内容。
-      setAppliedTemplateId(null);
+      patch({ appliedTemplateId: null });
       setMatchingTemplate(true);
       try {
         const result = await matchImportTemplate({
@@ -152,21 +156,25 @@ export default function RelationalImportPage() {
           tables: tablesFieldMap(tableList),
         });
         if (templateMatchSeq.current !== seq) return;
-        setTemplateMatch(result);
+        patch({ templateMatch: result });
       } catch (error) {
         if (templateMatchSeq.current !== seq) return;
-        setTemplateMatch(null);
+        patch({ templateMatch: null });
         message.warning(`模板匹配失败：${(error as Error).message}`);
       } finally {
         if (templateMatchSeq.current === seq) setMatchingTemplate(false);
       }
     },
-    [],
+    [patch],
   );
 
   const runAnalyze = async () => {
     if (picked.length === 0) {
       message.warning('请先选择文件或文件夹');
+      return;
+    }
+    if (committing) {
+      message.warning('导入正在进行中，完成后再重新分析');
       return;
     }
     setAnalyzing(true);
@@ -176,22 +184,28 @@ export default function RelationalImportPage() {
         picked.map((p) => p.file),
         picked.map((p) => p.path),
       );
-      setSessionId(data.session_id);
-      setTables(data.tables);
-      setForeignKeys(data.foreign_keys);
-      setJunctions(data.junctions);
-      setAnalyzeErrors(data.errors);
-      setTemplateFingerprint(data.dataset_fingerprint);
-      setTemplateMatch(null);
-      setAppliedTemplateId(null);
       // 默认采用置信度最高的主键候选，用户可改
       const pks: Record<string, string> = {};
       Object.entries(data.primary_keys).forEach(([table, fields]) => {
         if (fields.length > 0) pks[table] = fields[0];
       });
-      setPrimaryKeys(pks);
-      setSelectedFks(data.foreign_keys.map(fkKey));
-      setSelectedJunctions(data.junctions.map(junctionKey));
+      patch({
+        sessionId: data.session_id,
+        tables: data.tables,
+        foreignKeys: data.foreign_keys,
+        junctions: data.junctions,
+        analyzeErrors: data.errors,
+        templateFingerprint: data.dataset_fingerprint,
+        templateMatch: null,
+        appliedTemplateId: null,
+        primaryKeys: pks,
+        selectedFks: data.foreign_keys.map(fkKey),
+        selectedJunctions: data.junctions.map(junctionKey),
+        relationTypes: {},
+        commitResult: undefined,
+        commitProgress: null,
+        committing: false,
+      });
       setProgress(100);
       void runTemplateMatch(kbId, data.tables);
       const summary = `${data.tables.length} 张表，${data.foreign_keys.length} 个外键候选，${data.junctions.length} 个关联表`;
@@ -225,12 +239,11 @@ export default function RelationalImportPage() {
   );
 
   const markMappingEdited = () => {
-    if (appliedTemplateId) setAppliedTemplateId(null);
+    if (appliedTemplateId) patch({ appliedTemplateId: null });
   };
 
   const changeKb = (value: string | undefined) => {
-    setKbId(value);
-    setAppliedTemplateId(null);
+    patch({ kbId: value, appliedTemplateId: null });
     if (tables.length > 0) void runTemplateMatch(value, tables);
   };
 
@@ -240,25 +253,20 @@ export default function RelationalImportPage() {
       return;
     }
     const config = templateMatch.config;
-    setPrimaryKeys((prev) => ({ ...prev, ...templatePrimaryKeys(config) }));
-    setSelectedFks(
-      foreignKeys
-        .filter((fk) =>
-          config.relations.some(
-            (relation) =>
-              relation.child_table === fk.child_table &&
-              relation.child_field === fk.child_field &&
-              relation.parent_table === fk.parent_table &&
-              relation.parent_field === fk.parent_field,
-          ),
-        )
-        .map(fkKey),
-    );
-    setSelectedJunctions(
-      junctions
-        .filter((junction) => config.junctions.some((item) => item.table === junction.table))
-        .map(junctionKey),
-    );
+    const nextFks = foreignKeys
+      .filter((fk) =>
+        config.relations.some(
+          (relation) =>
+            relation.child_table === fk.child_table &&
+            relation.child_field === fk.child_field &&
+            relation.parent_table === fk.parent_table &&
+            relation.parent_field === fk.parent_field,
+        ),
+      )
+      .map(fkKey);
+    const nextJunctions = junctions
+      .filter((junction) => config.junctions.some((item) => item.table === junction.table))
+      .map(junctionKey);
     const nextTypes: Record<string, string> = { ...relationTypes };
     for (const fk of foreignKeys) {
       const relation = config.relations.find(
@@ -274,8 +282,13 @@ export default function RelationalImportPage() {
       const item = config.junctions.find((j) => j.table === junction.table);
       if (item) nextTypes[junctionKey(junction)] = item.relation_type;
     }
-    setRelationTypes(nextTypes);
-    setAppliedTemplateId(templateMatch.template_id);
+    patch({
+      primaryKeys: { ...primaryKeys, ...templatePrimaryKeys(config) },
+      selectedFks: nextFks,
+      selectedJunctions: nextJunctions,
+      relationTypes: nextTypes,
+      appliedTemplateId: templateMatch.template_id,
+    });
     message.success(`已套用模板「${templateMatch.template_name}」，可继续修改映射`);
   };
 
@@ -337,7 +350,11 @@ export default function RelationalImportPage() {
       message.warning('请选择目标知识库');
       return;
     }
-    setCommitting(true);
+    if (!sessionId) {
+      message.error('导入会话已失效，请重新分析文件');
+      return;
+    }
+    patch({ committing: true, commitProgress: null });
     try {
       const selectedFkItems = foreignKeys.filter((fk) => selectedFks.includes(fkKey(fk)));
       const selectedJunctionItems = junctions.filter((j) =>
@@ -368,7 +385,7 @@ export default function RelationalImportPage() {
         // 避免后端再用模板补齐用户已经取消的关系。
         template_id: appliedTemplateId ?? undefined,
       });
-      setCommitResult(data);
+      patch({ commitResult: data, committing: false, commitProgress: null });
       refetchStats();
       // 必须同时刷新关系列表：导入后关系状态（pending/confirmed）已变化，
       // 只刷新统计会让「关系确认」区仍显示空表（浏览器验收时实测到）。
@@ -382,9 +399,8 @@ export default function RelationalImportPage() {
         message.success(`导入完成：${summary}`);
       }
     } catch (error) {
+      patch({ committing: false });
       message.error(`导入失败：${describeApiError(error)}`);
-    } finally {
-      setCommitting(false);
     }
   };
 
@@ -425,6 +441,48 @@ export default function RelationalImportPage() {
   useEffect(() => {
     if (kbId) void loadRelations();
   }, [kbId, loadRelations]);
+
+  // 提交期间轮询服务端进度；重新挂载时 committing 为 true 会自动恢复
+  useImportProgressPolling({
+    sessionId,
+    active: committing,
+    onSnapshot: (snapshot) => patch({ commitProgress: snapshot }),
+    onDone: (snapshot) => {
+      const restored = snapshot.result as RelationalCommitResult | undefined;
+      patch({
+        committing: false,
+        commitProgress: snapshot,
+        commitResult: restored ?? commitResult,
+      });
+      if (restored) {
+        refetchStats();
+        void loadRelations();
+      }
+    },
+    onFailed: (snapshot) => {
+      if (snapshot.failed) {
+        patch({ committing: false, commitProgress: snapshot });
+        message.error(`导入失败：${snapshot.message || '未知错误'}`);
+      } else {
+        // 任务不存在（会话过期/服务重启）：隐藏进度条，避免 0% 卡在界面上
+        patch({ committing: false, commitProgress: null });
+        message.warning(snapshot.message || '未找到进行中的导入任务');
+      }
+    },
+  });
+
+  const resetAll = () => {
+    if (committing) {
+      message.warning('导入正在进行中，完成后再清空');
+      return;
+    }
+    reset();
+    setPicked([]);
+    setPickerKey((key) => key + 1);
+    setProgress(0);
+    setRelations([]);
+    setSelectedRelationIds([]);
+  };
 
   const erTables: ErTable[] = useMemo(
     () =>
@@ -474,7 +532,7 @@ export default function RelationalImportPage() {
             value={primaryKeys[record.table]}
             onChange={(value) => {
               markMappingEdited();
-              setPrimaryKeys((prev) => ({ ...prev, [record.table]: value }));
+              patch({ primaryKeys: { ...primaryKeys, [record.table]: value } });
             }}
             options={record.fields.map((field) => ({
               label: `${field.name}（唯一 ${(field.unique_ratio * 100).toFixed(0)}%）`,
@@ -519,7 +577,21 @@ export default function RelationalImportPage() {
         </div>
 
         <Card title="1. 选择结构化文件">
-          <FilePicker onChange={setPicked} accept=".csv,.tsv,.json,.jsonl,.xlsx,.parquet" />
+          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+            <FilePicker
+              key={pickerKey}
+              onChange={setPicked}
+              accept=".csv,.tsv,.json,.jsonl,.xlsx,.parquet"
+            />
+            {sessionId && tables.length > 0 && picked.length === 0 && (
+              <Alert
+                type="info"
+                showIcon
+                message="已恢复上次分析结果"
+                description="文件对象不会随页面切换保留，但分析结果、映射选择与导入会话仍在，可直接继续确认或导入；需要换文件时重新选择并分析即可覆盖。"
+              />
+            )}
+          </Space>
         </Card>
 
         <Card title="2. Schema 与关系分析" data-testid="schema-card">
@@ -531,6 +603,7 @@ export default function RelationalImportPage() {
                   placeholder="选择目标知识库"
                   value={kbId}
                   onChange={changeKb}
+                  disabled={committing}
                   options={kbs.map((kb) => ({ label: kb.name, value: kb.id }))}
                 />
               </span>
@@ -538,7 +611,7 @@ export default function RelationalImportPage() {
                 type="primary"
                 icon={<SearchOutlined />}
                 loading={analyzing}
-                disabled={picked.length === 0}
+                disabled={picked.length === 0 || committing}
                 onClick={runAnalyze}
               >
                 分析结构
@@ -594,11 +667,11 @@ export default function RelationalImportPage() {
                         onChange={(e) => {
                           markMappingEdited();
                           const key = junctionKey(junction);
-                          setSelectedJunctions((prev) =>
-                            e.target.checked
-                              ? [...prev, key]
-                              : prev.filter((item) => item !== key),
-                          );
+                          patch({
+                            selectedJunctions: e.target.checked
+                              ? [...selectedJunctions, key]
+                              : selectedJunctions.filter((item) => item !== key),
+                          });
                         }}
                       >
                         {junction.label}
@@ -614,10 +687,12 @@ export default function RelationalImportPage() {
                         defaultValue={junction.relation_type}
                         onChange={(e) => {
                           markMappingEdited();
-                          setRelationTypes((prev) => ({
-                            ...prev,
-                            [junctionKey(junction)]: e.target.value,
-                          }));
+                          patch({
+                            relationTypes: {
+                              ...relationTypes,
+                              [junctionKey(junction)]: e.target.value,
+                            },
+                          });
                         }}
                       />
                       <Typography.Text type="secondary">{junction.evidence}</Typography.Text>
@@ -640,7 +715,7 @@ export default function RelationalImportPage() {
                       selectedRowKeys: selectedFks,
                       onChange: (keys) => {
                         markMappingEdited();
-                        setSelectedFks(keys.map(String));
+                        patch({ selectedFks: keys.map(String) });
                       },
                     }}
                     columns={[
@@ -792,12 +867,19 @@ export default function RelationalImportPage() {
           )}
         </Card>
 
-        <Card title="4. 确认并导入">
+        <Card
+          title="4. 确认并导入"
+          extra={
+            <Button size="small" onClick={resetAll} disabled={committing}>
+              清空本次导入
+            </Button>
+          }
+        >
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
             <Space wrap>
               <Checkbox
                 checked={autoConfirm}
-                onChange={(e) => setAutoConfirm(e.target.checked)}
+                onChange={(e) => patch({ autoConfirm: e.target.checked })}
               >
                 导入时直接确认并写入知识图谱
               </Checkbox>
@@ -805,13 +887,30 @@ export default function RelationalImportPage() {
                 type="primary"
                 icon={<ImportOutlined />}
                 loading={committing}
-                disabled={!kbId || tables.length === 0}
+                disabled={!kbId || tables.length === 0 || committing || Boolean(commitResult)}
                 onClick={runCommit}
                 data-testid="commit-button"
               >
                 开始导入
               </Button>
+              {commitResult && (
+                <Typography.Text type="secondary">
+                  本次会话已完成导入；如需再次导入请重新分析文件。
+                </Typography.Text>
+              )}
             </Space>
+
+            {(committing || commitProgress) && (
+              <ImportProgressBar progress={commitProgress} active={committing} />
+            )}
+            {committing && !commitProgress && (
+              <Alert
+                type="info"
+                showIcon
+                message="正在恢复导入进度"
+                description="上次提交仍在服务端执行，进度会在下一次轮询后显示；离开页面不会中断导入。"
+              />
+            )}
             {!autoConfirm && (
               <Alert
                 type="info"
@@ -836,6 +935,41 @@ export default function RelationalImportPage() {
                 />
               </Space>
             )}
+
+            {commitResult &&
+              (commitResult.business_herbs +
+                commitResult.business_prescriptions +
+                commitResult.business_theories +
+                commitResult.business_literatures +
+                commitResult.business_ingredients +
+                commitResult.business_existing >
+                0) && (
+                <Alert
+                  type="success"
+                  showIcon
+                  message="已同步到业务资源库"
+                  description={
+                    <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                      <Space size="large" wrap>
+                        <Statistic title="中药" value={commitResult.business_herbs} />
+                        <Statistic title="方剂" value={commitResult.business_prescriptions} />
+                        <Statistic title="中医理论" value={commitResult.business_theories} />
+                        <Statistic title="文献" value={commitResult.business_literatures} />
+                        <Statistic title="方剂组成" value={commitResult.business_ingredients} />
+                        <Statistic title="已存在同名" value={commitResult.business_existing} />
+                      </Space>
+                      <Typography.Text type="secondary">
+                        可前往{' '}
+                        <Link href="/herbs">中药</Link> /{' '}
+                        <Link href="/prescriptions">方剂</Link> /{' '}
+                        <Link href="/theories">中医理论</Link> /{' '}
+                        <Link href="/literatures">文献</Link>{' '}
+                        模块查看；同名资源按名称幂等保留，不会重复写入。
+                      </Typography.Text>
+                    </Space>
+                  }
+                />
+              )}
 
             {commitResult?.errors?.length ? (
               <Descriptions

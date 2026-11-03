@@ -30,8 +30,11 @@ TYPE_STRING = "string"
 TYPE_MIXED = "mixed"
 
 DEFAULT_SAMPLE_SIZE = 5000
-# 参与唯一性/覆盖率统计的不同取值上限（与 sample_size 保持一致，保证样本内可判定唯一）
-MAX_DISTINCT_VALUES = DEFAULT_SAMPLE_SIZE
+# 参与唯一性/覆盖率统计的不同取值上限。
+# 不能小于 analyze 的采样行数：一旦不同取值被截断，唯一性判定会把「取值很多」
+# 误判成「有重复」，父表于是失去被引用资格（实测 D6 有 6398 个唯一 CHP_ID，
+# 上限 5000 时整条 D4→D6 关联消失）。这里与 general_import 的 ANALYZE_SAMPLE 对齐。
+MAX_DISTINCT_VALUES = 20000
 
 _ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 # 主键命名特征：id / herb_id / 术语id / 编号 / code 等。

@@ -133,6 +133,32 @@ def test_junction_table_detected_as_many_to_many() -> None:
     assert junction.confidence > 0.8
 
 
+def test_denormalized_junction_with_redundant_columns_is_detected() -> None:
+    """关联表冗余了术语名称等列、并因此多出同义外键时，仍应识别为多对多。
+
+    真实导出（D3）在关联表里冗余了术语名称/拼音/分组，主键还混入一个
+    指向父表的同义外键（术语名称→D1.术语名称）。旧的「恰好两个外键 + 最多
+    两个额外字段」规则会整张表漏判，随后把外键当直接关系写入，报出
+    「子表缺少主键」的假失败。
+    """
+    d3_rows = [
+        {"中成药id": "M1", "术语id": "T1", "术语名称": "脾胃虚弱", "拼音": "piwei", "分组": "a"},
+        {"中成药id": "M1", "术语id": "T2", "术语名称": "肝郁气滞", "拼音": "ganyu", "分组": "a"},
+        {"中成药id": "M2", "术语id": "T1", "术语名称": "脾胃虚弱", "拼音": "piwei", "分组": "b"},
+    ]
+
+    plan = discover_relations(
+        [_profile("D1", D1_TERMS), _profile("D2", D2_MEDICINES), _profile("D3", d3_rows)]
+    )
+
+    assert plan.primary_keys.get("D3") is None
+    junctions = [j for j in plan.junctions if j.table == "D3"]
+    assert len(junctions) == 1
+    junction = junctions[0]
+    assert {junction.left_table, junction.right_table} == {"D1", "D2"}
+    assert {junction.left_field, junction.right_field} == {"术语id", "中成药id"}
+
+
 def test_foreign_key_cardinality_is_one_to_many_in_junction() -> None:
     plan = discover_relations(
         [_profile("D1", D1_TERMS), _profile("D2", D2_MEDICINES), _profile("D3", D3_LINKS)]

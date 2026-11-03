@@ -23,6 +23,10 @@ from sqlalchemy.engine import make_url
 DEFAULT_MAIN_DB_NAME = "knowledge_platform"
 ENV_ALLOW_MAIN = "DB_ALLOW_MAIN"
 ENV_MAIN_DB_NAME = "MAIN_DATABASE_NAME"
+# 开发库同样禁止自动化测试直连：测试会真实创建知识库/文档，写入后混入
+# 用户列表；数量变多会把真实知识库挤出前端渲染窗口，表现为"知识库消失"。
+DEFAULT_DEV_DB_NAMES = frozenset({"kp_dev", "knowledge_platform_dev"})
+ENV_ALLOW_DEV_TESTS = "DB_ALLOW_DEV_TESTS"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
@@ -62,6 +66,46 @@ def is_main_database(url: str) -> bool:
 def allow_main_enabled() -> bool:
     """是否已通过环境变量显式放行主库操作。"""
     return (os.getenv(ENV_ALLOW_MAIN) or "").strip().lower() in _TRUTHY
+
+
+def is_dev_database(url: str) -> bool:
+    """是否指向开发库（kp_dev 等）。"""
+    name = database_name(url)
+    return bool(name) and name in DEFAULT_DEV_DB_NAMES
+
+
+def allow_dev_tests_enabled() -> bool:
+    """是否已通过环境变量显式放行"测试写开发库"（仅排障时使用）。"""
+    return (os.getenv(ENV_ALLOW_DEV_TESTS) or "").strip().lower() in _TRUTHY
+
+
+def assert_test_database(
+    url: str,
+    purpose: str = "自动化测试",
+    *,
+    allow_dev: bool | None = None,
+) -> None:
+    """测试专用校验：默认拒绝连接开发库，避免测试数据污染真实列表。
+
+    :raises RuntimeError: 目标为开发库且未显式放行时
+    """
+    if not is_dev_database(url):
+        return
+
+    allowed = allow_dev_tests_enabled() if allow_dev is None else allow_dev
+    if allowed:
+        logger.warning(
+            f"[db_safety] 已放行在开发库执行「{purpose}」：{redact(url)}"
+            f"（{ENV_ALLOW_DEV_TESTS} 已开启，请确认不会留下测试数据）"
+        )
+        return
+
+    raise RuntimeError(
+        f"拒绝在开发库执行「{purpose}」：{redact(url)}。"
+        f"自动化测试会真实创建知识库、文档等数据，请改用隔离库"
+        f"（如 kp_test / kp_ci 并执行 alembic upgrade head），"
+        f"或在确认不会留下测试数据后设置 {ENV_ALLOW_DEV_TESTS}=1 显式放行。"
+    )
 
 
 def assert_safe_database(url: str, purpose: str, *, allow_main: bool | None = None) -> None:

@@ -478,6 +478,40 @@ async def test_rejected_relations_are_excluded_from_kg():
 
 @pytest.mark.anyio
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+async def test_kg_node_name_follows_entity_display_name():
+    """实体名被修正后，已有 KG 节点名必须同步，否则图谱匹配仍命中旧主键名。"""
+    engine, factory = _new_session()
+    async with factory() as session:
+        user, kb = await _seed(session, f"kgname-{uuid.uuid4().hex[:8]}")
+        svc = EntityImportService(session)
+        try:
+            entity = GenericEntity(
+                kb_id=kb.id,
+                entity_type="D6",
+                name="C1",
+                payload={"CHP_ID": "C1"},
+                source_pk="C1",
+            )
+            session.add(entity)
+            await session.flush()
+
+            mapping = await svc._ensure_kg_nodes(kb.id, [entity.id])
+            await session.flush()
+            node = await session.get(KgNode, mapping[entity.id])
+            assert node.name == "C1"
+
+            entity.name = "阿氏蒿"
+            await session.flush()
+            await svc._ensure_kg_nodes(kb.id, [entity.id])
+            await session.refresh(node)
+            assert node.name == "阿氏蒿"
+        finally:
+            await _cleanup(session, kb.id)
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 async def test_relation_from_other_kb_is_not_visible():
     engine, factory = _new_session()
     async with factory() as session:
@@ -689,4 +723,73 @@ async def test_end_to_end_relational_import_is_idempotent():
             assert await _count(session, ImportRecord, kb_id=kb.id) == 8
         finally:
             await _cleanup(session, kb.id)
+    await engine.dispose()
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+async def test_import_relational_reports_progress(monkeypatch):
+    """关联导入全过程应上报递增进度，供前端轮询展示。"""
+    from src.application import import_progress as ip
+
+    ip.reset_progress_memory()
+    monkeypatch.setattr(ip, "_get_client", lambda: None)
+    session_id = f"progress-{uuid.uuid4().hex[:8]}"
+
+    engine, factory = _new_session()
+    async with factory() as session:
+        user, kb = await _seed(session, f"progress-{uuid.uuid4().hex[:8]}")
+        job = await _new_job(session, kb, "progress-job")
+        await session.commit()
+        svc = EntityImportService(session)
+
+        rows_by_table = {"D1": _rows(D1_TERMS), "D2": _rows(D2_MEDICINES), "D3": _rows(D3_LINKS)}
+        profiles = [analyze_rows(rows, table_name=name) for name, rows in rows_by_table.items()]
+        plan = discover_relations(profiles)
+
+        class _FakeFile:
+            def __init__(self, name: str) -> None:
+                self.id = None
+                self.file_name = name
+                self.file_hash = hashlib.sha256(name.encode("utf-8")).hexdigest()
+
+        files_by_table = {name: _FakeFile(name) for name in rows_by_table}
+
+        progress = ip.ImportProgress(session_id)
+        writes: list[dict] = []
+        original_write = progress._write
+
+        async def capture(payload: dict) -> None:
+            writes.append(payload)
+            await original_write(payload)
+
+        progress._write = capture  # type: ignore[method-assign]
+
+        try:
+            stats = await svc.import_relational(
+                kb_id=kb.id, user=user, job_id=job.id,
+                rows_by_table=rows_by_table, files_by_table=files_by_table,
+                primary_keys={t: plan.primary_keys[t][0] for t in plan.primary_keys},
+                foreign_keys=plan.foreign_keys, junctions=plan.junctions,
+                batch_id="progress-batch", auto_confirm=True, progress=progress,
+            )
+            await session.commit()
+
+            phases = [item["phase"] for item in writes]
+            percents = [item["percent"] for item in writes]
+            assert "write" in phases
+            assert "relations" in phases
+            assert phases[-1] == "kg"
+            # 进度单调不减，且图谱阶段到达 99%（剩余 1% 由路由 finish 补满）
+            assert percents == sorted(percents)
+            assert percents[-1] == 99
+            assert "图谱同步完成" in writes[-1]["message"]
+            assert stats.kg_edges > 0
+
+            snapshot = await ip.get_progress(session_id)
+            assert snapshot is not None
+            assert snapshot["percent"] == 99
+        finally:
+            await _cleanup(session, kb.id)
+            ip.reset_progress_memory()
     await engine.dispose()

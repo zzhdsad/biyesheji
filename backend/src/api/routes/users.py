@@ -59,7 +59,9 @@ class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: uuid.UUID
-    email: EmailStr
+    # 响应模型只负责序列化：历史/测试数据可能存在 @test.local 等保留域名，
+    # 用 EmailStr 会在整个列表响应上触发校验失败（500），输入侧仍严格校验。
+    email: str
     username: str
     role: str
     name: str = ""

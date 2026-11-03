@@ -50,9 +50,10 @@ def _init_db_standalone() -> None:
     """
     from sqlalchemy import inspect
 
-    from src.infrastructure.db_safety import assert_safe_database
+    from src.infrastructure.db_safety import assert_safe_database, assert_test_database
 
     assert_safe_database(settings.DATABASE_URL, purpose="自动化测试")
+    assert_test_database(settings.DATABASE_URL, purpose="测试数据库初始化")
 
     async def _run() -> None:
         from src.domain.models import User
@@ -66,8 +67,13 @@ def _init_db_standalone() -> None:
                         "请先对测试库执行 `alembic upgrade head`"
                     )
             async with async_sessionmaker(engine)() as session:
+                # 按邮箱或用户名判重：旧测试库里可能已有 username=admin 但邮箱
+                # 与当前 DEFAULT_ADMIN_EMAIL 不同的种子数据，只查邮箱会撞唯一约束。
                 exists = await session.scalar(
-                    select(User).where(User.email == settings.DEFAULT_ADMIN_EMAIL)
+                    select(User).where(
+                        (User.email == settings.DEFAULT_ADMIN_EMAIL)
+                        | (User.username == "admin")
+                    )
                 )
                 if exists is None:
                     session.add(

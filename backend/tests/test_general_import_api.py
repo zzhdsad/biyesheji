@@ -204,6 +204,91 @@ def test_general_commit_keeps_records(client: TestClient, kb: str):
     assert stats["records"] == 2
 
 
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_general_commit_progress_returns_done_and_result(client: TestClient, kb: str):
+    """提交完成后进度接口应返回 100% 与最终统计，供页面恢复时直接展示。"""
+    scan = _upload(
+        client,
+        "/api/v1/import/scan",
+        [("files", ("术语.csv", CSV_TERMS.encode("utf-8"), "text/csv"))],
+        paths=["术语.csv"],
+    )
+    session_id = scan.json()["session_id"]
+
+    commit = client.post(
+        "/api/v1/import/general/commit",
+        json={
+            "session_id": session_id,
+            "kb_id": kb,
+            "files": [{"path": "术语.csv", "entity_type": "中医术语", "pk_field": "术语id"}],
+        },
+    )
+    assert commit.status_code == 200, commit.text
+
+    progress = client.get(f"/api/v1/import/progress/{session_id}")
+    assert progress.status_code == 200, progress.text
+    snapshot = progress.json()
+    assert snapshot["done"] is True
+    assert snapshot["failed"] is False
+    assert snapshot["percent"] == 100
+    assert snapshot["result"]["records"] == 2
+    assert snapshot["result"]["entities"] == 2
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_relational_commit_progress_returns_done_and_result(client: TestClient, kb: str):
+    analyze = _upload(
+        client,
+        "/api/v1/import/relational/analyze",
+        [
+            ("files", ("D1.csv", CSV_TERMS.encode("utf-8"), "text/csv")),
+            ("files", ("D2.csv", CSV_MEDICINES.encode("utf-8"), "text/csv")),
+            ("files", ("D3.csv", CSV_LINKS.encode("utf-8"), "text/csv")),
+        ],
+        paths=["D1.csv", "D2.csv", "D3.csv"],
+    )
+    assert analyze.status_code == 200, analyze.text
+    plan = analyze.json()
+
+    commit = client.post(
+        "/api/v1/import/relational/commit",
+        json={
+            "session_id": plan["session_id"],
+            "kb_id": kb,
+            "primary_keys": {"D1": "术语id", "D2": "中成药id"},
+            "junctions": [
+                {
+                    "table": "D3",
+                    "left_table": plan["junctions"][0]["left_table"],
+                    "left_field": plan["junctions"][0]["left_field"],
+                    "right_table": plan["junctions"][0]["right_table"],
+                    "right_field": plan["junctions"][0]["right_field"],
+                    "relation_type": "含术语",
+                }
+            ],
+            "auto_confirm": True,
+        },
+    )
+    assert commit.status_code == 200, commit.text
+
+    progress = client.get(f"/api/v1/import/progress/{plan['session_id']}")
+    assert progress.status_code == 200, progress.text
+    snapshot = progress.json()
+    assert snapshot["done"] is True
+    assert snapshot["percent"] == 100
+    assert snapshot["result"]["relations"] == 3
+    assert snapshot["result"]["kg_edges"] == 3
+
+
+@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
+def test_progress_endpoint_validates_session_id(client: TestClient):
+    bad = client.get("/api/v1/import/progress/..bad")
+    assert bad.status_code == 400
+    idle = client.get("/api/v1/import/progress/not_exist_session")
+    assert idle.status_code == 200
+    assert idle.json()["phase"] == "idle"
+
+
 # ============================================================================
 # 关联导入：分析 → 提交 → 确认
 # ============================================================================

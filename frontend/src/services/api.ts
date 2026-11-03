@@ -1783,23 +1783,47 @@ export async function scanGeneralFiles(
 }
 
 /** 普通导入落库：文档走 RAG 链路，结构化文件按记录入库。 */
-export async function commitGeneralImport(payload: {
-  session_id: string;
-  kb_id: string;
-  files: { path: string; entity_type: string; pk_field?: string | null }[];
-  import_documents?: boolean;
-}): Promise<{
+export interface GeneralCommitResult {
   job_id: string;
   documents: number;
   records: number;
   entities: number;
   failed: number;
   errors: { path: string; row_no: number; message: string }[];
-}> {
+}
+
+export async function commitGeneralImport(payload: {
+  session_id: string;
+  kb_id: string;
+  files: { path: string; entity_type: string; pk_field?: string | null }[];
+  import_documents?: boolean;
+}): Promise<GeneralCommitResult> {
   const { data } = await api.post('/import/general/commit', payload, {
     timeout: 600000,
   });
   return assertNoBusinessError(data);
+}
+
+/** 导入进度快照：提交期间轮询，完成后携带最终统计结果。 */
+export interface ImportProgressSnapshot {
+  session_id: string;
+  phase: string;
+  percent: number;
+  message: string;
+  done: boolean;
+  failed: boolean;
+  updated_at?: number;
+  result?: Record<string, unknown>;
+}
+
+/** 查询导入进度；会话不存在时返回 phase=idle（不是错误）。 */
+export async function fetchImportProgress(
+  sessionId: string,
+): Promise<ImportProgressSnapshot> {
+  const { data } = await api.get<ImportProgressSnapshot>(
+    `/import/progress/${encodeURIComponent(sessionId)}`,
+  );
+  return data;
 }
 
 export interface RelationalField {
@@ -1884,6 +1908,26 @@ export async function analyzeRelationalFiles(
 }
 
 /** 关联导入落库：实体 + 关系 +（确认后）知识图谱。 */
+export interface RelationalCommitResult {
+  job_id: string;
+  records: number;
+  entities: number;
+  relations: number;
+  kg_nodes: number;
+  kg_edges: number;
+  /** 同步写入业务表（中药/方剂/理论/文献）的新增条数 */
+  business_herbs: number;
+  business_prescriptions: number;
+  business_theories: number;
+  business_literatures: number;
+  business_ingredients: number;
+  /** 数据集中已存在同名业务资源（按名称幂等跳过） */
+  business_existing: number;
+  failed_rows: number;
+  errors: { file_name: string; row_no: number; message: string }[];
+  template?: { id: string; name: string } | null;
+}
+
 export async function commitRelationalImport(payload: {
   session_id: string;
   kb_id: string;
@@ -1908,17 +1952,7 @@ export async function commitRelationalImport(payload: {
   template_id?: string;
   /** 导入完成后另存为新模板。 */
   save_as_template?: string;
-}): Promise<{
-  job_id: string;
-  records: number;
-  entities: number;
-  relations: number;
-  kg_nodes: number;
-  kg_edges: number;
-  failed_rows: number;
-  errors: { file_name: string; row_no: number; message: string }[];
-  template?: { id: string; name: string } | null;
-}> {
+}): Promise<RelationalCommitResult> {
   const { data } = await api.post('/import/relational/commit', payload, {
     timeout: 600000,
   });

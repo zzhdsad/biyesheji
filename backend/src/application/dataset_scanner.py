@@ -415,11 +415,16 @@ def _rule_mkg_properties(fields: list[str]) -> tuple[str, str, list[FieldMapping
             FieldMapping(source="CHP_ID", target="（关联键）", status="ignored", note="关联到 herbs.import_batch 内的 CHP_ID 溯源值"),
             FieldMapping(
                 source="Medicinal_properties",
-                target="herb.properties",
-                status="pending",
-                note="取值如 Sweet medicinal（英文），需人工确认性味中文映射规则后才可写入",
+                target="herb.properties / herb.channels",
+                status="mapped",
+                note="按 Class 路由：性味/四气写入 properties，归经写入 channels；英文原文保留，不翻译",
             ),
-            FieldMapping(source="Class", target=None, status="pending", note="属性类别（Medicinal flavor 等），系统无对应字段"),
+            FieldMapping(
+                source="Class",
+                target="（落点路由）",
+                status="mapped",
+                note="Medicinal flavor / Therapeutic nature → properties；Meridian tropism → channels",
+            ),
             FieldMapping(source="x_rank", target=None, status="ignored", note="排序/坐标，无业务语义"),
             FieldMapping(source="y_rank", target=None, status="ignored", note="排序/坐标，无业务语义"),
         ],
@@ -461,8 +466,8 @@ def _rule_mkg_cpm_chp(fields: list[str]) -> tuple[str, str, list[FieldMapping]] 
                 FieldMapping(
                     source="Dosage_ratio",
                     target="prescription_ingredients.amount",
-                    status="pending",
-                    note="多数行为空；且为「比例」无单位，与 amount(数值)+unit 结构不直接对应，待确认",
+                    status="mapped",
+                    note="原始值为占比（如 0.1304），写入 amount 并将 unit 标注为「比例」，不冒充克/两",
                 ),
             ],
         )
@@ -635,6 +640,15 @@ def _detect(fields: list[str]) -> tuple[str, str, list[FieldMapping], list[str]]
         [FieldMapping(source=f, target=None, status="pending", note="未识别字段") for f in fields],
         list(fields),
     )
+
+
+def detect_dataset(fields: list[str]) -> tuple[str, str, list[FieldMapping], list[str]]:
+    """公开的类型判定入口。
+
+    关联导入把数据写入业务表时必须与扫描阶段使用同一套规则，
+    否则「分析页显示为中药、导入后却没进 herbs」这类不一致会再次出现。
+    """
+    return _detect(fields)
 
 
 # ── 数据集构建 ──────────────────────────────────────────────────────────────

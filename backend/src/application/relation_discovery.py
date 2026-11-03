@@ -190,7 +190,9 @@ def _discover_foreign_keys(
 
 
 def _discover_junctions(
-    tables: dict[str, TableProfile], foreign_keys: list[ForeignKeyCandidate]
+    tables: dict[str, TableProfile],
+    foreign_keys: list[ForeignKeyCandidate],
+    primary_keys: dict[str, str],
 ) -> list[JunctionCandidate]:
     by_table: dict[str, list[ForeignKeyCandidate]] = {}
     for fk in foreign_keys:
@@ -198,14 +200,38 @@ def _discover_junctions(
 
     junctions: list[JunctionCandidate] = []
     for table_name, keys in by_table.items():
-        # 关联表判定：恰好两个外键指向两张不同父表，且两个外键字段在本表内都重复出现
-        if len(keys) != 2:
-            continue
-        left, right = keys[0], keys[1]
+        table = tables[table_name]
+        if table_name in primary_keys:
+            # 有主键的是实体表：必须恰好两个外键，且非外键列很少，
+            # 才可能是「纯关联表」，否则保留其自身实体语义。
+            if len(keys) != 2:
+                continue
+            left, right = keys[0], keys[1]
+            extra_limit = 2
+        else:
+            # 无主键的表通常是关联表/明细表。真实导出常在关联表里冗余术语名称、
+            # 拼音等列，并因此多识别出一个指向父表的同义外键（实测 D3：8 列、
+            # 3 个外键）。此时取置信度最高的两个不同父表外键作为多对多两端，
+            # 其余列按关联属性保留，不再因「额外字段过多」漏掉整张关联表。
+            if len(keys) < 2:
+                continue
+            picked: list[ForeignKeyCandidate] = []
+            parents: set[str] = set()
+            for fk in keys:
+                if fk.parent_table in parents:
+                    continue
+                picked.append(fk)
+                parents.add(fk.parent_table)
+                if len(picked) == 2:
+                    break
+            if len(picked) < 2:
+                continue
+            left, right = picked
+            extra_limit = None
+
         if left.parent_table == right.parent_table:
             continue
 
-        table = tables[table_name]
         left_unique = table.field(left.child_field)
         right_unique = table.field(right.child_field)
         if left_unique is None or right_unique is None:
@@ -214,10 +240,10 @@ def _discover_junctions(
             # 有一侧在本表内唯一，说明不是「多对多」关联表
             continue
 
-        # 非外键字段过多则不认为是纯关联表
+        # 非外键字段过多则不认为是纯关联表（仅对有主键的实体表生效）
         fk_fields = {left.child_field, right.child_field}
         extra_fields = [f.name for f in table.fields if f.name not in fk_fields]
-        if len(extra_fields) > 2:
+        if extra_limit is not None and len(extra_fields) > extra_limit:
             continue
 
         confidence = round(min(left.confidence, right.confidence) * 0.95, 3)
@@ -249,7 +275,7 @@ def discover_relations(profiles: list[TableProfile]) -> RelationPlan:
             primary_keys[name] = picked
 
     foreign_keys = _discover_foreign_keys(tables, primary_keys)
-    junctions = _discover_junctions(tables, foreign_keys)
+    junctions = _discover_junctions(tables, foreign_keys, primary_keys)
 
     return RelationPlan(
         primary_keys={name: (pk,) for name, pk in primary_keys.items()},

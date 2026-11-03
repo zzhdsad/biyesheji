@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
   App,
@@ -26,6 +26,7 @@ import {
   FileTextOutlined,
   PlusOutlined,
   ReloadOutlined,
+  SearchOutlined,
 } from '@ant-design/icons';
 import type { KnowledgeBase } from '@/types';
 import { createKb, deleteKb, fetchKnowledgeBases, updateKb } from '@/services/api';
@@ -35,6 +36,7 @@ import { AdminHeaderRight } from '@/components/layout/AppSider';
 import KbRecycleBin from '@/components/admin/KbRecycleBin';
 // BUG-059：窗口渲染，避免一次性渲染上千张卡片阻塞主线程
 import { KB_WINDOW_SIZE, clampVisibleCount, nextVisibleCount } from '@/utils/pagination';
+import { createRequestSeq } from '@/utils/requestSeq';
 
 interface KbFormValues {
   name: string;
@@ -49,6 +51,11 @@ export default function KBPage() {
   const [loading, setLoading] = useState(false);
   // 当前渲染窗口大小；只影响本页渲染数量，不影响 GET /kb 请求参数
   const [visibleCount, setVisibleCount] = useState(KB_WINDOW_SIZE);
+  // 搜索作用于**全量**列表：知识库多时新建的库可能被挤到窗口之外，
+  // 只按前 24 个渲染会让用户误以为"知识库消失了"。
+  const [query, setQuery] = useState('');
+  // 列表请求序号：挂载时的慢响应不能覆盖创建后的新列表
+  const loadSeq = useRef(createRequestSeq());
 
   // 创建弹窗
   const [createForm] = Form.useForm<KbFormValues>();
@@ -61,16 +68,22 @@ export default function KBPage() {
   const [editSubmitting, setEditSubmitting] = useState(false);
 
   const loadKbs = async () => {
+    const reqId = loadSeq.current.begin();
     setLoading(true);
     try {
       const list = await fetchKnowledgeBases();
+      if (!loadSeq.current.isLatest(reqId)) return;
       setKbs(list);
       // 重新加载后重置窗口（数据变化后旧窗口值可能越界）
       setVisibleCount(KB_WINDOW_SIZE);
     } catch {
-      message.error('知识库列表加载失败');
+      if (loadSeq.current.isLatest(reqId)) {
+        message.error('知识库列表加载失败');
+      }
     } finally {
-      setLoading(false);
+      if (loadSeq.current.isLatest(reqId)) {
+        setLoading(false);
+      }
     }
   };
 
@@ -139,10 +152,23 @@ export default function KBPage() {
     }
   };
 
+  const onSearchChange = (value: string) => {
+    setQuery(value);
+    setVisibleCount(KB_WINDOW_SIZE);
+  };
+
+  const keyword = query.trim().toLowerCase();
+  const filteredKbs = keyword
+    ? kbs.filter(
+        (kb) =>
+          kb.name.toLowerCase().includes(keyword) ||
+          (kb.description ?? '').toLowerCase().includes(keyword),
+      )
+    : kbs;
   // 窗口内的卡片；clampVisibleCount 保证"数据变少"时不会残留越界窗口
-  const renderedCount = clampVisibleCount(kbs.length, visibleCount);
-  const visibleKbs = kbs.slice(0, renderedCount);
-  const hasMore = kbs.length > renderedCount;
+  const renderedCount = clampVisibleCount(filteredKbs.length, visibleCount);
+  const visibleKbs = filteredKbs.slice(0, renderedCount);
+  const hasMore = filteredKbs.length > renderedCount;
 
   const headerLeft = <h2 style={{ margin: 0 }}>知识库管理</h2>;
   const headerRight = (
@@ -161,9 +187,32 @@ export default function KBPage() {
 
   return (
     <AppLayout pageTitle="" headerLeft={headerLeft} headerRight={headerRight}>
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 12,
+          flexWrap: 'wrap',
+          marginBottom: 16,
+        }}
+      >
+        <Input
+          allowClear
+          prefix={<SearchOutlined />}
+          placeholder="搜索知识库名称或描述"
+          value={query}
+          onChange={(e) => onSearchChange(e.target.value)}
+          style={{ maxWidth: 320 }}
+        />
+        <Typography.Text type="secondary">
+          共 {kbs.length} 个知识库
+          {keyword ? `，匹配 ${filteredKbs.length} 个` : `，当前显示 ${renderedCount} 个`}
+        </Typography.Text>
+      </div>
       <Spin spinning={loading}>
         {visibleKbs.length === 0 ? (
-          <Empty description="暂无知识库" />
+          <Empty description={keyword ? '没有匹配的知识库' : '暂无知识库'} />
         ) : (
           <Row gutter={[16, 16]}>
             {visibleKbs.map((kb) => (
@@ -237,8 +286,8 @@ export default function KBPage() {
         )}
         {hasMore && (
           <div style={{ marginTop: 16, textAlign: 'center' }}>
-            <Button onClick={() => setVisibleCount((cur) => nextVisibleCount(kbs.length, cur))}>
-              加载更多（已显示 {renderedCount} / 共 {kbs.length}）
+            <Button onClick={() => setVisibleCount((cur) => nextVisibleCount(filteredKbs.length, cur))}>
+              加载更多（已显示 {renderedCount} / 共 {filteredKbs.length}）
             </Button>
           </div>
         )}

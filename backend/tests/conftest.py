@@ -20,7 +20,7 @@ import src.core.deps as deps_mod  # noqa: E402
 from src.core.deps import get_current_user as _REAL_GET_CURRENT_USER  # noqa: E402
 from src.domain.models import User  # noqa: E402
 from src.infrastructure import milvus_store, redis_client  # noqa: E402
-from src.infrastructure.db_safety import assert_safe_database  # noqa: E402
+from src.infrastructure.db_safety import assert_safe_database, assert_test_database  # noqa: E402
 from src.main import app  # noqa: E402
 from tests.test_upload import PG_AVAILABLE, _init_db_standalone  # noqa: E402
 
@@ -29,6 +29,9 @@ from tests.test_upload import PG_AVAILABLE, _init_db_standalone  # noqa: E402
 # 集成测试会真实建知识库 / 上传文档 / 写导入记录，过去直接连 settings.DATABASE_URL，
 # 指向主库时即污染生产数据。这里在收集阶段就拦截，需连主库时必须显式 DB_ALLOW_MAIN=1。
 assert_safe_database(settings.DATABASE_URL, purpose="pytest 测试套件")
+# 开发库（kp_dev）同样拦截：测试会创建真实知识库，数量变多会把用户知识库
+# 挤出前端渲染窗口。需连开发库排障时用 DB_ALLOW_DEV_TESTS=1 显式放行。
+assert_test_database(settings.DATABASE_URL, purpose="pytest 测试套件")
 
 
 def _ensure_test_user() -> None:

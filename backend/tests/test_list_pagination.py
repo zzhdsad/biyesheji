@@ -75,6 +75,55 @@ def test_users_rejects_invalid_limit(client):
     assert client.get("/api/v1/users", params={"limit": 501}).status_code == 422
 
 
+def test_users_list_tolerates_reserved_domain_email(client):
+    """历史/测试数据可能存在 @test.local 等保留域名。
+
+    EmailStr 会拒绝该域名，若响应模型继续强校验，一条脏数据就让整个列表 500。
+    """
+    import asyncio
+
+    from sqlalchemy import delete
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from src.core.config import settings
+    from src.domain.models import User
+
+    username = f"reserved-{uuid.uuid4().hex[:8]}"
+    user_id = uuid.uuid4()
+
+    async def _write(action):
+        engine = create_async_engine(settings.DATABASE_URL)
+        try:
+            async with async_sessionmaker(engine, expire_on_commit=False)() as session:
+                await action(session)
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+    async def _add(session):
+        session.add(
+            User(
+                id=user_id,
+                email=f"{username}@test.local",
+                username=username,
+                hashed_password="not-a-real-hash",
+                role="member",
+            )
+        )
+
+    async def _remove(session):
+        await session.execute(delete(User).where(User.id == user_id))
+
+    asyncio.run(_write(_add))
+    try:
+        resp = client.get("/api/v1/users")
+        assert resp.status_code == 200, resp.text
+        row = next(u for u in resp.json() if u["id"] == str(user_id))
+        assert row["email"] == f"{username}@test.local"
+    finally:
+        asyncio.run(_write(_remove))
+
+
 # ── GET /kb ──────────────────────────────────────────────────────────────────
 
 

@@ -35,6 +35,7 @@ from starlette.datastructures import UploadFile as StarletteUploadFile
 from src.application import file_type_service as fts
 from src.application import schema_analyzer, tabular_parser
 from src.application.entity_import_service import EntityImportService
+from src.application.import_progress import ImportProgress, get_progress, valid_session_id
 from src.application.index_state_service import IndexStateService
 from src.application.mapping_template_service import (
     MappingTemplateService,
@@ -73,8 +74,10 @@ PREVIEW_ROWS = 5
 SCAN_SAMPLE = 500
 # 暂存目录（与上传共用 uploads 卷）
 STAGING_SUBDIR = "general_import_sessions"
-# Schema 分析采样行数
-ANALYZE_SAMPLE = 2000
+# Schema 分析采样行数。
+# 采样过小会让外键覆盖率失真：父表取值分布在后半段时，子表值在前 2000 行里
+# 匹配不到，关联表（D3/D4）识别不出来，最终关系数为 0。取 20000 行覆盖本数据集全量。
+ANALYZE_SAMPLE = 20000
 
 
 def _admin(request: Request) -> User:
@@ -403,6 +406,28 @@ def _raise_if_duplicate_tables(table_sources: dict[str, list[str]]) -> None:
         raise HTTPException(status_code=400, detail=_duplicate_table_detail(collisions))
 
 
+# ── 导入进度 ────────────────────────────────────────────────────────────────
+
+
+@router.get("/progress/{session_id}")
+async def import_progress(request: Request, session_id: str) -> dict:
+    """查询一次导入的实时进度（完成后保留最终结果供页面恢复）。"""
+    _admin(request)
+    if not valid_session_id(session_id):
+        raise HTTPException(status_code=400, detail="会话标识不合法")
+    data = await get_progress(session_id)
+    if data is None:
+        return {
+            "session_id": session_id,
+            "phase": "idle",
+            "percent": 0,
+            "message": "",
+            "done": False,
+            "failed": False,
+        }
+    return data
+
+
 # ── 普通导入提交 ────────────────────────────────────────────────────────────
 
 
@@ -421,6 +446,8 @@ async def commit_general(
     svc = EntityImportService(db)
     await svc.require_write(user, payload.kb_id)
     commit_errors: list[dict[str, Any]] = []
+    progress = ImportProgress(payload.session_id)
+    await progress.update(phase="files", percent=2, message="准备导入", force=True)
 
     job = ImportJob(
         batch_id=f"gen-{uuid.uuid4().hex[:12]}",
@@ -440,7 +467,13 @@ async def commit_general(
     entities = 0
     errors: list[dict[str, Any]] = []
 
-    for plan in payload.files:
+    total_files = max(len(payload.files), 1)
+    for file_index, plan in enumerate(payload.files, start=1):
+        await progress.update(
+            phase="files",
+            percent=5 + 85 * (file_index - 1) / total_files,
+            message=f"处理文件 {file_index}/{total_files}：{plan.path}",
+        )
         file_path = os.path.join(session_dir, _safe_rel(plan.path))
         if not os.path.isfile(file_path):
             errors.append({"path": plan.path, "message": "文件不存在"})
@@ -501,6 +534,35 @@ async def commit_general(
         errors.extend(row_errors)
 
         import_file.row_count = len(rows)
+        file_start = 5 + 85 * (file_index - 1) / total_files
+        file_span = 85 / total_files
+
+        async def on_record_batch(
+            done: int,
+            _rows: list = rows,
+            _name: str = name,
+            _start: float = file_start,
+            _span: float = file_span,
+        ) -> None:
+            await progress.update(
+                phase="records",
+                percent=_start + _span * 0.8 * done / max(len(_rows), 1),
+                message=f"原始记录 {_name}：{done}/{len(_rows)} 行",
+            )
+
+        async def on_entity_batch(
+            done: int,
+            _rows: list = rows,
+            _name: str = name,
+            _start: float = file_start,
+            _span: float = file_span,
+        ) -> None:
+            await progress.update(
+                phase="entities",
+                percent=_start + _span * (0.8 + 0.2 * done / max(len(_rows), 1)),
+                message=f"实体 {_name}：{done}/{len(_rows)} 行",
+            )
+
         written, rec_errors = await svc.save_records(
             job_id=job.id,
             file_id=import_file.id,
@@ -509,6 +571,7 @@ async def commit_general(
             entity_type=plan.entity_type,
             rows=rows,
             file_name=name,
+            on_batch=on_record_batch,
         )
         records += written
         errors.extend({"path": plan.path, **e.__dict__} for e in rec_errors)
@@ -524,6 +587,7 @@ async def commit_general(
                 batch_id=job.batch_id,
                 created_by=user.id,
                 file_name=name,
+                on_batch=on_entity_batch,
             )
             entities += len(index)
             errors.extend({"path": plan.path, **e.__dict__} for e in ent_errors)
@@ -535,7 +599,7 @@ async def commit_general(
     await db.commit()
     shutil.rmtree(session_dir, ignore_errors=True)
 
-    return {
+    result = {
         "job_id": str(job.id),
         "documents": documents_imported,
         "records": records,
@@ -543,6 +607,8 @@ async def commit_general(
         "failed": len(errors),
         "errors": errors[:50],
     }
+    await progress.finish(result)
+    return result
 
 
 # ── 关联导入分析与提交 ──────────────────────────────────────────────────────
@@ -718,6 +784,9 @@ async def commit_relational(
     if not os.path.isdir(session_dir):
         raise HTTPException(status_code=400, detail="会话不存在或已过期，请重新上传文件")
 
+    progress = ImportProgress(payload.session_id)
+    await progress.update(phase="parse", percent=2, message="解析暂存文件", force=True)
+
     # 从暂存目录重新解析（服务端以文件为准，避免前端篡改分析结果）
     rows_by_table: dict[str, list] = {}
     files_by_table: dict[str, Any] = {}
@@ -792,6 +861,12 @@ async def commit_relational(
             )
         raise HTTPException(status_code=400, detail=detail)
 
+    await progress.update(
+        phase="parse",
+        percent=5,
+        message=f"已解析 {len(rows_by_table)} 张表",
+        force=True,
+    )
     svc = EntityImportService(db)
 
     # 复用映射模板：请求里显式给的计划优先，没给的由模板补齐（不覆盖用户选择）
@@ -849,18 +924,24 @@ async def commit_relational(
         for item in payload.junctions
     ]
 
-    stats = await svc.import_relational(
-        kb_id=payload.kb_id,
-        user=user,
-        job_id=job.id,
-        rows_by_table=rows_by_table,
-        files_by_table=files_by_table,
-        primary_keys=payload.primary_keys,
-        foreign_keys=foreign_keys,
-        junctions=junctions,
-        batch_id=job.batch_id,
-        auto_confirm=payload.auto_confirm,
-    )
+    try:
+        stats = await svc.import_relational(
+            kb_id=payload.kb_id,
+            user=user,
+            job_id=job.id,
+            rows_by_table=rows_by_table,
+            files_by_table=files_by_table,
+            primary_keys=payload.primary_keys,
+            foreign_keys=foreign_keys,
+            junctions=junctions,
+            batch_id=job.batch_id,
+            auto_confirm=payload.auto_confirm,
+            progress=progress,
+        )
+    except Exception as exc:
+        # 前端轮询靠这条失败状态退出“导入中”，否则界面会一直转圈
+        await progress.fail(f"导入失败：{exc}")
+        raise
     job.processed = sum(len(r) for r in rows_by_table.values())
     job.succeeded = job.processed - stats.failed_rows
     job.failed = stats.failed_rows + len(commit_errors)
@@ -903,7 +984,9 @@ async def commit_relational(
     stats_payload = stats.to_dict()
     stats_payload["errors"] = [*stats_payload["errors"], *commit_errors][:50]
     stats_payload["failed_rows"] += len(commit_errors)
-    return {"job_id": str(job.id), "template": saved_template, **stats_payload}
+    result = {"job_id": str(job.id), "template": saved_template, **stats_payload}
+    await progress.finish(result)
+    return result
 
 
 # ── 映射模板 ────────────────────────────────────────────────────────────────

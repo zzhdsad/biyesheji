@@ -2,17 +2,31 @@
 chcp 65001 >nul
 cd /d "%~dp0"
 
+REM All messages are ASCII on purpose: non-ASCII lines in a UTF-8 .bat can be
+REM split and executed as commands by cmd.exe on Chinese Windows.
+REM Docker Desktop hosts PG / Redis / Milvus / MinIO. Wait up to 120s for the
+REM engine instead of failing when it is still starting.
+set /a DOCKER_TRIES=0
+:wait_docker
 docker info >nul 2>&1
-if errorlevel 1 (
-  echo [错误] 未检测到 Docker，请先启动 Docker Desktop，再双击本脚本。
-  pause
-  exit /b 1
-)
+if not errorlevel 1 goto docker_ready
+set /a DOCKER_TRIES+=1
+if %DOCKER_TRIES% geq 60 goto docker_timeout
+if %DOCKER_TRIES%==1 echo Waiting for Docker engine (up to 120s)...
+timeout /t 2 /nobreak >nul
+goto wait_docker
+
+:docker_timeout
+echo [ERROR] Docker is not ready. Start Docker Desktop, then run this script again.
+pause
+exit /b 1
+
+:docker_ready
 
 if "%1"=="down" (
-  echo 正在切回正式容器（使用镜像内代码）...
+  echo Switching back to production containers. Code is baked into images.
   docker compose -p biyesheji -f docker-compose.yml up -d backend frontend
-  echo 已切回正式容器。要让改动发布，请先运行 build.ps1。
+  echo Done. Run build.ps1 first if you want code changes published.
   pause
   exit /b 0
 )
@@ -34,32 +48,43 @@ if "%1"=="logs" (
   exit /b 0
 )
 
-echo 正在以开发模式启动（后端 uvicorn --reload，前端 next dev）...
-docker compose -p biyesheji -f docker-compose.yml -f docker-compose.dev.yml up -d backend frontend
+echo Starting dev mode (backend uvicorn --reload, frontend next dev, infra included)...
+docker compose -p biyesheji -f docker-compose.yml -f docker-compose.dev.yml up -d
 if errorlevel 1 (
-  echo [错误] 开发模式启动失败，请查看上方输出。
+  echo [ERROR] Dev mode failed to start. Check the output above.
   pause
   exit /b 1
 )
 
-REM 容器重建会丢失镜像外 pip 安装的包（openpyxl / charset-normalizer 等），
-REM 这里在启动后自动补齐：已存在则秒过，缺失才联网安装。
-echo 正在校验后端依赖完整性...
+REM Rebuilt containers lose pip packages installed outside the image
+REM (openpyxl / charset-normalizer). Install only if missing.
+echo Checking backend dependencies...
 docker compose -p biyesheji -f docker-compose.yml exec backend python -c "import openpyxl, charset_normalizer" >nul 2>&1
 if errorlevel 1 (
-  echo 缺少 openpyxl / charset-normalizer，正在安装（仅容器内，不改动镜像）...
+  echo Missing openpyxl / charset-normalizer, installing inside container only...
   docker compose -p biyesheji -f docker-compose.yml exec backend pip install -q openpyxl charset-normalizer
 )
 
+REM Warm up Next dev routes so the first click does not wait for compilation.
+REM The script has per-route and total time bounds, so this step always ends
+REM even when a cold compile is slow.
+if exist "%~dp0scripts\warmup-frontend.ps1" (
+  echo Warming up frontend routes. First start may take 1-2 minutes; progress is shown below.
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0scripts\warmup-frontend.ps1"
+  if errorlevel 1 echo [WARN] Warmup did not finish cleanly. The UI still works, just slower on first visit.
+)
+
 echo.
-echo 开发模式已启动：
-echo   后端  http://localhost:8000/docs     改 backend/src 下代码即时生效
-echo   前端  http://localhost:3000          改 frontend/src 下代码即时生效
+echo Dev mode is running:
+echo   Backend  http://localhost:8000/docs     edits in backend/src apply instantly
+echo   Frontend http://localhost:3000          edits in frontend/src apply instantly
 echo.
-echo 常用命令：
-echo   dev.bat logs backend            查看后端实时日志
-echo   dev.bat test tests -k 关键词    运行后端测试
-echo   dev.bat migrate upgrade head    执行数据库迁移
-echo   dev.bat down                    切回正式容器
+echo Common commands:
+echo   dev.bat logs backend            tail backend logs
+echo   dev.bat test tests -k keyword   run backend tests
+echo   dev.bat migrate upgrade head    run DB migrations
+echo   dev.bat down                    switch back to production containers
 echo.
+echo Startup is complete. Containers keep running in the background.
+echo Press any key to close this window.
 pause

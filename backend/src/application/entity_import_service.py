@@ -18,12 +18,15 @@ from __future__ import annotations
 import hashlib
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Iterable, Sequence
+from typing import Any, Awaitable, Callable, Iterable, Sequence
 
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import func, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.application.business_resource_service import BusinessResourceService
+from src.application.import_progress import ImportProgress
 from src.application.relation_discovery import ForeignKeyCandidate, JunctionCandidate
 from src.application.tabular_parser import ParsedRow
 from src.core.deps import require_kb_write
@@ -43,7 +46,23 @@ from src.domain.models import (
 # 单批处理的行数上限（避免单条 INSERT 过大）
 BATCH_SIZE = 500
 # 实体显示名候选字段（找不到就用主键值）
-_DISPLAY_FIELD_HINTS: tuple[str, ...] = ("name", "名称", "标题", "题目", "title", "label")
+# 真实中医数据集的名称列多是英文语义列名（Chinese_term / Chinese_herbal_pieces…），
+# 只认「名称/标题」会让 4 万实体的名字退化成 CHP00001 / CPM00065 这类主键值。
+_DISPLAY_FIELD_HINTS: tuple[str, ...] = (
+    "name",
+    "名称",
+    "标题",
+    "题目",
+    "title",
+    "label",
+    "中文名",
+    "Chinese_term",
+    "Chinese_herbal_pieces",
+    "Chinese_patent_medicine",
+    "Chinese_Character",
+    "book_name",
+    "书名",
+)
 # 允许的关系统一状态（与领域常量一致，避免各处写字符串）
 _VALID_STATUSES = frozenset({KG_STATUS_PENDING, KG_STATUS_CONFIRMED, KG_STATUS_REJECTED})
 
@@ -97,6 +116,14 @@ class ImportStats:
     relations: int = 0
     kg_nodes: int = 0
     kg_edges: int = 0
+    # 同时写入业务表（中药/方剂/理论/文献）的新增条数
+    business_herbs: int = 0
+    business_prescriptions: int = 0
+    business_theories: int = 0
+    business_literatures: int = 0
+    business_ingredients: int = 0
+    # 数据集中已存在同名业务资源（按 name 幂等跳过）
+    business_existing: int = 0
     errors: list[RowError] = field(default_factory=list)
 
     @property
@@ -110,6 +137,12 @@ class ImportStats:
             "relations": self.relations,
             "kg_nodes": self.kg_nodes,
             "kg_edges": self.kg_edges,
+            "business_herbs": self.business_herbs,
+            "business_prescriptions": self.business_prescriptions,
+            "business_theories": self.business_theories,
+            "business_literatures": self.business_literatures,
+            "business_ingredients": self.business_ingredients,
+            "business_existing": self.business_existing,
             "failed_rows": self.failed_rows,
             "errors": [
                 {"file_name": e.file_name, "row_no": e.row_no, "message": e.message}
@@ -142,10 +175,12 @@ class EntityImportService:
         entity_type: str | None,
         rows: Sequence[ParsedRow],
         file_name: str = "",
+        on_batch: Callable[[int], Awaitable[None]] | None = None,
     ) -> tuple[int, list[RowError]]:
         """保存原始记录（幂等：同一 kb + record_key 会被覆盖更新）。
 
         保留每行完整字段到 payload，不拼接文本、不丢字段、不翻译。
+        on_batch 每批回调一次（参数为本批行数），用于长任务进度上报。
         """
         errors: list[RowError] = []
         written = 0
@@ -178,6 +213,8 @@ class EntityImportService:
                             current.kb_id = kb_id
                         written += 1
                     await self.db.flush()
+                    if on_batch is not None:
+                        await on_batch(len(batch))
         except Exception as exc:  # noqa: BLE001 - 单元失败要转成可展示错误
             errors.append(RowError(file_name, 0, f"原始记录保存失败：{exc}"))
             logger.warning(f"[entity_import] 原始记录保存失败，已回滚该单元: {exc}")
@@ -211,8 +248,12 @@ class EntityImportService:
         batch_id: str | None = None,
         created_by: uuid.UUID | None = None,
         file_name: str = "",
+        on_batch: Callable[[int], Awaitable[None]] | None = None,
     ) -> tuple[dict[str, uuid.UUID], list[RowError]]:
-        """按 source_pk 幂等写入实体，返回 (source_pk → entity_id)。"""
+        """按 source_pk 幂等写入实体，返回 (source_pk → entity_id)。
+
+        on_batch 每批回调一次（参数为本批行数），用于长任务进度上报。
+        """
         index: dict[str, uuid.UUID] = {}
         errors: list[RowError] = []
         try:
@@ -222,6 +263,8 @@ class EntityImportService:
                     pks = {_pk_value(row.data, pk_field) for row in batch}
                     pks.discard("")
                     existing = await self._existing_entities(kb_id, entity_type, pks)
+                    # 同批内重复主键会被后面的行覆盖，不能重复 INSERT
+                    pending: dict[str, GenericEntity] = {}
                     for row in batch:
                         pk = _pk_value(row.data, pk_field)
                         if not pk:
@@ -230,7 +273,7 @@ class EntityImportService:
                             )
                             continue
                         record_key = record_key_for(file_hash, row.row_no) if file_hash else None
-                        current = existing.get(pk)
+                        current = existing.get(pk) or pending.get(pk)
                         if current is None:
                             entity = GenericEntity(
                                 kb_id=kb_id,
@@ -245,8 +288,7 @@ class EntityImportService:
                                 created_by=created_by,
                             )
                             self.db.add(entity)
-                            await self.db.flush()
-                            index[pk] = entity.id
+                            pending[pk] = entity
                         else:
                             current.name = _display_name(row.data, pk)
                             current.payload = dict(row.data)
@@ -254,8 +296,15 @@ class EntityImportService:
                             current.import_batch_id = batch_id
                             if record_key:
                                 current.record_key = record_key
-                            await self.db.flush()
-                            index[pk] = current.id
+                    # 每批一次 flush：逐行 flush 会让大文件产生数万次数据库往返
+                    if pending:
+                        await self.db.flush()
+                        for pk, entity in pending.items():
+                            index[pk] = entity.id
+                    for pk, entity in existing.items():
+                        index[pk] = entity.id
+                    if on_batch is not None:
+                        await on_batch(len(batch))
         except Exception as exc:  # noqa: BLE001
             errors.append(RowError(file_name, 0, f"实体写入失败：{exc}"))
             logger.warning(f"[entity_import] 实体写入失败，已回滚该单元: {exc}")
@@ -316,36 +365,44 @@ class EntityImportService:
         """
         if status not in _VALID_STATUSES:
             raise ValueError(f"非法关系状态：{status}")
-        created = 0
+        if not triples:
+            return 0
+
+        # 先用唯一约束去重，再按批 INSERT ... ON CONFLICT DO NOTHING：
+        # 十万级关系逐条 SELECT 会超时，且并发导入时 SELECT 判重不可靠。
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[uuid.UUID, uuid.UUID, str]] = set()
         for offset, (source_id, target_id, rel_type) in enumerate(triples):
-            exists = await self.db.scalar(
-                select(GenericRelation.id).where(
-                    GenericRelation.kb_id == kb_id,
-                    GenericRelation.source_entity_id == source_id,
-                    GenericRelation.target_entity_id == target_id,
-                    GenericRelation.relation_type == rel_type,
-                )
-            )
-            if exists is not None:
+            key = (source_id, target_id, rel_type)
+            if key in seen:
                 continue
-            self.db.add(
-                GenericRelation(
-                    kb_id=kb_id,
-                    source_entity_id=source_id,
-                    target_entity_id=target_id,
-                    relation_type=rel_type,
-                    payload=(payloads[offset] if payloads and offset < len(payloads) else {}),
-                    confidence=confidence,
-                    status=status,
-                    provenance=provenance[:255],
-                    import_batch_id=batch_id,
-                    created_by=created_by,
-                )
+            seen.add(key)
+            rows.append(
+                {
+                    "id": uuid.uuid4(),
+                    "kb_id": kb_id,
+                    "source_entity_id": source_id,
+                    "target_entity_id": target_id,
+                    "relation_type": rel_type,
+                    "payload": payloads[offset] if payloads and offset < len(payloads) else {},
+                    "confidence": confidence,
+                    "status": status,
+                    "provenance": provenance[:255],
+                    "import_batch_id": batch_id,
+                    "created_by": created_by,
+                }
             )
-            created += 1
-            if created % BATCH_SIZE == 0:
-                await self.db.flush()
-        await self.db.flush()
+
+        created = 0
+        table = GenericRelation.__table__
+        for start in range(0, len(rows), BATCH_SIZE):
+            stmt = (
+                pg_insert(table)
+                .values(rows[start : start + BATCH_SIZE])
+                .on_conflict_do_nothing(constraint="uq_generic_relations_kb_src_dst_type")
+                .returning(table.c.id)
+            )
+            created += len((await self.db.execute(stmt)).all())
         return created
 
     async def set_relation_status(
@@ -439,14 +496,20 @@ class EntityImportService:
         Returns:
             (新建节点数, 新建边数)
         """
-        query = select(GenericRelation).where(
+        query = select(
+            GenericRelation.source_entity_id,
+            GenericRelation.target_entity_id,
+            GenericRelation.relation_type,
+            GenericRelation.provenance,
+            GenericRelation.confidence,
+        ).where(
             GenericRelation.kb_id == kb_id,
             GenericRelation.status == KG_STATUS_CONFIRMED,
             GenericRelation.deleted_at.is_(None),
         )
         if batch_id:
             query = query.where(GenericRelation.import_batch_id == batch_id)
-        relations = (await self.db.execute(query)).scalars().all()
+        relations = (await self.db.execute(query)).all()
         if not relations:
             return 0, 0
 
@@ -456,36 +519,42 @@ class EntityImportService:
             entity_ids.add(relation.target_entity_id)
         node_ids = await self._ensure_kg_nodes(kb_id, entity_ids)
 
-        created_edges = 0
+        # 边同样批量写入：先按 (源, 目标, 类型) 去重，再依赖唯一约束忽略已存在的边
+        edge_rows: list[dict[str, Any]] = []
+        seen: set[tuple[uuid.UUID, uuid.UUID, str]] = set()
         for relation in relations:
             source_node = node_ids.get(relation.source_entity_id)
             target_node = node_ids.get(relation.target_entity_id)
             if source_node is None or target_node is None:
                 continue
-            exists = await self.db.scalar(
-                select(KgEdge.id).where(
-                    KgEdge.source_node_id == source_node,
-                    KgEdge.target_node_id == target_node,
-                    KgEdge.relation_type == relation.relation_type,
-                )
-            )
-            if exists is not None:
+            key = (source_node, target_node, relation.relation_type)
+            if key in seen:
                 continue
-            self.db.add(
-                KgEdge(
-                    source_node_id=source_node,
-                    target_node_id=target_node,
-                    relation_type=relation.relation_type,
-                    provenance=relation.provenance[:64],
-                    kb_id=kb_id,
-                    status=KG_STATUS_CONFIRMED,
-                    confidence=relation.confidence,
-                )
+            seen.add(key)
+            edge_rows.append(
+                {
+                    "id": uuid.uuid4(),
+                    "source_node_id": source_node,
+                    "target_node_id": target_node,
+                    "relation_type": relation.relation_type,
+                    "provenance": (relation.provenance or "")[:64],
+                    "description": "",
+                    "kb_id": kb_id,
+                    "status": KG_STATUS_CONFIRMED,
+                    "confidence": relation.confidence,
+                }
             )
-            created_edges += 1
-            if created_edges % BATCH_SIZE == 0:
-                await self.db.flush()
-        await self.db.flush()
+
+        created_edges = 0
+        table = KgEdge.__table__
+        for start in range(0, len(edge_rows), BATCH_SIZE):
+            stmt = (
+                pg_insert(table)
+                .values(edge_rows[start : start + BATCH_SIZE])
+                .on_conflict_do_nothing(constraint="uq_kg_edges_source_target_relation")
+                .returning(table.c.id)
+            )
+            created_edges += len((await self.db.execute(stmt)).all())
         logger.info(
             f"[entity_import] KG 同步完成：kb={kb_id} 节点 {len(node_ids)} 边 {created_edges}"
         )
@@ -505,6 +574,22 @@ class EntityImportService:
             )
         )
         mapping = {r.entity_id: r.id for r in rows.all()}
+        if mapping:
+            # 实体显示名可能在重新导入时被修正（如从主键值改为中文名），
+            # 节点名必须跟着同步，否则图谱按 name/aliases 匹配仍会命中旧主键名。
+            entity_name = (
+                select(GenericEntity.name)
+                .where(GenericEntity.id == KgNode.entity_id)
+                .scalar_subquery()
+            )
+            await self.db.execute(
+                update(KgNode)
+                .where(
+                    KgNode.id.in_(list(mapping.values())),
+                    KgNode.name.is_distinct_from(func.left(entity_name, 128)),
+                )
+                .values(name=func.left(entity_name, 128))
+            )
 
         missing = [i for i in ids if i not in mapping]
         if missing:
@@ -513,6 +598,7 @@ class EntityImportService:
                     select(GenericEntity).where(GenericEntity.id.in_(missing))
                 )
             ).scalars().all()
+            created: list[tuple[uuid.UUID, KgNode]] = []
             for entity in entities:
                 node = KgNode(
                     node_type=KG_NODE_TYPE_ENTITY,
@@ -522,8 +608,11 @@ class EntityImportService:
                     status=KG_STATUS_CONFIRMED,
                 )
                 self.db.add(node)
+                created.append((entity.id, node))
+            if created:
                 await self.db.flush()
-                mapping[entity.id] = node.id
+                for entity_id, node in created:
+                    mapping[entity_id] = node.id
         return mapping
 
     # ── 关联导入编排 ────────────────────────────────────────────────────────
@@ -541,15 +630,41 @@ class EntityImportService:
         junctions: Sequence[JunctionCandidate],
         batch_id: str,
         auto_confirm: bool = False,
+        progress: ImportProgress | None = None,
     ) -> ImportStats:
         """关联导入全流程：原始记录 → 实体 → 关系 →（确认后）KG。
 
         每个逻辑单元独立 SAVEPOINT：某张表或某组关系失败只回滚该单元，
         其他单元的数据与错误明细都会返回，便于前端逐条展示与重试。
+        progress 只用于上报展示进度，写失败不影响导入结果。
         """
         stats = ImportStats()
         await self.require_write(user, kb_id)
         status = KG_STATUS_CONFIRMED if auto_confirm else KG_STATUS_PENDING
+
+        # 进度权重：写入阶段按「原始记录行数 + 实体行数」计算，占 5%–55%；
+        # 关系阶段按关系单元数占 55%–90%；业务资源表占 90%–95%；图谱同步占 95%–100%。
+        total_rows = sum(len(rows) for rows in rows_by_table.values())
+        entity_rows = sum(
+            len(rows) for name, rows in rows_by_table.items() if primary_keys.get(name)
+        )
+        work_total = max(total_rows + entity_rows, 1)
+        work_done = 0
+
+        async def tick(n: int, label: str) -> None:
+            nonlocal work_done
+            work_done += n
+            if progress is not None:
+                await progress.update(
+                    phase="write",
+                    percent=5 + 50 * min(work_done, work_total) / work_total,
+                    message=f"{label}（{min(work_done, work_total)}/{work_total} 行）",
+                )
+
+        if progress is not None:
+            await progress.update(
+                phase="write", percent=5, message="开始写入原始记录与实体", force=True
+            )
 
         # 1) 原始记录 + 实体
         for table_name, rows in rows_by_table.items():
@@ -557,6 +672,9 @@ class EntityImportService:
             file_hash = getattr(file, "file_hash", "") or ""
             file_id = getattr(file, "id", None)
             file_name = getattr(file, "file_name", table_name) or table_name
+
+            async def on_record(n: int, _table: str = table_name) -> None:
+                await tick(n, f"原始记录：{_table}")
 
             written, errors = await self.save_records(
                 job_id=job_id,
@@ -566,6 +684,7 @@ class EntityImportService:
                 entity_type=table_name,
                 rows=rows,
                 file_name=file_name,
+                on_batch=on_record,
             )
             stats.records += written
             stats.errors.extend(errors)
@@ -574,6 +693,9 @@ class EntityImportService:
             # 若照样调用 upsert_entities，会把每一行都报成「缺少主键」的假失败。
             pk_field = primary_keys.get(table_name)
             if pk_field:
+                async def on_entity(n: int, _table: str = table_name) -> None:
+                    await tick(n, f"实体：{_table}")
+
                 _, errors = await self.upsert_entities(
                     kb_id=kb_id,
                     entity_type=table_name,
@@ -584,6 +706,7 @@ class EntityImportService:
                     batch_id=batch_id,
                     created_by=user.id,
                     file_name=file_name,
+                    on_batch=on_entity,
                 )
                 stats.errors.extend(errors)
 
@@ -591,12 +714,31 @@ class EntityImportService:
         # 关联表自身没有主键，它的外键由下面的关联表逻辑统一处理；
         # 若再按「直接外键」走一遍，会因拿不到子表主键而报错，产生两条假失败。
         junction_tables = {j.table for j in junctions}
-        for fk in foreign_keys:
-            if fk.child_table in junction_tables:
-                continue
+        direct_fks = [fk for fk in foreign_keys if fk.child_table not in junction_tables]
+        relation_units = len(direct_fks) + len(junctions)
+        relation_done = 0
+
+        async def relation_tick(label: str) -> None:
+            nonlocal relation_done
+            relation_done += 1
+            if progress is not None:
+                await progress.update(
+                    phase="relations",
+                    percent=55 + 35 * relation_done / max(relation_units, 1),
+                    message=f"写入关系：{label}",
+                )
+
+        if progress is not None:
+            await progress.update(
+                phase="relations", percent=55, message="开始写入关系", force=True
+            )
+
+        for fk in direct_fks:
             try:
                 async with self.db.begin_nested():
-                    created = await self._link_direct(kb_id, fk, rows_by_table, primary_keys, status, batch_id, user)
+                    created = await self._link_direct(
+                        kb_id, fk, rows_by_table, primary_keys, status, batch_id, user
+                    )
                     stats.relations += created
             except Exception as exc:  # noqa: BLE001
                 # 带上子表/父表上下文：没有表名的错误无法定位到具体关系
@@ -609,6 +751,9 @@ class EntityImportService:
                     )
                 )
                 logger.warning(f"[entity_import] 直接关系写入失败，已回滚该单元: {exc}")
+            await relation_tick(
+                f"{fk.child_table}.{fk.child_field}→{fk.parent_table}.{fk.parent_field}"
+            )
 
         # 3) 关联表（多对多）
         for junction in junctions:
@@ -623,15 +768,56 @@ class EntityImportService:
                     RowError(junction.table, 0, f"关联表 {junction.label} 写入失败：{exc}")
                 )
                 logger.warning(f"[entity_import] 关联表关系写入失败，已回滚该单元: {exc}")
+            await relation_tick(f"关联表 {junction.label}")
 
         total_entities = await self._count_entities(kb_id, batch_id)
         stats.entities = total_entities
 
-        # 4) 只有已确认的关系才进 KG
+        # 4) 业务资源表：可识别的中药/方剂/理论/文献同时写入四张业务表，
+        #    使前端四个模块可见；与关系是否确认无关（确认只影响知识图谱）。
+        if progress is not None:
+            await progress.update(
+                phase="business", percent=90, message="写入业务资源表", force=True
+            )
+
+        async def business_tick(index: int, total: int, label: str) -> None:
+            if progress is not None:
+                await progress.update(
+                    phase="business",
+                    percent=90 + 5 * index / max(total, 1),
+                    message=f"业务资源：{label}",
+                )
+
+        business = await BusinessResourceService(self.db).write_tables(
+            rows_by_table=rows_by_table,
+            files_by_table=files_by_table,
+            batch_id=batch_id,
+            on_table=business_tick,
+        )
+        stats.business_herbs = business.herbs
+        stats.business_prescriptions = business.prescriptions
+        stats.business_theories = business.theories
+        stats.business_literatures = business.literatures
+        stats.business_ingredients = business.ingredients
+        stats.business_existing = business.existing
+        stats.errors.extend(RowError(e.table, 0, e.message) for e in business.errors)
+
+        # 5) 只有已确认的关系才进 KG
         if auto_confirm:
+            if progress is not None:
+                await progress.update(
+                    phase="kg", percent=95, message="同步知识图谱（节点与边）", force=True
+                )
             nodes, edges = await self.sync_confirmed_to_kg(kb_id, batch_id=batch_id)
             stats.kg_nodes = nodes
             stats.kg_edges = edges
+            if progress is not None:
+                await progress.update(
+                    phase="kg",
+                    percent=99,
+                    message=f"图谱同步完成：节点 {nodes}、边 {edges}",
+                    force=True,
+                )
 
         return stats
 
