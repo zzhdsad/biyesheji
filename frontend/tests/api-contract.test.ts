@@ -23,7 +23,6 @@ const BACKEND_ROUTES_DIR = path.resolve(REPO_ROOT, 'backend/src/api/routes');
 const PREFIX_TO_ROUTE_FILE: Record<string, string> = {
   auth: 'auth.py',
   chat: 'chat.py',
-  evaluation: 'evaluation.py',
   kb: 'knowledge_bases.py',
   'knowledge-bases': 'knowledge_bases.py',
   documents: 'documents.py',
@@ -33,14 +32,9 @@ const PREFIX_TO_ROUTE_FILE: Record<string, string> = {
   literatures: 'literatures.py',
   users: 'users.py',
   admin: 'admin.py',
-  // admin/import/* 端点实际实现在 import_center.py（两段前缀优先匹配）
-  'admin/import': 'import_center.py',
   audit: 'audit.py',
   settings: 'settings.py',
   feedbacks: 'feedbacks.py',
-  taxonomy: 'taxonomy.py',
-  categories: 'taxonomy.py',
-  tags: 'taxonomy.py',
   kg: 'kg.py',
 };
 
@@ -180,16 +174,12 @@ describe('阶段十六：前后端 API 契约守卫', () => {
       'POST /chat/ask-stream',
       'GET /chat/conversations',
       'GET /chat/conversations/{p}/messages',
-      'POST /evaluation/run',
-      'GET /evaluation/results',
       'GET /kb',
       'GET /kb/{p}/resources',
       'GET /herbs',
       'GET /prescriptions',
       'GET /theories',
       'GET /literatures',
-      'GET /categories',
-      'GET /tags',
     ]) {
       assert.ok(paths.includes(required), `未抽取到调用：${required}`);
     }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   App,
   Button,
@@ -16,12 +16,10 @@ import {
   Space,
   Table,
   Tag as AntTag,
-  TreeSelect,
   Typography,
 } from 'antd';
 import type { FormInstance } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import type { TreeDataNode } from 'antd';
 import {
   ArrowDownOutlined,
   ArrowUpOutlined,
@@ -34,20 +32,16 @@ import {
   SearchOutlined,
 } from '@ant-design/icons';
 import type {
-  Category,
   Herb,
   Prescription,
   PrescriptionIngredient,
-  Tag,
 } from '@/types';
 import {
   batchDeleteResources,
   createPrescription,
   deletePrescription,
-  fetchCategories,
   fetchHerbs,
   fetchPrescriptions,
-  fetchTags,
   updatePrescription,
 } from '@/services/api';
 import { AppLayout } from '@/components/layout/AppLayout';
@@ -60,20 +54,7 @@ import { useRequestSeq } from '@/hooks/useRequestSeq';
 const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
 
-/** 「未填写分类」哨兵值（后端解析为 category_id IS NULL）。 */
-const UNCATEGORIZED_VALUE = '__none__';
-
 // ── 工具 ──────────────────────────────────────────────────────────────────────
-
-/** 把后端嵌套分类转成 TreeSelect 数据。 */
-function toTreeSelectData(nodes: Category[]): TreeDataNode[] {
-  return nodes.map((node) => ({
-    key: node.id,
-    title: node.name,
-    value: node.id,
-    children: node.children?.length ? toTreeSelectData(node.children) : undefined,
-  }));
-}
 
 /** 同时兼容 AppException {message} 与 HTTPException {detail}。 */
 function pickErrorMessage(err: unknown, fallback: string): string {
@@ -121,14 +102,12 @@ interface IngredientFormItem {
 interface PrescriptionFormValues {
   name: string;
   aliases: string[];
-  category_id?: string | null;
   efficacy: string;
   indications: string;
   usage_method: string;
   source: string;
   description: string;
   ingredients: IngredientFormItem[];
-  tag_ids: string[];
 }
 
 type ModalMode = 'create' | 'edit';
@@ -136,8 +115,6 @@ type ModalMode = 'create' | 'edit';
 /** 列表查询所需的全部状态。 */
 interface QueryState {
   keyword: string;
-  categoryId: string | undefined;
-  tagId: string | undefined;
   current: number;
   pageSize: number;
 }
@@ -402,12 +379,6 @@ export default function PrescriptionsPage() {
   // 筛选
   const [keyword, setKeyword] = useState('');
   const initialQueryRef = useRef(false);
-  const [categoryId, setCategoryId] = useState<string | undefined>(undefined);
-  const [tagId, setTagId] = useState<string | undefined>(undefined);
-
-  // 分类树 / 标签选项
-  const [categoryTree, setCategoryTree] = useState<Category[]>([]);
-  const [allTags, setAllTags] = useState<Tag[]>([]);
 
   // 详情 Drawer
   const [detail, setDetail] = useState<Prescription | null>(null);
@@ -426,8 +397,6 @@ export default function PrescriptionsPage() {
   /** 加载列表；传入 opts 时使用显式条件，否则读取当前 state。 */
   const loadPrescriptions = async (opts?: QueryState) => {
     const kw = opts ? opts.keyword : keyword;
-    const cat = opts ? opts.categoryId : categoryId;
-    const tg = opts ? opts.tagId : tagId;
     const pg = opts ? opts.current : current;
     const ps = opts ? opts.pageSize : pageSize;
     // BUG-048：快速翻页/改条件时旧慢响应会覆盖新数据，用序号丢弃过期响应
@@ -436,8 +405,6 @@ export default function PrescriptionsPage() {
     try {
       const resp = await fetchPrescriptions({
         keyword: kw || undefined,
-        category_id: cat,
-        tag_id: tg,
         limit: ps,
         offset: (pg - 1) * ps,
       });
@@ -455,28 +422,6 @@ export default function PrescriptionsPage() {
     }
   };
 
-  // BUG-073（lint）：被下面挂载 effect 依赖，改为 useCallback 固定引用（行为不变）
-  const loadCategories = useCallback(async () => {
-    try {
-      const tree = await fetchCategories({
-        resource_type: 'prescription',
-        tree: true,
-      });
-      setCategoryTree(tree);
-    } catch {
-      message.error('分类加载失败');
-    }
-  }, [message]);
-
-  const loadTags = useCallback(async () => {
-    try {
-      const list = await fetchTags();
-      setAllTags(list);
-    } catch {
-      message.error('标签加载失败');
-    }
-  }, [message]);
-
   useEffect(() => {
     const opts = !initialQueryRef.current
       ? (() => {
@@ -484,17 +429,12 @@ export default function PrescriptionsPage() {
           const kw = new URLSearchParams(window.location.search).get('keyword');
           if (!kw) return undefined;
           setKeyword(kw);
-          return { keyword: kw, categoryId: undefined, tagId: undefined, current: 1, pageSize };
+          return { keyword: kw, current: 1, pageSize };
         })()
       : undefined;
     void loadPrescriptions(opts);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current, pageSize]);
-
-  useEffect(() => {
-    void loadCategories();
-    void loadTags();
-  }, [loadCategories, loadTags]);
 
   // ── 查询操作 ──────────────────────────────────────────────────────────────
 
@@ -502,8 +442,6 @@ export default function PrescriptionsPage() {
     if (current === 1) {
       void loadPrescriptions({
         keyword,
-        categoryId,
-        tagId,
         current: 1,
         pageSize,
       });
@@ -515,13 +453,9 @@ export default function PrescriptionsPage() {
 
   const onReset = () => {
     setKeyword('');
-    setCategoryId(undefined);
-    setTagId(undefined);
     if (current === 1) {
       void loadPrescriptions({
         keyword: '',
-        categoryId: undefined,
-        tagId: undefined,
         current: 1,
         pageSize,
       });
@@ -539,14 +473,12 @@ export default function PrescriptionsPage() {
     form.setFieldsValue({
       name: '',
       aliases: [],
-      category_id: null,
       efficacy: '',
       indications: '',
       usage_method: '',
       source: '',
       description: '',
       ingredients: [],
-      tag_ids: [],
     });
     setModalOpen(true);
   };
@@ -564,14 +496,11 @@ export default function PrescriptionsPage() {
         form.setFieldsValue({
           name: editTarget.name,
           aliases: editTarget.aliases,
-          category_id: editTarget.category_id,
           efficacy: editTarget.efficacy,
           indications: editTarget.indications,
           usage_method: editTarget.usage_method,
           source: editTarget.source,
           description: editTarget.description,
-          // BUG-054：tags / ingredients 可能为 null（同 herbs 页已处理）
-          tag_ids: (editTarget.tags ?? []).map((t) => t.id),
           // 后端结构 → Form.List 本地结构（去掉 id/sort_order，按序排列）
           ingredients: [...(editTarget.ingredients ?? [])]
             .sort((a, b) => a.sort_order - b.sort_order)
@@ -608,14 +537,12 @@ export default function PrescriptionsPage() {
       const payload = {
         name: values.name.trim(),
         aliases: values.aliases ?? [],
-        category_id: values.category_id ?? null,
         efficacy: values.efficacy ?? '',
         indications: values.indications ?? '',
         usage_method: values.usage_method ?? '',
         source: values.source ?? '',
         description: values.description ?? '',
         ingredients,
-        tag_ids: values.tag_ids ?? [],
       };
 
       if (modalMode === 'edit' && editTarget) {
@@ -693,13 +620,6 @@ export default function PrescriptionsPage() {
       key: 'aliases',
       width: 180,
       render: (v: string[]) => <TagList items={v} />,
-    },
-    {
-      title: '分类',
-      dataIndex: 'category',
-      key: 'category',
-      width: 120,
-      render: (_: unknown, row: Prescription) => row.category?.name ?? '—',
     },
     {
       title: '功效',
@@ -872,38 +792,15 @@ export default function PrescriptionsPage() {
     </Space>
   );
 
-  // ── 标签 Select 选项（筛选与表单共用）──────────────────────────────────────
-
-  const tagOptions = allTags.map((t) => ({
-    label: (
-      <Space size={6}>
-        <span
-          style={{
-            display: 'inline-block',
-            width: 12,
-            height: 12,
-            borderRadius: 3,
-            background: t.color || 'transparent',
-            border: '1px solid rgba(128,128,128,0.4)',
-          }}
-        />
-        {t.name}
-      </Space>
-    ),
-    value: t.id,
-  }));
-
   const formInitial: PrescriptionFormValues = {
     name: '',
     aliases: [],
-    category_id: null,
     efficacy: '',
     indications: '',
     usage_method: '',
     source: '',
     description: '',
     ingredients: [],
-    tag_ids: [],
   };
 
   return (
@@ -919,26 +816,6 @@ export default function PrescriptionsPage() {
             onChange={(e) => setKeyword(e.target.value)}
             onSearch={onSearch}
             prefix={<SearchOutlined />}
-          />
-          <TreeSelect
-            placeholder="按分类筛选"
-            allowClear
-            style={{ width: 220 }}
-            treeData={[
-              { title: '未填写分类', value: UNCATEGORIZED_VALUE },
-              ...toTreeSelectData(categoryTree),
-            ]}
-            treeDefaultExpandAll
-            value={categoryId}
-            onChange={(v) => setCategoryId(v ?? undefined)}
-          />
-          <Select
-            placeholder="按标签筛选"
-            allowClear
-            style={{ width: 220 }}
-            options={tagOptions}
-            value={tagId}
-            onChange={(v) => setTagId(v ?? undefined)}
           />
           <Button type="primary" onClick={onSearch}>
             查询
@@ -995,9 +872,6 @@ export default function PrescriptionsPage() {
               <Descriptions.Item label="别名">
                 <TagList items={detail.aliases} />
               </Descriptions.Item>
-              <Descriptions.Item label="分类">
-                {detail.category?.name ?? '—'}
-              </Descriptions.Item>
               <Descriptions.Item label="功效">
                 <TranslatableField label="功效" value={detail.efficacy} />
               </Descriptions.Item>
@@ -1012,19 +886,6 @@ export default function PrescriptionsPage() {
               </Descriptions.Item>
               <Descriptions.Item label="描述">
                 <TranslatableField label="描述" value={detail.description} />
-              </Descriptions.Item>
-              <Descriptions.Item label="标签">
-                <Space size={[4, 4]} wrap>
-                  {detail.tags.length === 0 ? (
-                    <Typography.Text type="secondary">—</Typography.Text>
-                  ) : (
-                    detail.tags.map((t) => (
-                      <AntTag key={t.id} color={t.color || undefined}>
-                        {t.name}
-                      </AntTag>
-                    ))
-                  )}
-                </Space>
               </Descriptions.Item>
               <Descriptions.Item label="创建时间">
                 {detail.created_at
@@ -1095,15 +956,6 @@ export default function PrescriptionsPage() {
               mode="tags"
               placeholder="如：麻黄散"
               tokenSeparators={[',', '，']}
-            />
-          </Form.Item>
-
-          <Form.Item name="category_id" label="分类">
-            <TreeSelect
-              treeData={toTreeSelectData(categoryTree)}
-              allowClear
-              placeholder="选择方剂分类"
-              treeDefaultExpandAll
             />
           </Form.Item>
 
@@ -1215,14 +1067,6 @@ export default function PrescriptionsPage() {
             </Form.List>
           </Form.Item>
 
-          <Form.Item name="tag_ids" label="标签">
-            <Select
-              mode="multiple"
-              placeholder="选择标签"
-              options={tagOptions}
-              allowClear
-            />
-          </Form.Item>
         </Form>
       </Modal>
     </AppLayout>

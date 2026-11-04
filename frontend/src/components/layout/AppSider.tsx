@@ -28,22 +28,16 @@ import {
   DatabaseOutlined,
   AuditOutlined,
   DesktopOutlined,
-  ApartmentOutlined,
-  CloudUploadOutlined,
   DeleteOutlined,
   DownOutlined,
-  ExperimentOutlined,
   FileTextOutlined,
   HistoryOutlined,
-  HomeOutlined,
-  ImportOutlined,
   LogoutOutlined,
   MedicineBoxOutlined,
   MessageOutlined,
   PlusOutlined,
   ProfileOutlined,
   ReadOutlined,
-  SafetyCertificateOutlined,
   SettingOutlined,
   TeamOutlined,
   UserOutlined,
@@ -110,31 +104,7 @@ const ADMIN_NAV_ITEMS: Required<MenuProps>['items'] = [
     label: '管理中心',
     children: [
       { key: '/kb', icon: <DatabaseOutlined />, label: '知识库管理' },
-      {
-        key: 'data-mgmt',
-        label: '数据管理',
-        children: [
-          { key: '/documents', icon: <FileTextOutlined />, label: '文档管理' },
-          { key: '/taxonomy', icon: <AppstoreOutlined />, label: '分类与标签' },
-          { key: '/admin/import', icon: <ImportOutlined />, label: '数据导入中心' },
-          {
-            key: '/admin/import/normal',
-            icon: <CloudUploadOutlined />,
-            label: '普通数据导入',
-          },
-          {
-            key: '/admin/import/relational',
-            icon: <ApartmentOutlined />,
-            label: '关联数据导入',
-          },
-          {
-            key: '/admin/index-consistency',
-            icon: <SafetyCertificateOutlined />,
-            label: '索引一致性',
-          },
-          { key: '/evaluation', icon: <ExperimentOutlined />, label: '评估面板' },
-        ],
-      },
+      { key: '/documents', icon: <FileTextOutlined />, label: '文档管理' },
       { key: '/users', icon: <TeamOutlined />, label: '用户管理' },
       {
         key: 'system-mgmt',
@@ -165,10 +135,9 @@ export const NAV_ROUTE_KEYS: string[] = (
  * 统一路由匹配：**最长前缀命中**。
  *
  * BUG 修复：此前是一串 `pathname.startsWith('/xxx')` 的 if-else，`/admin`
- * 排在 `/admin/import` 之前，导致进入「数据导入中心」时高亮的是「系统仪表盘」；
- * 同时 `/taxonomy` 根本没有分支，分类与标签页永远不高亮。
- * 这里改为按菜单 key 做最长前缀匹配，子路由（/admin/import/xxx）也会保持
- * 父级菜单高亮，且不写死任何页面名称。
+ * 排在更长的子路由之前，导致进入子页面时高亮的是「系统仪表盘」。
+ * 这里改为按菜单 key 做最长前缀匹配，子路由也会保持父级菜单高亮，
+ * 且不写死任何页面名称。
  *
  * BUG 修复（高亮"首页"）：根键 '/' 不得做前缀匹配——`'/chat'.startsWith('/')`
  * 恒为真会让任何页面都命中「首页」。根路由只在完全相等时命中。
@@ -195,7 +164,7 @@ export function matchNavKey(pathname: string | null | undefined): string {
  *
  * 根因：各页面的 AppLayout 在路由切换时整体重挂载，AppSider 随之重建，
  * 主导航 Menu 此前为非受控模式，SubMenu 展开状态随实例销毁丢失——
- * 用户点开「管理中心 → 数据导入中心」后，管理中心分组看起来"收起"了。
+ * 用户点开「管理中心 → 用户管理」后，管理中心分组看起来"收起"了。
  *
  * 修复：openKeys 受控 + localStorage 持久化（模块级缓存做 SPA 内同步恢复，
  * 避免路由切换瞬间"先收起再展开"的闪动）。
@@ -239,19 +208,9 @@ function storeNavOpenKeys(keys: string[]): void {
 function defaultOpenKeysFor(pathname: string | null | undefined): string[] {
   const path = pathname ?? '';
   const keys: string[] = [];
-  const ADMIN_CHILDREN = ['/kb', '/documents', '/taxonomy', '/admin', '/evaluation', '/users', '/audit', '/settings'];
+  const ADMIN_CHILDREN = ['/kb', '/documents', '/admin', '/users', '/audit', '/settings'];
   if (ADMIN_CHILDREN.some((p) => path === p || path.startsWith(`${p}/`))) {
     keys.push('admin-center');
-  }
-  const DATA_MGMT_CHILDREN = [
-    '/documents',
-    '/taxonomy',
-    '/admin/import',
-    '/admin/index-consistency',
-    '/evaluation',
-  ];
-  if (DATA_MGMT_CHILDREN.some((p) => path === p || path.startsWith(`${p}/`))) {
-    keys.push('data-mgmt');
   }
   const SYSTEM_MGMT_CHILDREN = ['/audit', '/settings'];
   if (path === '/admin' || SYSTEM_MGMT_CHILDREN.some((p) => path === p || path.startsWith(`${p}/`))) {
@@ -315,7 +274,7 @@ function UserMenu() {
 /**
  * 左侧边栏（全站共享）：
  * 1. 品牌 Logo 区域
- * 2. 顶部主导航：智能问答 / 管理中心（知识库/文档/评估/仪表盘）
+ * 2. 顶部主导航：智能问答 / 管理中心（知识库/用户/系统）
  * 3. 历史会话列表（+ 单条删除 + 全部删除）
  * 4. 底部：刷新会话 / 主题切换
  */

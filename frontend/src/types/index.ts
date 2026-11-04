@@ -393,195 +393,6 @@ export interface HealthResponse {
   components: Record<string, string>;
 }
 
-// ─────────────────────────── 评估 ───────────────────────────
-
-/** 问题类型受控词表（TASK-009：中医知识问题分类）。 */
-export type QuestionType =
-  | 'herb'
-  | 'prescription'
-  | 'theory'
-  | 'literature'
-  | 'multi_source'
-  | 'unanswerable'
-  | 'general';
-
-/** 问题类型选项（GET /evaluation/question-types）。 */
-export interface QuestionTypeOption {
-  value: string;
-  label: string;
-}
-
-/** 测试集条目（上传/评估输入）。 */
-export interface EvalTestCaseItem {
-  question: string;
-  golden_answer: string;
-  golden_contexts?: string[];
-  /** 问题分类，默认 general；TASK-011 按类型分析检索策略效果。 */
-  question_type?: QuestionType | string;
-  /** 数据集版本，不传则使用上传请求级 dataset_version。 */
-  dataset_version?: string;
-  /** 标准答案是否仍需人工确认；未评估的用例不计入答案正确度。 */
-  needs_review?: boolean;
-  /** 人工标注依据提示。 */
-  source_reference?: string;
-}
-
-/** 测试集条目（GET /evaluation/test-cases，含服务端状态）。 */
-export interface EvalTestCaseOut extends EvalTestCaseItem {
-  id: string;
-  kb_id: string;
-  golden_answer: string;
-  golden_contexts: string[];
-  question_type: string;
-  question_type_label: string;
-  dataset_version: string;
-  needs_review: boolean;
-  source_reference: string;
-  created_at: string | null;
-}
-
-/** 参考答案草稿（POST /evaluation/test-cases/{id}/draft-answer）。 */
-export interface EvalDraftAnswer {
-  answer: string;
-  golden_contexts: string[];
-  source_reference: string;
-  evidence_count: number;
-  usable: boolean;
-  warning: string;
-}
-
-/** 按问题类型分组的指标。 */
-export interface QuestionTypeMetric {
-  question_type: string;
-  question_type_label: string;
-  case_count: number;
-  evaluated_count: number;
-  skipped_count: number;
-  context_relevancy: number;
-  /** null：该类型下暂无已确认标准答案的用例。 */
-  answer_correctness: number | null;
-}
-
-/** 单条用例评估结果（run 报告明细）。 */
-export interface EvalCaseResult {
-  test_case_id: string;
-  question: string;
-  golden_answer: string;
-  golden_contexts: string[];
-  answer: string;
-  retrieved_contexts: string[];
-  context_relevancy: number;
-  /** null：标准答案缺失或待人工确认，未参与答案正确度计算。 */
-  answer_correctness: number | null;
-  error?: string | null;
-  question_type: string;
-  dataset_version: string;
-  needs_review: boolean;
-  /** 阶段十二：该用例实际使用的检索策略 */
-  retrieval_strategy?: string | null;
-  // 阶段十四：Evidence Gate 归档（Gate 关闭时为 null）
-  gate_decision?: string | null;
-  gate_version?: string | null;
-  retry_strategy?: string | null;
-  // 阶段十五：Self Reflection 归档（Reflection 关闭时为 null）
-  reflection_decision?: string | null;
-  reflection_version?: string | null;
-  reflection_retry_strategy?: string | null;
-  reflection_reason?: string | null;
-}
-
-/** 评估报告（POST /evaluation/run）。 */
-export interface EvaluationReport {
-  run_id: string;
-  kb_id: string;
-  case_count: number;
-  context_relevancy: number;
-  /** null：本次运行无已确认标准答案的用例。 */
-  answer_correctness: number | null;
-  passed: boolean;
-  threshold: number;
-  /** TASK-009 实验维度（Baseline 与消融实验对比）。 */
-  experiment_name: string;
-  retrieval_strategy: string;
-  dataset_version: string;
-  evaluated_count: number;
-  skipped_count: number;
-  by_question_type: QuestionTypeMetric[];
-  results: EvalCaseResult[];
-}
-
-/** 实验运行归档（GET /evaluation/runs）。 */
-export interface EvaluationRunItem {
-  run_id: string;
-  kb_id: string;
-  experiment_name: string;
-  retrieval_strategy: string;
-  dataset_version: string;
-  case_count: number;
-  evaluated_count: number;
-  skipped_count: number;
-  context_relevancy: number;
-  answer_correctness: number | null;
-  passed: boolean;
-  threshold: number;
-  config_snapshot: Record<string, unknown>;
-  by_question_type: QuestionTypeMetric[];
-  created_at: string | null;
-}
-
-/** 历史评估结果条目（GET /evaluation/results）。 */
-export interface EvaluationHistoryItem {
-  id: string;
-  question: string;
-  golden_answer: string;
-  answer_correctness: number | null;
-  context_relevancy: number;
-  created_at: string | null;
-  run_id?: string | null;
-  experiment_name?: string | null;
-  retrieval_strategy?: string | null;
-  dataset_version?: string | null;
-  question_type?: string | null;
-  question_type_label?: string | null;
-  // 阶段十四：Evidence Gate 归档（Gate 关闭时为 null）
-  gate_decision?: string | null;
-  gate_version?: string | null;
-  retry_strategy?: string | null;
-  // 阶段十五：Self Reflection 归档（Reflection 关闭时为 null）
-  reflection_decision?: string | null;
-  reflection_version?: string | null;
-  reflection_retry_strategy?: string | null;
-  reflection_reason?: string | null;
-}
-
-// ─────────────────────────── 分类与标签（TASK-002）───────────────────────────
-
-/** 分类适用的资源域（与后端 taxonomy RESOURCE_TYPES 一致，区别于中文 SourceType）。 */
-export type TaxonomyResourceType = 'herb' | 'prescription' | 'theory' | 'literature';
-
-/** 分类（tree=true 时 children 有值）。 */
-export interface Category {
-  id: string;
-  resource_type: TaxonomyResourceType;
-  name: string;
-  parent_id: string | null;
-  sort_order: number;
-  description: string;
-  created_at: string;
-  updated_at: string;
-  children?: Category[];
-}
-
-/** 标签（扁平、跨资源域）。 */
-export interface Tag {
-  id: string;
-  name: string;
-  color: string;
-  description: string;
-  created_at: string;
-  updated_at: string;
-}
-
 // ─────────────────────────── 中药（TASK-003）───────────────────────────
 
 /** 中药资源（与后端 HerbOut 对应）。 */
@@ -589,14 +400,11 @@ export interface Herb {
   id: string;
   name: string;
   aliases: string[];
-  category_id: string | null;
-  category: Pick<Category, 'id' | 'name'> | null;
   properties: string;
   channels: string[];
   effects: string;
   source: string;
   description: string;
-  tags: Pick<Tag, 'id' | 'name' | 'color'>[];
   created_at: string;
   updated_at: string;
 }
@@ -628,15 +436,12 @@ export interface Prescription {
   id: string;
   name: string;
   aliases: string[];
-  category_id: string | null;
-  category: Pick<Category, 'id' | 'name'> | null;
   efficacy: string;
   indications: string;
   usage_method: string;
   source: string;
   description: string;
   ingredients: PrescriptionIngredient[];
-  tags: Pick<Tag, 'id' | 'name' | 'color'>[];
   created_at: string;
   updated_at: string;
 }
@@ -656,11 +461,8 @@ export interface Theory {
   id: string;
   name: string;
   aliases: string[];
-  category_id: string | null;
-  category: Pick<Category, 'id' | 'name'> | null;
   content: string;
   source: string;
-  tags: Pick<Tag, 'id' | 'name' | 'color'>[];
   created_at: string;
   updated_at: string;
 }
@@ -680,14 +482,11 @@ export interface Literature {
   id: string;
   name: string;
   aliases: string[];
-  category_id: string | null;
-  category: Pick<Category, 'id' | 'name'> | null;
   author: string;
   dynasty: string;
   summary: string;
   content: string;
   source: string;
-  tags: Pick<Tag, 'id' | 'name' | 'color'>[];
   created_at: string;
   updated_at: string;
 }

@@ -112,11 +112,6 @@ export default function AdminPage() {
           </Card>
         </Col>
       </Row>
-
-      <Card style={{ marginTop: 16 }} title="评估面板">
-        评估面板建设中：上传测试集（问题-标准答案-上下文）后可运行 RAGAS 评估，
-        展示上下文相关度与答案正确率。
-      </Card>
     </AppLayout>
   );
 }

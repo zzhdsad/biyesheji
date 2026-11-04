@@ -16,11 +16,9 @@ import {
   Spin,
   Table,
   Tag as AntTag,
-  TreeSelect,
   Typography,
 } from 'antd';
 import type { ColumnsType } from 'antd/es/table';
-import type { TreeDataNode } from 'antd';
 import {
   BookOutlined,
   DeleteOutlined,
@@ -30,14 +28,12 @@ import {
   ReloadOutlined,
   SearchOutlined,
 } from '@ant-design/icons';
-import type { Category, Literature, Tag } from '@/types';
+import type { Literature } from '@/types';
 import {
   batchDeleteResources,
   createLiterature,
   deleteLiterature,
-  fetchCategories,
   fetchLiteratures,
-  fetchTags,
   getLiterature,
   updateLiterature,
 } from '@/services/api';
@@ -52,21 +48,7 @@ const PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_ALIASES = 20;
 
-/** 「未填写分类」哨兵值（后端解析为 category_id IS NULL）。 */
-const UNCATEGORIZED_VALUE = '__none__';
-const MAX_TAGS = 20;
-
 // ── 工具 ──────────────────────────────────────────────────────────────────────
-
-/** 把后端嵌套分类转成 TreeSelect 数据。 */
-function toTreeSelectData(nodes: Category[]): TreeDataNode[] {
-  return nodes.map((node) => ({
-    key: node.id,
-    title: node.name,
-    value: node.id,
-    children: node.children?.length ? toTreeSelectData(node.children) : undefined,
-  }));
-}
 
 /** 同时兼容 AppException {message} 与 HTTPException {detail}。 */
 function pickErrorMessage(err: unknown, fallback: string): string {
@@ -99,13 +81,11 @@ function TextOrDash({ value }: { value: string }) {
 interface LiteratureFormValues {
   name: string;
   aliases: string[];
-  category_id?: string | null;
   author: string;
   dynasty: string;
   summary: string;
   content: string;
   source: string;
-  tag_ids: string[];
 }
 
 type ModalMode = 'create' | 'edit';
@@ -128,12 +108,6 @@ export default function LiteraturesPage() {
   // 筛选
   const [keyword, setKeyword] = useState('');
   const initialQueryRef = useRef(false);
-  const [categoryId, setCategoryId] = useState<string | undefined>(undefined);
-  const [tagId, setTagId] = useState<string | undefined>(undefined);
-
-  // 分类树 / 标签选项
-  const [categoryTree, setCategoryTree] = useState<Category[]>([]);
-  const [allTags, setAllTags] = useState<Tag[]>([]);
 
   // 详情 Drawer（详情独立通过 GET /literatures/{id} 获取）
   const [detail, setDetail] = useState<Literature | null>(null);
@@ -152,16 +126,11 @@ export default function LiteraturesPage() {
 
   const loadLiteratures = async (overrides?: {
     keyword?: string;
-    categoryId?: string;
-    tagId?: string;
     current?: number;
     pageSize?: number;
   }) => {
     // overrides 用于重置等场景：state 已 set 但闭包尚未更新时，显式传入新值
     const useKeyword = overrides?.keyword ?? keyword;
-    const useCategoryId =
-      overrides && 'categoryId' in overrides ? overrides.categoryId : categoryId;
-    const useTagId = overrides && 'tagId' in overrides ? overrides.tagId : tagId;
     const useCurrent = overrides?.current ?? current;
     const usePageSize = overrides?.pageSize ?? pageSize;
     // BUG-048：快速翻页/改条件时旧慢响应覆盖新数据与 total → 丢弃过期响应
@@ -171,8 +140,6 @@ export default function LiteraturesPage() {
       const offset = (useCurrent - 1) * usePageSize;
       const resp = await fetchLiteratures({
         keyword: useKeyword || undefined,
-        category_id: useCategoryId,
-        tag_id: useTagId,
         limit: usePageSize,
         offset,
       });
@@ -186,24 +153,6 @@ export default function LiteraturesPage() {
     }
   };
 
-  const loadCategories = async () => {
-    try {
-      const tree = await fetchCategories({ resource_type: 'literature', tree: true });
-      setCategoryTree(tree);
-    } catch {
-      message.error('分类加载失败');
-    }
-  };
-
-  const loadTags = async () => {
-    try {
-      const list = await fetchTags();
-      setAllTags(list);
-    } catch {
-      message.error('标签加载失败');
-    }
-  };
-
   useEffect(() => {
     const overrides = !initialQueryRef.current
       ? (() => {
@@ -211,18 +160,12 @@ export default function LiteraturesPage() {
           const kw = new URLSearchParams(window.location.search).get('keyword');
           if (!kw) return undefined;
           setKeyword(kw);
-          return { keyword: kw, categoryId: undefined, tagId: undefined, current: 1, pageSize };
+          return { keyword: kw, current: 1, pageSize };
         })()
       : undefined;
     void loadLiteratures(overrides);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current, pageSize]);
-
-  useEffect(() => {
-    void loadCategories();
-    void loadTags();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   // ── 查询操作 ──────────────────────────────────────────────────────────────
 
@@ -230,7 +173,7 @@ export default function LiteraturesPage() {
   // 一次请求（双发）。改为：已在第 1 页则显式带条件查询，否则只切页码由 effect 加载。
   const onSearch = () => {
     if (current === 1) {
-      void loadLiteratures({ keyword, categoryId, tagId, current: 1, pageSize });
+      void loadLiteratures({ keyword, current: 1, pageSize });
     } else {
       setCurrent(1);
     }
@@ -238,14 +181,10 @@ export default function LiteraturesPage() {
 
   const onReset = () => {
     setKeyword('');
-    setCategoryId(undefined);
-    setTagId(undefined);
     if (current === 1) {
       // 显式传入空条件，避免 setState 后闭包内仍是旧筛选值
       void loadLiteratures({
         keyword: '',
-        categoryId: undefined,
-        tagId: undefined,
         current: 1,
       });
     } else {
@@ -277,13 +216,11 @@ export default function LiteraturesPage() {
     form.setFieldsValue({
       name: '',
       aliases: [],
-      category_id: null,
       author: '',
       dynasty: '',
       summary: '',
       content: '',
       source: '',
-      tag_ids: [],
     });
     setModalOpen(true);
   };
@@ -301,13 +238,11 @@ export default function LiteraturesPage() {
         form.setFieldsValue({
           name: editTarget.name,
           aliases: editTarget.aliases,
-          category_id: editTarget.category_id,
           author: editTarget.author,
           dynasty: editTarget.dynasty,
           summary: editTarget.summary,
           content: editTarget.content,
           source: editTarget.source,
-          tag_ids: editTarget.tags.map((t) => t.id),
         });
       });
     }
@@ -318,17 +253,14 @@ export default function LiteraturesPage() {
       const values = await form.validateFields();
       setSubmitting(true);
 
-      // tag_ids 始终完整提交：清空标签时必须发送 []，不能被 Form 忽略
       const payload = {
         name: values.name.trim(),
         aliases: values.aliases ?? [],
-        category_id: values.category_id ?? null,
         author: values.author ?? '',
         dynasty: values.dynasty ?? '',
         summary: values.summary ?? '',
         content: values.content ?? '',
         source: values.source ?? '',
-        tag_ids: values.tag_ids ?? [],
       };
 
       if (modalMode === 'edit' && editTarget) {
@@ -420,31 +352,6 @@ export default function LiteraturesPage() {
       key: 'dynasty',
       width: 90,
       render: (v: string) => <TextOrDash value={v} />,
-    },
-    {
-      title: '分类',
-      dataIndex: 'category',
-      key: 'category',
-      width: 120,
-      render: (_: unknown, row: Literature) => row.category?.name ?? '—',
-    },
-    {
-      title: '标签',
-      dataIndex: 'tags',
-      key: 'tags',
-      width: 180,
-      render: (_: unknown, row: Literature) =>
-        row.tags.length === 0 ? (
-          <Typography.Text type="secondary">—</Typography.Text>
-        ) : (
-          <Space size={[4, 4]} wrap>
-            {row.tags.map((t) => (
-              <AntTag key={t.id} color={t.color || undefined}>
-                {t.name}
-              </AntTag>
-            ))}
-          </Space>
-        ),
     },
     {
       title: '来源',
@@ -542,37 +449,14 @@ export default function LiteraturesPage() {
     </Space>
   );
 
-  // ── 标签 Select 选项 ──────────────────────────────────────────────────────
-
-  const tagOptions = allTags.map((t) => ({
-    label: (
-      <Space size={6}>
-        <span
-          style={{
-            display: 'inline-block',
-            width: 12,
-            height: 12,
-            borderRadius: 3,
-            background: t.color || 'transparent',
-            border: '1px solid rgba(128,128,128,0.4)',
-          }}
-        />
-        {t.name}
-      </Space>
-    ),
-    value: t.id,
-  }));
-
   const formInitial: LiteratureFormValues = {
     name: '',
     aliases: [],
-    category_id: null,
     author: '',
     dynasty: '',
     summary: '',
     content: '',
     source: '',
-    tag_ids: [],
   };
 
   return (
@@ -588,26 +472,6 @@ export default function LiteraturesPage() {
             onChange={(e) => setKeyword(e.target.value)}
             onSearch={onSearch}
             prefix={<SearchOutlined />}
-          />
-          <TreeSelect
-            placeholder="按分类筛选"
-            allowClear
-            style={{ width: 220 }}
-            treeData={[
-              { title: '未填写分类', value: UNCATEGORIZED_VALUE },
-              ...toTreeSelectData(categoryTree),
-            ]}
-            treeDefaultExpandAll
-            value={categoryId}
-            onChange={(v) => setCategoryId(v ?? undefined)}
-          />
-          <Select
-            placeholder="按标签筛选"
-            allowClear
-            style={{ width: 220 }}
-            options={tagOptions}
-            value={tagId}
-            onChange={(v) => setTagId(v ?? undefined)}
           />
           <Button type="primary" onClick={onSearch}>
             查询
@@ -664,9 +528,6 @@ export default function LiteraturesPage() {
               <Descriptions.Item label="别名">
                 <TagList items={detail.aliases} />
               </Descriptions.Item>
-              <Descriptions.Item label="分类">
-                {detail.category?.name ?? '—'}
-              </Descriptions.Item>
               <Descriptions.Item label="作者">
                 <TranslatableField label="作者" value={detail.author} />
               </Descriptions.Item>
@@ -681,19 +542,6 @@ export default function LiteraturesPage() {
               </Descriptions.Item>
               <Descriptions.Item label="来源">
                 <TranslatableField label="来源" value={detail.source} />
-              </Descriptions.Item>
-              <Descriptions.Item label="标签">
-                <Space size={[4, 4]} wrap>
-                  {detail.tags.length === 0 ? (
-                    <Typography.Text type="secondary">—</Typography.Text>
-                  ) : (
-                    detail.tags.map((t) => (
-                      <AntTag key={t.id} color={t.color || undefined}>
-                        {t.name}
-                      </AntTag>
-                    ))
-                  )}
-                </Space>
               </Descriptions.Item>
               <Descriptions.Item label="创建时间">
                 {detail.created_at
@@ -764,15 +612,6 @@ export default function LiteraturesPage() {
             />
           </Form.Item>
 
-          <Form.Item name="category_id" label="分类">
-            <TreeSelect
-              treeData={toTreeSelectData(categoryTree)}
-              allowClear
-              placeholder="选择文献分类"
-              treeDefaultExpandAll
-            />
-          </Form.Item>
-
           <Space size="middle" style={{ display: 'flex' }} align="start">
             <Form.Item
               name="author"
@@ -824,25 +663,6 @@ export default function LiteraturesPage() {
             <Input placeholder="如：人民卫生出版社校注本" />
           </Form.Item>
 
-          <Form.Item
-            name="tag_ids"
-            label="标签（最多 20 个）"
-            rules={[
-              {
-                validator: (_, v: string[]) =>
-                  !v || v.length <= MAX_TAGS
-                    ? Promise.resolve()
-                    : Promise.reject(new Error(`标签最多 ${MAX_TAGS} 个`)),
-              },
-            ]}
-          >
-            <Select
-              mode="multiple"
-              placeholder="选择标签"
-              options={tagOptions}
-              allowClear
-            />
-          </Form.Item>
         </Form>
       </Modal>
     </AppLayout>
