@@ -24,6 +24,8 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
+from src.core.file_spaces import DOCUMENT_SPACE, ROOT_FOLDER_SENTINEL, STRUCTURED_SPACE
+
 
 class Base(DeclarativeBase):
     pass
@@ -203,6 +205,320 @@ class Document(Base, TimestampMixin):
     vector_count: Mapped[int] = mapped_column(Integer, default=0)
     indexed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     index_error: Mapped[str] = mapped_column(Text, default="")
+    # ── 文件管理（第一阶段：文件夹）───────────────────────────────────────
+    # 所属空间：document = 普通文档（解析 + 向量化），structured = 结构化数据
+    # （只做文件管理，不入库检索）。存量行由 server_default 补成 document，
+    # 因此老数据与老页面行为完全不变，两个空间的列表天然不混。
+    space: Mapped[str] = mapped_column(
+        String(16),
+        default=DOCUMENT_SPACE,
+        server_default=DOCUMENT_SPACE,
+        index=True,
+    )
+    # 所在文件夹：NULL = 空间根目录。移动文件只改这一列，storage_path 保持不变，
+    # 所以整理目录不会重复上传、不会搬迁物理文件，也不可能丢文件。
+    folder_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("file_folders.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    # ── 内容指纹（第五阶段：重复文件提示）────────────────────────────────────
+    # 按原始字节 sha256，上传/替换时顺手算（内容本来已读进内存），NULL = 该列上线前的历史文件未检测。
+    # 只用于「同一知识库里有相同内容的文件」这一条提示，不做模糊匹配，也不据此删除或覆盖任何数据。
+    content_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+
+class FileFolder(Base, TimestampMixin):
+    """文件文件夹树：普通文档与结构化数据各一棵，互不混用。
+
+    设计要点：
+    - ``parent_id`` 自引用实现层级；``ondelete=RESTRICT`` 让数据库层兜住误删父目录。
+    - 同一 ``(space, parent_id)`` 下 ``name`` 唯一。根目录 parent_id 为 NULL，
+      SQL 唯一约束对 NULL 不生效，故用 COALESCE 表达式索引归一到零 UUID
+      （与 categories 表同一手法）。
+    - 不做软删除/回收站：删除接口要求目录为空（无子文件夹、无文件），
+      因此不存在「删掉的目录名占位」问题，也不引入多余状态机。
+    - 权限沿用文档自身的 KB 权限：文件夹本身只是组织信息，不承载数据可见性，
+      避免在本阶段过度设计一套目录 ACL。
+    """
+
+    __tablename__ = "file_folders"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    space: Mapped[str] = mapped_column(String(16), index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    parent_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("file_folders.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_file_folders_space_parent_name",
+            "space",
+            text(f"coalesce(parent_id, '{ROOT_FOLDER_SENTINEL}')"),
+            "name",
+            unique=True,
+        ),
+    )
+
+    parent: Mapped["FileFolder | None"] = relationship(
+        back_populates="children", remote_side=[id]
+    )
+    children: Mapped[list["FileFolder"]] = relationship(
+        back_populates="parent", passive_deletes=True
+    )
+
+
+# ── 结构化数据解析（第三阶段：非关联结构化数据）────────────────────────────────
+# 只服务 space=structured 的文件：一张文件级解析概览 + N 条独立知识记录。
+# 刻意与导入中心的 import_files/import_records/generic_entities 分开：那些表绑定
+# import_jobs（按批次幂等、映射到业务表），语义与本阶段「每个文件独立解析」不符。
+# 这里的 doc_id 外键用 CASCADE，所以删除文件时解析结果随之清理，不需要额外的级联代码。
+
+
+STRUCTURED_PARSE_PENDING = "pending"
+STRUCTURED_PARSE_PARSING = "parsing"
+STRUCTURED_PARSE_SUCCESS = "success"
+STRUCTURED_PARSE_FAILED = "failed"
+
+# 第六阶段：结构化知识进入统一向量索引后的状态（与 documents.index_status 同口径）
+VECTOR_STATUS_PENDING = "pending"
+VECTOR_STATUS_INDEXING = "indexing"
+VECTOR_STATUS_COMPLETED = "completed"
+VECTOR_STATUS_FAILED = "failed"
+
+
+class StructuredParse(Base, TimestampMixin):
+    """一个结构化数据文件的解析结果概览（字段识别 + 记录统计）。
+
+    状态机：pending → parsing → success / failed。
+    ``failed`` 只更新本行的状态与错误信息，**不动旧记录**，所以新一次解析失败
+    不会破坏上一份可用的解析结果。
+    """
+
+    __tablename__ = "structured_parses"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    # 一个文件一份解析结果；文件彻底删除时级联清理（回收站 purge / 过期清理）
+    doc_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), unique=True, index=True
+    )
+    # 冗余 kb_id：与 chunks 同样做法，检索/权限校验无需回表 documents
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
+    )
+    status: Mapped[str] = mapped_column(String(16), default=STRUCTURED_PARSE_PENDING, index=True)
+    # 识别出的实际格式：csv / tsv / xlsx / json（与 documents.file_type 可能不同名）
+    detected_format: Mapped[str] = mapped_column(String(16), default="")
+    # 文本类文件识别到的编码（utf-8 / gbk …），二进制格式留空
+    encoding: Mapped[str] = mapped_column(String(32), default="")
+    # 字段清单：[{"name","type","null_count","sheet","note"}]，完全来自文件本身，不预设
+    fields: Mapped[list] = mapped_column(JSONB, default=list)
+    record_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 最近一次解析实际读取的数据行数（失败时是失败前已读取的行数）
+    read_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 最近一次解析失败时未能写入的行数；成功恒为 0
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 整行为空 / 无法构成记录的行数
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 含空值或列数异常的记录数（预览页据此提示）
+    anomaly_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 兼容旧数据/旧接口：当前没有业务行数上限，新解析恒为 False
+    truncated: Mapped[bool] = mapped_column(default=False)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    parsed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 第六阶段：本文件的记录是否已写入统一向量索引（pending/indexing/completed/failed）
+    vector_status: Mapped[str] = mapped_column(String(16), default=VECTOR_STATUS_PENDING)
+    vector_count: Mapped[int] = mapped_column(Integer, default=0)
+    vector_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    vector_error: Mapped[str] = mapped_column(Text, default="")
+    vectorized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class StructuredRecord(Base, TimestampMixin):
+    """一条独立知识记录：由文件中的一行（或 JSON 中一个对象）动态生成。
+
+    - ``payload`` 原样保留字段与值：不转型、不翻译、不丢字段（类型推断只写在
+      StructuredParse.fields 里，不改数据本身）。
+    - ``knowledge_text`` 是按实际字段拼出的可读文本（如
+      「名称：黄芪；性味：甘，微温。」），空值字段不参与拼接。
+    - 来源追溯：doc_id / file_name（回表 documents）+ folder_id（回表目录链）
+      + row_no / sheet_name / json_path 定位到原始行或 JSON 路径。
+    - 不加唯一约束：每次成功解析是「整份替换」（同一事务内先删旧再插新），
+      XLSX 多工作表的行号还会各自从 1 开始，(doc_id, row_no) 本身并不唯一。
+    """
+
+    __tablename__ = "structured_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    doc_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
+    )
+    # 文件内的生成顺序（0 基）：分页预览按它排序。
+    # 不能直接用 row_no 排序——XLSX 每个工作表的行号各自从 1 开始，按行号排会把
+    # 不同工作表的行混在一起；seq_no 保证「所见顺序 = 文件顺序」。
+    seq_no: Mapped[int] = mapped_column(Integer, default=0)
+    # 原始行号（CSV/TSV/XLSX，1 基，含表头与空行的真实位置）
+    row_no: Mapped[int] = mapped_column(Integer, default=0)
+    sheet_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # JSON 定位路径（如 $[3]、$.herbs.黄芪）；CSV/TSV/XLSX 留空
+    json_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # 记录在文件内的展示标签（JSON 顶层对象的键名等），不写进 payload
+    record_label: Mapped[str] = mapped_column(String(255), default="")
+    payload: Mapped[dict] = mapped_column(JSONB, default=dict)
+    knowledge_text: Mapped[str] = mapped_column(Text, default="")
+    # 该记录的空值字段与异常说明：["字段「性味」为空", "列数少于表头"]
+    anomalies: Mapped[list] = mapped_column(JSONB, default=list)
+
+    __table_args__ = (
+        # 预览按文件内原始顺序分页浏览
+        Index("ix_structured_records_doc_seq", "doc_id", "seq_no"),
+    )
+
+
+# ── 关联结构化数据（第四阶段：多个文件之间的关系）──────────────────────────────
+# 与第三阶段的边界：第三阶段「一个文件独立解析」，本阶段「多个文件作为一个完整文件组」
+# 处理。两套表互不复用：structured_parses / structured_records 仍只描述单文件结果，
+# 本阶段只**读取**它们（不重新解析文件，也不改动非关联数据的任何行为）。
+#
+# 与导入中心的 import_jobs / import_files / import_records 也刻意分开：那套表服务
+# 「导入到业务表（herbs/prescriptions…）」，本阶段不写业务表，只生成关联知识记录。
+#
+# RAG 边界（本阶段硬约束）：这三张表只落 PostgreSQL，不调用 Embedding、不写 Milvus，
+# 也不碰 documents.parse_status / chunks；统一向量化留到第六阶段。
+
+
+STRUCTURED_GROUP_DRAFT = "draft"
+STRUCTURED_GROUP_VALIDATED = "validated"
+STRUCTURED_GROUP_CONFIRMED = "confirmed"
+# 组内文件被替换或删除：既有正式结果不再可信，必须重新校验并由用户再次确认
+STRUCTURED_GROUP_STALE = "stale"
+
+# 关联类型（one_to_one / one_to_many / many_to_one / many_to_many）定义在
+# src/utils/structured_relation.py，那里是唯一来源，避免两处常量漂移。
+
+
+class StructuredGroup(Base, TimestampMixin):
+    """一个关联数据文件组 = 一个独立的关联导入任务。
+
+    状态机：draft（关系未确认）→ validated（已校验）→ confirmed（已生成正式记录）；
+    组内文件替换/删除会把已确认的组打成 stale，stale 状态下不能直接算正式结果。
+
+    - ``relations``：关系配置列表，每项含 from/to（doc_id + 字段）、kind、
+      origin（suggested 推测 / manual 用户选择）、confirmed（用户是否确认）、
+      confidence 与 reason、stats（匹配/未匹配/重复计数）。
+      **推测结果默认 confirmed=False**，未经用户确认不参与正式生成。
+    - ``validation``：最近一次校验报告（问题清单 + 每项关系的统计），只是快照，
+      文件替换后置空，需重新校验。
+    """
+
+    __tablename__ = "structured_groups"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
+    )
+    name: Mapped[str] = mapped_column(String(255), default="")
+    status: Mapped[str] = mapped_column(
+        String(16), default=STRUCTURED_GROUP_DRAFT, index=True
+    )
+    relations: Mapped[list] = mapped_column(JSONB, default=list)
+    validation: Mapped[dict] = mapped_column(JSONB, default=dict)
+    # 正式关联记录数（仅 confirmed 时有意义；stale 保留数字供对比，页面按状态区分展示）
+    record_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    validated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # 第六阶段：关联记录是否已写入统一向量索引（仅 confirmed 时才允许存在向量）
+    vector_status: Mapped[str] = mapped_column(String(16), default=VECTOR_STATUS_PENDING)
+    vector_count: Mapped[int] = mapped_column(Integer, default=0)
+    vector_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    vector_error: Mapped[str] = mapped_column(Text, default="")
+    vectorized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+
+class StructuredGroupFile(Base, TimestampMixin):
+    """文件组的一个成员文件（关系图的节点）。
+
+    ``doc_id`` FK CASCADE：彻底删除文件时这行随之消失，路由层负责把该组打成 stale，
+    所以不会留下指向不存在文件的关系（无效关系）。``alias`` 是用户给该文件起的角色名
+    （如「学生表」「选课表」），只影响关联记录文本可读性，不改原始数据。
+    """
+
+    __tablename__ = "structured_group_files"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_groups.id", ondelete="CASCADE"), index=True
+    )
+    doc_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("documents.id", ondelete="CASCADE"), index=True
+    )
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
+    )
+    # 组内顺序（决定关联记录里各文件字段的展示顺序）
+    order_no: Mapped[int] = mapped_column(Integer, default=0)
+    alias: Mapped[str] = mapped_column(String(64), default="")
+    # 建组时的文件名快照：文件后来重命名/移目录，仍能看出当时用的是哪份数据
+    file_name: Mapped[str] = mapped_column(String(255), default="")
+
+    __table_args__ = (
+        # 同一文件在一个文件组里只允许出现一次（避免重复关系与重复关联记录）
+        UniqueConstraint("group_id", "doc_id", name="uq_structured_group_files_group_doc"),
+    )
+
+
+class StructuredGroupRecord(Base, TimestampMixin):
+    """一条关联知识记录：由已确认关系把多个文件的记录连起来后生成。
+
+    与第三阶段的 ``structured_records``（单文件一行一条）不同，这里一条记录可能横跨
+    学生表 + 选课表 + 课程表，因此：
+
+    - ``knowledge_text``：连贯的关系文本（如「学生：张三；选修课程：高等数学；成绩：90。」），
+      不是把关系表某一行孤立翻译，也保留一对多 / 多对多的完整上下文。
+    - ``parts``：各参与文件的原始字段与值（不改数据），用于详情展示。
+    - ``sources``：每个参与记录的追溯坐标（doc_id / file_name / record_id / row_no /
+      sheet_name / json_path / 参与关联的字段与值）。
+    - ``anomalies``：未匹配、重复主键等提示；**异常记录同样生成记录**，只是带上提示，
+      不为了「关联成功」而丢弃或修改原始记录。
+    """
+
+    __tablename__ = "structured_group_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
+    group_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("structured_groups.id", ondelete="CASCADE"), index=True
+    )
+    kb_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
+    )
+    seq_no: Mapped[int] = mapped_column(Integer, default=0)
+    # 该条记录的主文件（关系图的起点）；文件被删时不阻塞删除，故不加外键
+    anchor_doc_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    anchor_record_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    knowledge_text: Mapped[str] = mapped_column(Text, default="")
+    parts: Mapped[list] = mapped_column(JSONB, default=list)
+    sources: Mapped[list] = mapped_column(JSONB, default=list)
+    relation_ids: Mapped[list] = mapped_column(JSONB, default=list)
+    anomalies: Mapped[list] = mapped_column(JSONB, default=list)
+
+    __table_args__ = (
+        Index("ix_structured_group_records_group_seq", "group_id", "seq_no"),
+    )
 
 
 class ImportJob(Base, TimestampMixin):

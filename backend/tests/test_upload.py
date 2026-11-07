@@ -114,19 +114,23 @@ def test_upload_rejects_invalid_extension(client):
     assert "不支持" in resp.json()["message"]
 
 
-def test_upload_rejects_unparseable_office_formats(client):
-    """未安装 Docling 时，PPTX/XLSX 不应被接受为可解析文档。"""
-    for name, content in (
-        ("slides.pptx", b"PK\x03\x04fake-pptx"),
-        ("table.xlsx", b"PK\x03\x04fake-xlsx"),
-    ):
-        resp = client.post(
-            "/api/v1/documents/upload",
-            data={"kb_id": str(uuid.uuid4())},
-            files={"file": (name, content, "application/octet-stream")},
-        )
-        assert resp.status_code == 400, resp.text
-        assert "仅支持 PDF/DOCX/TXT/MD" in resp.json()["message"]
+def test_upload_whitelist_covers_preview_formats():
+    """XLSX/PPTX/CSV/TSV/图片由内置抽取器支持，不再依赖 Docling。"""
+    from src.application.document_service import ALLOWED_EXTENSIONS
+
+    assert {
+        "pdf",
+        "docx",
+        "xlsx",
+        "pptx",
+        "txt",
+        "md",
+        "csv",
+        "tsv",
+        "png",
+        "jpg",
+    } <= ALLOWED_EXTENSIONS
+    assert "exe" not in ALLOWED_EXTENSIONS
 
 
 def test_upload_rejects_empty_file(client):

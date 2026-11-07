@@ -88,6 +88,19 @@ class Citation(BaseModel):
     # 缺失时（如历史消息 / 旧 fixture / 缺 dense 的命中）保持 None，前端
     # EvidencePanel 自动 fallback 到 ev.score 展示，UI 行为不变（纯增量字段）。
     relevance_score: float | None = None
+    # 第六阶段：结构化来源追溯（普通文档 / 资源 / KG 证据保持 None）。
+    # source_kind = structured 时携带 document_id / record_id / locate / fields；
+    # source_kind = structured_group 时额外携带 group_id / member_files / relations。
+    source_doc_id: str | None = None  # 向量分组键（sr:<doc_id> / sgr:<group_id>）
+    document_id: str | None = None  # 原始结构化文件 ID
+    record_id: str | None = None  # 知识记录 ID（结构化记录 / 关联记录）
+    locate: str | None = None  # 行号或 JSON 路径
+    fields: dict | None = None  # 记录字段与值（截断展示）
+    group_id: str | None = None  # 关联文件组 ID
+    group_name: str | None = None
+    member_files: list[dict] | None = None  # 参与文件 [{doc_id, file_name, alias}]
+    relations: list[dict] | None = None  # 关系 [{id, kind, from_field, to_field, ...}]
+    relation_ids: list[str] | None = None
 
 
 class Evidence(Citation):

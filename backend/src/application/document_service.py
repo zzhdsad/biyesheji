@@ -1,5 +1,6 @@
 """文档用例服务：上传校验、文件存储、入库。"""
 
+import hashlib
 import uuid
 from pathlib import Path
 
@@ -9,7 +10,13 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
+from src.core.document_formats import ALLOWED_EXTENSIONS
 from src.core.exceptions import AppException, NotFoundError, PermissionDeniedError
+from src.core.file_spaces import (
+    DOCUMENT_SPACE,
+    PARSE_STATUS_SKIPPED,
+    is_parse_enabled,
+)
 from src.core.runtime_config import get_system_value
 from src.core.source_meta import (
     credibility_for,
@@ -19,9 +26,8 @@ from src.core.source_meta import (
 from src.domain.models import Document, KnowledgeBase, User
 from src.infrastructure.storage import BaseStorage, get_storage
 
-# 当前解析器实际支持：PDF / DOCX / TXT / MD（与前端 accept 保持一致）
-# PPTX/XLSX 需要 Docling；为避免“上传成功但入库乱码”，暂不开放。
-ALLOWED_EXTENSIONS = {"pdf", "docx", "txt", "md"}
+# 上传白名单与解析/预览能力统一由 src.core.document_formats 维护
+# （TXT/MD/CSV/TSV/JSON/HTML 文本 + PDF/DOCX/XLSX/PPTX + 常见图片）
 
 
 class DocumentService:
@@ -38,6 +44,8 @@ class DocumentService:
         user: User | None = None,
         source_type: str | None = None,
         era: str | None = None,
+        space: str = DOCUMENT_SPACE,
+        folder_id: uuid.UUID | None = None,
     ) -> Document:
         """上传文档：校验 → 存储 → 入库，返回 documents 记录。
 
@@ -67,7 +75,11 @@ class DocumentService:
         filename = file.filename or ""
         suffix = Path(filename).suffix.lstrip(".").lower()
         if suffix not in ALLOWED_EXTENSIONS:
-            raise AppException(400, f"不支持的文件类型 .{suffix}，仅支持 PDF/DOCX/TXT/MD")
+            raise AppException(
+                400,
+                f"不支持的文件类型 .{suffix}，仅支持 PDF/DOCX/XLSX/PPTX/"
+                "TXT/MD/CSV/TSV/JSON/HTML 及常见图片格式",
+            )
 
         # 2. 大小校验（先落盘到临时文件，read 进内存判断；超大文件分片上传见 PRD 8）
         content = await file.read()
@@ -94,10 +106,16 @@ class DocumentService:
         # 5. 存储原始文件（本地 / MinIO，由 STORAGE_BACKEND 决定）
         doc_id = uuid.uuid4()
         file_key = f"{kb_id}/{doc_id}.{suffix}"
+        # 内容指纹：字节已经在内存里（大小校验时读过），顺手算一次，不额外 IO。
+        # 只用于「同库内容完全相同」的提示，不参与任何删除、覆盖或合并判断。
+        content_hash = hashlib.sha256(content).hexdigest()
         self.storage.save(file_key, content)
 
         # 6. 写入 documents 表（parse_status=pending，待 Celery 异步解析）
         # 可信度等级由来源类型固定映射推导，禁止手工传入
+        # 结构化数据空间本阶段不进解析流水线：parse_status 如实记为 skipped，
+        # 既不显示「待解析」误导用户，也不冒充 completed。
+        parse_status = "pending" if is_parse_enabled(space) else PARSE_STATUS_SKIPPED
         doc = Document(
             id=doc_id,
             kb_id=kb_id,
@@ -105,10 +123,13 @@ class DocumentService:
             file_type=suffix,
             file_size=len(content),
             storage_path=file_key,
-            parse_status="pending",
+            parse_status=parse_status,
             source_type=source_type,
             era=era,
             credibility_level=credibility_for(source_type),
+            space=space,
+            folder_id=folder_id,
+            content_hash=content_hash,
         )
         try:
             self.db.add(doc)
@@ -118,6 +139,8 @@ class DocumentService:
             self.storage.delete(file_key)  # 入库失败清理文件，避免孤儿
             raise
         await self.db.refresh(doc)
+        # 响应里带上「同库已存在相同内容」的文件名（非表列，只用于提示，见 _find_duplicates）
+        doc.duplicate_names = await self.find_duplicates(doc)
 
         logger.info(
             f"文档上传成功 doc_id={doc.id} kb_id={kb_id} "
@@ -125,6 +148,29 @@ class DocumentService:
         )
         # TODO: 派发 Celery 解析任务（pending → parsing → success/failed）
         return doc
+
+    async def find_duplicates(self, doc: Document) -> list[str]:
+        """同一知识库内内容完全相同的其他文件名（最多 5 个，仅提示用）。
+
+        判定依据只有 sha256：文件名相同不代表内容相同，内容不同也不会被误报。
+        历史文件 content_hash 为 NULL，视为「未检测」，不参与比较。
+        """
+        if not getattr(doc, "content_hash", None):
+            return []
+        rows = (
+            await self.db.scalars(
+                select(Document.file_name)
+                .where(
+                    Document.kb_id == doc.kb_id,
+                    Document.content_hash == doc.content_hash,
+                    Document.id != doc.id,
+                    Document.deleted_at.is_(None),
+                )
+                .order_by(Document.created_at)
+                .limit(5)
+            )
+        ).all()
+        return list(rows)
 
     async def backfill_source(
         self,

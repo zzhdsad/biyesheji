@@ -1,6 +1,6 @@
-"""文档解析器：Docling 为主（PDF/DOCX → Markdown，保留标题层级），轻量库降级。
+"""文档解析器：Docling 为主（PDF/DOCX → Markdown，保留标题层级），轻量库/标准库兜底。
 
-TECH_DESIGN：Docling 为主 + PyPDF2/docx 降级；失败支持重试；
+支持 PDF/DOCX/XLSX/PPTX/TXT/MD/CSV/TSV/JSON/HTML；图片仅登记预览，不参与文本检索。
 扫描件 OCR 无法识别时提示用户上传可复制文本版本（AGENTS.md 约束）。
 """
 
@@ -8,6 +8,18 @@ import io
 from abc import ABC, abstractmethod
 
 from loguru import logger
+
+from src.core.document_formats import IMAGE_EXTENSIONS
+from src.infrastructure.document_extract import (
+    ExtractError,
+    extract_docx_blocks,
+    extract_html_text,
+    extract_pptx_slides,
+    extract_xlsx_sheets,
+    json_to_text,
+    parse_json_bytes,
+)
+from src.utils.text_encoding import TextDecodeError, decode_text
 
 
 class ParseError(Exception):
@@ -57,6 +69,10 @@ class DoclingParser(BaseParser):
         return cls._converter
 
     def parse(self, content: bytes, file_type: str) -> str:
+        # Docling 只负责 PDF/DOCX；纯文本/表格/PPTX/图片走降级解析器，
+        # 避免把不支持的格式交给 Docling 后报错或产出乱码。
+        if file_type not in ("pdf", "docx"):
+            return FallbackParser().parse(content, file_type)
         try:
             from docling.datamodel.base_models import DocumentStream
 
@@ -75,7 +91,8 @@ class DoclingParser(BaseParser):
 
 
 class FallbackParser(BaseParser):
-    """降级解析器：pypdf（PDF，按页保留页码）/ python-docx（DOCX）/ 直读（TXT）。"""
+    """降级解析器：pypdf（PDF 按页）/ python-docx（DOCX）/ openpyxl（XLSX）/
+    标准库（PPTX、JSON、HTML）/ 编码识别直读（TXT/MD/CSV/TSV）。"""
 
     def parse_pages(self, content: bytes, file_type: str) -> list[tuple[int | None, str]]:
         """PDF 按页返回 (page_num, text)；其他格式退化为单页。"""
@@ -89,7 +106,17 @@ class FallbackParser(BaseParser):
                 text = self._parse_pdf(content)
             elif file_type == "docx":
                 text = self._parse_docx(content)
-            else:  # txt / md
+            elif file_type == "xlsx":
+                text = self._parse_xlsx(content)
+            elif file_type == "pptx":
+                text = self._parse_pptx(content)
+            elif file_type == "json":
+                text = self._parse_json(content)
+            elif file_type == "html":
+                text = self._parse_html(content)
+            elif file_type in IMAGE_EXTENSIONS:
+                raise ParseError("图片文件仅支持在线预览，不参与文本解析")
+            else:  # txt / md / csv / tsv
                 text = self._decode_text(content)
             if not text.strip():
                 raise ParseError(
@@ -127,34 +154,69 @@ class FallbackParser(BaseParser):
 
     @staticmethod
     def _parse_docx(content: bytes) -> str:
-        from docx import Document as DocxDocument
-
-        doc = DocxDocument(io.BytesIO(content))
+        try:
+            blocks, _ = extract_docx_blocks(content)
+        except ExtractError as exc:
+            raise ParseError(str(exc)) from exc
         parts: list[str] = []
-        for para in doc.paragraphs:
-            text = para.text.strip()
-            if not text:
-                continue
-            style = (para.style.name or "").lower()
+        for block in blocks:
             # Heading 1/2/... → markdown 标题，保住结构感知切片能力
-            if style.startswith("heading"):
-                try:
-                    level = min(int(style.split()[-1]), 6)
-                except ValueError:
-                    level = 2
-                parts.append(f"{'#' * level} {text}")
+            if block["type"] == "heading" and block["level"]:
+                parts.append(f"{'#' * block['level']} {block['text']}")
             else:
-                parts.append(text)
+                parts.append(block["text"])
         return "\n\n".join(parts)
 
     @staticmethod
+    def _parse_xlsx(content: bytes) -> str:
+        try:
+            sheets, _ = extract_xlsx_sheets(content)
+        except ExtractError as exc:
+            raise ParseError(str(exc)) from exc
+        parts: list[str] = []
+        for sheet in sheets:
+            parts.append(f"# {sheet['name']}")
+            for row in sheet["rows"]:
+                parts.append(" | ".join(row))
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _parse_pptx(content: bytes) -> str:
+        try:
+            slides, _ = extract_pptx_slides(content)
+        except ExtractError as exc:
+            raise ParseError(str(exc)) from exc
+        parts: list[str] = []
+        for slide in slides:
+            parts.append(f"# 第 {slide['index']} 页")
+            parts.extend(slide["lines"])
+        return "\n\n".join(parts)
+
+    @staticmethod
+    def _parse_json(content: bytes) -> str:
+        """JSON → `字段路径 = 值` 行式文本，保留键名与层级供检索溯源。"""
+        try:
+            obj, _text = parse_json_bytes(content)
+        except ExtractError as exc:
+            raise ParseError(str(exc)) from exc
+        return json_to_text(obj)
+
+    @staticmethod
+    def _parse_html(content: bytes) -> str:
+        """HTML → 正文文本（脚本/样式不入库），标题转 markdown 以保留结构。"""
+        try:
+            return extract_html_text(content)
+        except ExtractError as exc:
+            raise ParseError(str(exc)) from exc
+
+    @staticmethod
     def _decode_text(content: bytes) -> str:
-        for encoding in ("utf-8", "gbk"):
-            try:
-                return content.decode(encoding)
-            except UnicodeDecodeError:
-                continue
-        raise ParseError("文本编码无法识别，请使用 UTF-8 编码的文件")
+        if b"\x00" in content:
+            raise ParseError("文件包含二进制内容，无法按文本解析")
+        try:
+            return decode_text(content)[0]
+        except TextDecodeError as exc:
+            raise ParseError(str(exc)) from exc
 
 
 def get_parser() -> BaseParser:

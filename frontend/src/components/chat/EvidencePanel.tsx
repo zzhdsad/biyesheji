@@ -144,6 +144,9 @@ function EvidenceContent({
 function cardLabel(ev: Evidence, token: ReturnType<typeof theme.useToken>['token']): ReactNode {
   const level = ev.evidence_level ?? 'insufficient';
   const href = sourceHref(ev);
+  // 结构化 / 关联数据的来源名是文件名 / 文件组名，不做书名号化
+  const isStructured =
+    ev.source_kind === 'structured' || ev.source_kind === 'structured_group';
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: 8 }}>
       <Tag color="blue" style={{ margin: 0, fontWeight: 500 }}>
@@ -152,12 +155,19 @@ function cardLabel(ev: Evidence, token: ReturnType<typeof theme.useToken>['token
       <FileTextOutlined style={{ color: token.colorPrimary }} />
       <Text strong style={{ marginRight: 4 }}>
         {/* 问题6：文件名产品化（"普济本事方.txt" → 《普济本事方》） */}
-        {formatSourceName(ev.source_name || ev.doc_name)}
+        {isStructured
+          ? ev.source_name || ev.group_name || ev.doc_name
+          : formatSourceName(ev.source_name || ev.doc_name)}
       </Text>
       <Tag style={{ margin: 0, fontSize: 12 }}>{ev.source_label}</Tag>
       <LevelTag level={level} />
       {ev.page_num != null && ev.page_num > 0 && (
         <Text type="secondary">第 {ev.page_num} 页</Text>
+      )}
+      {isStructured && ev.locate && (
+        <Text type="secondary" style={{ fontSize: 12 }}>
+          · {ev.locate}
+        </Text>
       )}
       {href && (
         <Button
@@ -182,7 +192,7 @@ function cardLabel(ev: Evidence, token: ReturnType<typeof theme.useToken>['token
           {ev.credibility_level != null ? `·Lv${ev.credibility_level}` : ''}
         </Tag>
       )}
-      {ev.title_path && (
+      {!isStructured && ev.title_path && (
         <Text type="secondary" style={{ fontSize: 12 }}>
           · {ev.title_path}
         </Text>
@@ -207,6 +217,74 @@ function cardLabel(ev: Evidence, token: ReturnType<typeof theme.useToken>['token
           </Tag>
         );
       })()}
+    </div>
+  );
+}
+
+/**
+ * 结构化 / 关联数据的来源追溯（第六阶段）。
+ *
+ * 只展示后端从 PostgreSQL 回填的真实字段：原始文件或文件组、知识记录 ID、
+ * 行号 / JSON 路径 / 参与文件位置、字段与值、参与文件、关联关系。
+ * 普通文档仍沿用原来的「原始文件」提示，不受影响。
+ */
+function StructuredOrigin({ ev }: { ev: Evidence }) {
+  const fields = Object.entries(ev.fields ?? {});
+  const members = ev.member_files ?? [];
+  const relations = ev.relations ?? [];
+  const textStyle = { fontSize: 12, display: 'block' } as const;
+  return (
+    <div style={{ marginTop: 8 }}>
+      {ev.source_kind === 'structured' ? (
+        <Text type="secondary" style={textStyle}>
+          原始文件：{ev.doc_name}
+          {ev.document_id ? `（文件 ID ${ev.document_id}）` : ''}
+        </Text>
+      ) : (
+        <Text type="secondary" style={textStyle}>
+          文件组：{ev.group_name || ev.doc_name}
+          {ev.group_id ? `（ID ${ev.group_id}）` : ''}
+        </Text>
+      )}
+      {ev.record_id && (
+        <Text type="secondary" style={textStyle}>
+          知识记录 ID：{ev.record_id}
+        </Text>
+      )}
+      {ev.locate && (
+        <Text type="secondary" style={textStyle}>
+          原始位置：{ev.locate}
+        </Text>
+      )}
+      {fields.length > 0 && (
+        <Text type="secondary" style={{ ...textStyle, whiteSpace: 'pre-wrap' }}>
+          字段与值：
+          {fields
+            .slice(0, 12)
+            .map(([key, value]) => `${key}=${String(value)}`)
+            .join('；')}
+          {fields.length > 12 ? ' …' : ''}
+        </Text>
+      )}
+      {members.length > 0 && (
+        <Text type="secondary" style={textStyle}>
+          参与文件：
+          {members
+            .map((m) => m.alias || m.file_name || '文件')
+            .join('、')}
+        </Text>
+      )}
+      {relations.length > 0 && (
+        <Text type="secondary" style={textStyle}>
+          关联关系：
+          {relations
+            .map(
+              (r) =>
+                `${r.from_field ?? '?'} → ${r.to_field ?? '?'}${r.kind ? `（${r.kind}）` : ''}`,
+            )
+            .join('；')}
+        </Text>
+      )}
     </div>
   );
 }
@@ -306,6 +384,10 @@ export function EvidencePanel({
                           原始文件：{ev.doc_name}
                         </Text>
                       )}
+                    {(ev.source_kind === 'structured' ||
+                      ev.source_kind === 'structured_group') && (
+                      <StructuredOrigin ev={ev} />
+                    )}
                   </div>
                 ),
               })),

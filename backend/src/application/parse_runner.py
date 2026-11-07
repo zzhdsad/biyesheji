@@ -48,6 +48,7 @@ def run_parse_pipeline(doc_id: str) -> dict:
     from src.application.index_runner import run_vectorize
 
     result = run_parse(doc_id)
-    if result["parse_status"] == "success":
+    # 图片等无文本文档解析后为 success 但 0 切片，跳过向量化避免误报失败
+    if result["parse_status"] == "success" and result["chunk_count"] > 0:
         result = run_vectorize(doc_id)
     return result

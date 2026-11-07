@@ -90,23 +90,13 @@ describe('sourceHref（来源定位）', () => {
         source_kind: 'document',
         doc_id: 'doc-1',
         kb_id: 'kb-1',
-        doc_name: '伤寒论.pdf',
       }),
       '/documents?doc_id=doc-1&kb_id=kb-1',
     );
   });
 
-  it('资源来源按类型进入对应列表并按名称检索', () => {
-    assert.equal(
-      sourceHref({
-        source_kind: 'resource',
-        doc_id: 'hash',
-        resource_type: 'herb',
-        resource_name: '桂枝',
-        doc_name: '桂枝',
-      }),
-      '/herbs?keyword=%E6%A1%82%E6%9E%9D',
-    );
+  it('资源来源不再跳转已下线的资源页面', () => {
+    assert.equal(sourceHref({ source_kind: 'resource', doc_id: 'hash' }), null);
   });
 });
 

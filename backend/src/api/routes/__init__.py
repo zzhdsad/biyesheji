@@ -18,13 +18,12 @@ from src.api.routes import (
     chat,
     documents,
     feedbacks,
-    herbs,
+    folders,  # 第一阶段：文件与文件夹管理（普通文档 / 结构化数据两个空间）
     kg,  # 阶段十三：知识图谱（构建 / 统计 / 检索调试）
     knowledge_bases,
-    literatures,
-    prescriptions,
     settings,
-    theories,
+    structured,  # 第三阶段：非关联结构化数据（字段识别 / 记录预览 / 来源追溯）
+    structured_groups,  # 第四阶段：关联结构化数据（文件组 / 关系确认 / 关联记录）
     users,
 )
 from src.core.deps import get_current_user, require_password_changed
@@ -42,12 +41,11 @@ protected_router = APIRouter(
     dependencies=[Depends(get_current_user), Depends(require_password_changed)]
 )
 protected_router.include_router(documents.router)
+protected_router.include_router(folders.router)  # 文件夹树 + 目录路径
+protected_router.include_router(structured_groups.router)  # 关联数据文件组（先注册，避免 /structured/{doc_id} 抢先匹配）
+protected_router.include_router(structured.router)  # 结构化数据解析结果（只读 + 重新解析）
 protected_router.include_router(chat.router)
 protected_router.include_router(knowledge_bases.router)
-protected_router.include_router(herbs.router)  # TASK-003：中药管理
-protected_router.include_router(prescriptions.router)  # TASK-004：方剂管理
-protected_router.include_router(theories.router)  # TASK-005：中医理论管理
-protected_router.include_router(literatures.router)  # TASK-006：中医文献管理
 protected_router.include_router(kg.router)  # TASK-013：知识图谱
 protected_router.include_router(feedbacks.router)  # PRD §3.6：用户反馈收集
 protected_router.include_router(admin.router)  # PRD §5.2：系统仪表盘统计（仅 admin）

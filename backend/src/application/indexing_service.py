@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
 from src.core.exceptions import AppException, NotFoundError
+from src.core.file_spaces import is_parse_enabled
 from src.domain.models import (
     INDEX_STATUS_FAILED,
     INDEX_STATUS_INDEXED,
@@ -66,10 +67,22 @@ class IndexingService:
         Raises:
             NotFoundError: 文档不存在
             AppException: 409 状态非 success（切片未就绪）/ 422 向量化失败（状态已置 failed）
+
+        空间守卫：只有 ``space=document``（普通文档空间）的文档可被向量化。
+        结构化数据空间的文档在此直接拒绝，且**不回写 failed 状态**（保持
+        skipped 语义），避免误入向量库或污染解析状态。
         """
         doc = await self.db.get(Document, doc_id)
         if doc is None:
             raise NotFoundError("文档不存在")
+        if not is_parse_enabled(doc.space):
+            raise AppException(
+                400, f"文档所在空间（space={doc.space}）不参与解析与向量化"
+            )
+        # 回收站中的文件不再写入 Milvus：否则已删除内容仍会被检索命中，
+        # 且还原后向量与文件状态对不上（服务层兜底，不依赖路由入口校验）
+        if doc.deleted_at is not None:
+            raise AppException(400, "文件已在回收站中，无法向量化")
         # success（切片就绪）/ completed（重建向量）/ failed（向量化失败重试，切片保留）
         # 均可向量化；failed 但无切片时由下方"文档无切片"分支兜底报 422
         if doc.parse_status not in ("success", "completed", "failed"):

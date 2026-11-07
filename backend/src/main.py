@@ -32,6 +32,20 @@ async def lifespan(app: FastAPI):
         logger.info(f"运行时系统配置已预热：{cfg}")
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"运行时系统配置预热跳过：{exc}")
+    # 后台线程随进程结束消失，遗留的 indexing 会永久悬空：启动时在线程里只做
+    # 状态修复（有完整向量→completed，否则→pending），**不自动重新派发任务**。
+    try:
+        import threading
+
+        from src.application.structured_runner import recover_stale_vector_jobs
+
+        threading.Thread(
+            target=recover_stale_vector_jobs,
+            name="structured-vector-recover",
+            daemon=True,
+        ).start()
+    except Exception as exc:  # noqa: BLE001 - 恢复失败不能影响服务启动
+        logger.warning(f"结构化向量遗留状态修复未启动：{exc}")
     logger.info(f"{settings.APP_NAME} v{settings.VERSION} 启动完成（环境：{settings.ENV}）")
     yield
     logger.info("应用关闭")

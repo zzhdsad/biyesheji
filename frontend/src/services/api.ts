@@ -5,33 +5,36 @@ import type {
   Citation,
   Conversation,
   DocumentItem,
+  DocumentPreview,
+  DocumentProcessingInfo,
+  GroupProcessingInfo,
+  SaveDocumentResult,
+  StructuredParseInfo,
+  StructuredRecordDetail,
+  StructuredRecordPage,
+  StructuredGroup,
+  StructuredGroupDetail,
+  StructuredGroupRecordDetail,
+  StructuredGroupRecordPage,
+  StructuredGroupValidation,
+  StructuredRelation,
   EvidenceGroup,
   EvidenceSummary,
+  FileFolderItem,
+  FileSpace,
   QueryAnalysis,
   RouterDecision,
   GateDecision,
   HealthResponse,
   ReflectionDecision,
-  Herb,
-  HerbListResponse,
+  ReplaceDocumentResult,
   KBMember,
   KBMemberRole,
-  KBResource,
-  KBResourceListResponse,
-  KBResourceType,
   KnowledgeBase,
-  Literature,
-  LiteratureListResponse,
   MessageOut,
-  Prescription,
-  PrescriptionListResponse,
   Role,
-  SourceEra,
-  SourceType,
   SystemConfig,
   SystemConfigValues,
-  Theory,
-  TheoryListResponse,
   UserOut,
 } from '@/types';
 import { getToken, handleUnauthorized } from './token';
@@ -211,20 +214,88 @@ export async function fetchDocument(docId: string): Promise<DocumentItem> {
   return data;
 }
 
+/** 文档原始内容（带鉴权请求，前端取 Blob 在弹窗内预览或下载）。 */
+export async function fetchDocumentContent(docId: string): Promise<Blob> {
+  const { data } = await api.get<Blob>(`/documents/${docId}/content`, {
+    responseType: 'blob',
+    timeout: 120_000,
+  });
+  return data;
+}
+
+/** 站内预览数据：文本/表格结构化内容或 Office 抽取结果。 */
+export async function fetchDocumentPreview(docId: string): Promise<DocumentPreview> {
+  const { data } = await api.get<DocumentPreview>(`/documents/${docId}/preview`, {
+    timeout: 120_000,
+  });
+  return data;
+}
+
+/** 保存在线编辑内容（MD/TXT/CSV/TSV/JSON/HTML），后端会重新解析并更新向量索引。 */
+export async function saveDocumentContent(
+  docId: string,
+  content: string,
+  encoding?: string,
+): Promise<SaveDocumentResult> {
+  const { data } = await api.post<SaveDocumentResult>(`/documents/${docId}/content`, {
+    content,
+    ...(encoding ? { encoding } : {}),
+  });
+  return data;
+}
+
+/**
+ * 替换文档原始文件（POST /documents/{id}/replace）。
+ *
+ * 后端复用同一 storage_path 原子写盘并重置索引状态，文档 id 与知识库归属不变；
+ * 格式必须与原文档一致，校验或写入失败时原文件保持不变。
+ */
+export async function replaceDocument(
+  docId: string,
+  file: File,
+  onProgress?: (percent: number) => void,
+): Promise<ReplaceDocumentResult> {
+  const form = new FormData();
+  form.append('file', file);
+  const { data } = await api.post<ReplaceDocumentResult>(`/documents/${docId}/replace`, form, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    onUploadProgress: (e) => {
+      if (e.total && onProgress) onProgress(Math.round((e.loaded / e.total) * 100));
+    },
+    timeout: 120_000, // 大文件上传放宽超时
+  });
+  return data;
+}
+
 export interface DocumentPage {
   items: DocumentItem[];
   total: number;
 }
 
+/** 文档列表筛选参数（第一阶段文件管理：space / 目录）。 */
+export interface DocumentListParams {
+  kbId?: string;
+  /** 文件空间，默认 document；不传时后端也只返回普通文档 */
+  space?: FileSpace;
+  /** 只看该文件夹内的文件 */
+  folderId?: string | null;
+  /** true = 只看空间根目录（folder_id IS NULL），与 folderId 互斥 */
+  rootOnly?: boolean;
+  limit?: number;
+  offset?: number;
+}
+
 /** 文档分页列表：不传 limit 仍返回全量；响应头 X-Total-Count 给出总数。 */
 export async function fetchDocumentsPage(
-  kbId?: string,
-  limit?: number,
-  offset?: number,
+  params: DocumentListParams = {},
 ): Promise<DocumentPage> {
+  const { kbId, space, folderId, rootOnly, limit, offset } = params;
   const { data, headers } = await api.get<DocumentItem[]>('/documents', {
     params: {
       ...(kbId ? { kb_id: kbId } : {}),
+      ...(space ? { space } : {}),
+      ...(folderId ? { folder_id: folderId } : {}),
+      ...(rootOnly ? { root_only: true } : {}),
       ...(limit != null ? { limit } : {}),
       ...(offset != null ? { offset } : {}),
     },
@@ -234,24 +305,24 @@ export async function fetchDocumentsPage(
   return { items: data, total: Number.isFinite(total) ? total : data.length };
 }
 
-/** 上传时的来源可信度标注（credibility_level 不由前端传入，后端按类型自动推导）。 */
-export interface UploadSourceMeta {
-  sourceType?: SourceType | null;
-  era?: SourceEra | null;
-}
-
-/** 上传单个文档（multipart/form-data）。上传后后端异步派发解析任务。 */
+/**
+ * 上传单个文档（multipart/form-data）。
+ *
+ * - document 空间：上传后后端异步派发解析任务
+ * - structured 空间：只保存文件，不解析、不向量化
+ * - folderId：落进当前文件夹；不传 = 空间根目录
+ */
 export async function uploadDocument(
   file: File,
   kbId: string,
   onProgress?: (percent: number) => void,
-  sourceMeta?: UploadSourceMeta,
+  options?: { space?: FileSpace; folderId?: string | null },
 ): Promise<DocumentItem> {
   const form = new FormData();
   form.append('kb_id', kbId);
   form.append('file', file);
-  if (sourceMeta?.sourceType) form.append('source_type', sourceMeta.sourceType);
-  if (sourceMeta?.era) form.append('era', sourceMeta.era);
+  if (options?.space) form.append('space', options.space);
+  if (options?.folderId) form.append('folder_id', options.folderId);
   const { data } = await api.post<DocumentItem>('/documents/upload', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
     onUploadProgress: (e) => {
@@ -267,6 +338,28 @@ export async function deleteDocument(docId: string): Promise<void> {
   await api.delete(`/documents/${docId}`);
 }
 
+/**
+ * 移动文件到指定文件夹（POST /documents/{id}/move）。
+ *
+ * 后端只改 folder_id，storage_path 与物理文件不动：不重复上传、不搬文件。
+ * folderId 传 null 表示移回该空间的根目录。
+ */
+export async function moveDocument(
+  docId: string,
+  folderId: string | null,
+): Promise<DocumentItem> {
+  const { data } = await api.post<DocumentItem>(`/documents/${docId}/move`, {
+    folder_id: folderId,
+  });
+  return data;
+}
+
+/** 重命名文件（PATCH /documents/{id}）：只改展示名，扩展名必须保持不变。 */
+export async function renameDocument(docId: string, fileName: string): Promise<DocumentItem> {
+  const { data } = await api.patch<DocumentItem>(`/documents/${docId}`, { file_name: fileName });
+  return data;
+}
+
 /** 手动触发解析/重新解析（失败重试入口，202 Accepted）。 */
 export async function reparseDocument(docId: string): Promise<DocumentItem> {
   const { data } = await api.post<DocumentItem>(`/documents/${docId}/parse`);
@@ -276,6 +369,287 @@ export async function reparseDocument(docId: string): Promise<DocumentItem> {
 /** 重新向量化（success/completed 才允许，409 拒绝未就绪）。 */
 export async function reindexDocument(docId: string): Promise<DocumentItem> {
   const { data } = await api.post<DocumentItem>(`/documents/${docId}/reindex`);
+  return data;
+}
+
+// ─────────────────────────── 文件夹管理 ───────────────────────────
+// 每个文件空间一棵独立的文件夹树；文件夹只负责组织文件，不重复保存内容。
+
+/** 该空间全部文件夹（扁平列表 + 直接子级计数），前端按 parent_id 组树。 */
+export async function fetchFolders(space: FileSpace): Promise<FileFolderItem[]> {
+  const { data } = await api.get<FileFolderItem[]>('/folders', { params: { space } });
+  return data;
+}
+
+/** 新建文件夹（同空间同层级重名会被后端拒绝）。 */
+export async function createFolder(payload: {
+  name: string;
+  space: FileSpace;
+  parent_id?: string | null;
+}): Promise<FileFolderItem> {
+  const { data } = await api.post<FileFolderItem>('/folders', payload);
+  return data;
+}
+
+/**
+ * 重命名和/或移动整个文件夹（PATCH /folders/{id}）。
+ *
+ * parent_id 显式传 null = 移到根目录；不传该字段 = 不动父级。
+ * 子目录随父级一起移动，后端会拦住成环与目标重名。
+ */
+export async function updateFolder(
+  folderId: string,
+  payload: { name?: string; parent_id?: string | null },
+): Promise<FileFolderItem> {
+  const { data } = await api.patch<FileFolderItem>(`/folders/${folderId}`, payload);
+  return data;
+}
+
+/** 删除文件夹：后端只允许删除空目录（无子文件夹且无文件），非空返回 400 并说明内容。 */
+export async function deleteFolder(folderId: string): Promise<{ id: string; message: string }> {
+  const { data } = await api.delete<{ id: string; message: string }>(`/folders/${folderId}`);
+  return data;
+}
+
+/**
+ * 按相对路径逐级确保目录存在（POST /folders/ensure），返回最深一级目录。
+ *
+ * 上传文件夹批量导入时用它还原原始目录结构：同一批文件共享一次调用结果，
+ * 已存在的层级直接复用，不会被重复创建。
+ */
+export async function ensureFolderPath(
+  path: string,
+  space: FileSpace,
+): Promise<FileFolderItem> {
+  const { data } = await api.post<FileFolderItem>('/folders/ensure', { path, space });
+  return data;
+}
+
+// ─────────────────────────── 结构化数据解析（第三阶段） ───────────────────────────
+// 只读取「文件 → 字段识别 → 记录生成」的结果；文件管理仍走 documents / folders。
+
+/** 解析概览：字段清单 + 记录/空值/异常统计（无解析记录时返回 pending 空概览）。 */
+export async function fetchStructuredParse(docId: string): Promise<StructuredParseInfo> {
+  const { data } = await api.get<StructuredParseInfo>(`/structured/${docId}/parse`);
+  return data;
+}
+
+/** 记录分页浏览：每次只取一页，后端按文件内生成顺序排序。 */
+export async function fetchStructuredRecords(
+  docId: string,
+  params: { limit?: number; offset?: number; keyword?: string; onlyAnomaly?: boolean } = {},
+): Promise<StructuredRecordPage> {
+  const { limit = 20, offset = 0, keyword, onlyAnomaly } = params;
+  const { data } = await api.get<StructuredRecordPage>(`/structured/${docId}/records`, {
+    params: {
+      limit,
+      offset,
+      ...(keyword ? { keyword } : {}),
+      ...(onlyAnomaly ? { only_anomaly: true } : {}),
+    },
+  });
+  return data;
+}
+
+/** 单条记录详情：原始字段与值 + 来源（文件 / 文件夹 / 行号或 JSON 路径）。 */
+export async function fetchStructuredRecord(
+  docId: string,
+  recordId: string,
+): Promise<StructuredRecordDetail> {
+  const { data } = await api.get<StructuredRecordDetail>(`/structured/${docId}/records/${recordId}`);
+  return data;
+}
+
+/** 手动重新解析结构化文件（202 Accepted，返回派发时的当前概览）。 */
+export async function reparseStructured(docId: string): Promise<StructuredParseInfo> {
+  const { data } = await api.post<StructuredParseInfo>(`/structured/${docId}/reparse`);
+  return data;
+}
+
+/** 手动重建结构化文件的向量索引（202 Accepted，返回派发时的当前概览）。 */
+export async function revectorizeStructured(docId: string): Promise<StructuredParseInfo> {
+  const { data } = await api.post<StructuredParseInfo>(`/structured/${docId}/revectorize`);
+  return data;
+}
+
+// ───────────────── 统一处理概览（第五阶段） ─────────────────
+// 只读派生：不触发解析、不产生结果，也不新建任务表。
+// 三条链路（文档 / 结构化 / 关联文件组）用同一套状态词汇与阶段结构。
+
+/** 单个文件的处理概览：处理过没有、走到哪步、为什么失败、产生了什么结果、是否重复。 */
+export async function fetchDocumentProcessing(docId: string): Promise<DocumentProcessingInfo> {
+  const { data } = await api.get<DocumentProcessingInfo>(`/documents/${docId}/processing`);
+  return data;
+}
+
+// ───────────────── 关联结构化数据（第四阶段） ─────────────────
+// 一个文件组 = 一个独立的关联导入任务。文件上传仍走 documents，
+// 这里只负责组、关系配置、校验与确认后生成的关联记录。
+
+/** 文件组列表（可按知识库过滤）。 */
+export async function fetchStructuredGroups(kbId?: string): Promise<StructuredGroup[]> {
+  const { data } = await api.get<StructuredGroup[]>('/structured/groups', {
+    params: kbId ? { kb_id: kbId } : {},
+  });
+  return data;
+}
+
+/** 文件组详情：成员结构识别 + 关系配置 + 校验报告。 */
+export async function fetchStructuredGroup(groupId: string): Promise<StructuredGroupDetail> {
+  const { data } = await api.get<StructuredGroupDetail>(`/structured/groups/${groupId}`);
+  return data;
+}
+
+/**
+ * 文件组处理概览（统一状态与阶段）：比详情轻，供抽屉轮询成员解析进度。
+ * 不触发任何解析或生成，因此反复调用无副作用。
+ */
+export async function fetchGroupProcessing(groupId: string): Promise<GroupProcessingInfo> {
+  const { data } = await api.get<GroupProcessingInfo>(`/structured/groups/${groupId}/processing`);
+  return data;
+}
+
+/** 建组：至少 2 个结构化文件组成一个关联数据文件组（状态 draft，不会自动入库关系）。 */
+export async function createStructuredGroup(payload: {
+  kb_id: string;
+  name: string;
+  doc_ids: string[];
+}): Promise<StructuredGroup> {
+  const { data } = await api.post<StructuredGroup>('/structured/groups', payload);
+  return data;
+}
+
+export async function renameStructuredGroup(
+  groupId: string,
+  name: string,
+): Promise<StructuredGroup> {
+  const { data } = await api.patch<StructuredGroup>(`/structured/groups/${groupId}`, { name });
+  return data;
+}
+
+export async function deleteStructuredGroup(groupId: string): Promise<{ deleted: boolean }> {
+  const { data } = await api.delete<{ deleted: boolean }>(`/structured/groups/${groupId}`);
+  return data;
+}
+
+/** 向文件组补充成员文件（组构成变化后需重新校验关系）。 */
+export async function addStructuredGroupFiles(
+  groupId: string,
+  docIds: string[],
+): Promise<StructuredGroup> {
+  const { data } = await api.post<StructuredGroup>(`/structured/groups/${groupId}/files`, {
+    doc_ids: docIds,
+  });
+  return data;
+}
+
+/** 给组内文件起角色名（如「学生表」「选课表」），只影响关联文本可读性。 */
+export async function setStructuredGroupFileAlias(
+  groupId: string,
+  docId: string,
+  alias: string,
+): Promise<StructuredGroup> {
+  const { data } = await api.patch<StructuredGroup>(`/structured/groups/${groupId}/files/${docId}`, {
+    alias,
+  });
+  return data;
+}
+
+/** 从文件组移出成员（不删除文件本身；引用它的关系一并清理，不留无效关系）。 */
+export async function removeStructuredGroupFile(
+  groupId: string,
+  docId: string,
+): Promise<StructuredGroup> {
+  const { data } = await api.delete<StructuredGroup>(`/structured/groups/${groupId}/files/${docId}`);
+  return data;
+}
+
+/** 推测跨文件关系：返回的每条都是 confirmed=false 的候选，不会自动入库。 */
+export async function suggestStructuredRelations(groupId: string): Promise<StructuredRelation[]> {
+  const { data } = await api.post<StructuredRelation[]>(`/structured/groups/${groupId}/suggest`);
+  return data;
+}
+
+/** 整份保存关系配置（用户勾选确认的推测结果 或 手动选择的字段）。 */
+export async function saveStructuredRelations(
+  groupId: string,
+  relations: Omit<StructuredRelation, 'id'>[],
+): Promise<StructuredGroup> {
+  const { data } = await api.put<StructuredGroup>(`/structured/groups/${groupId}/relations`, {
+    relations,
+  });
+  return data;
+}
+
+/** 逐条确认/取消确认一条关系（推测的关系只有在这里才能变成已确认）。 */
+export async function setStructuredRelationConfirmation(
+  groupId: string,
+  relationId: string,
+  confirmed: boolean,
+): Promise<StructuredGroup> {
+  const { data } = await api.post<StructuredGroup>(
+    `/structured/groups/${groupId}/relations/confirmation`,
+    { relation_id: relationId, confirmed },
+  );
+  return data;
+}
+
+/** 正式生成前的校验：只报告问题（主键重复/外键缺失/无法匹配/孤立/类型不一致），不改数据。 */
+export async function validateStructuredGroup(groupId: string): Promise<StructuredGroupValidation> {
+  const { data } = await api.post<StructuredGroupValidation>(
+    `/structured/groups/${groupId}/validate`,
+  );
+  return data;
+}
+
+/** 用户确认后生成正式关联记录；存在未匹配记录时须显式 force。 */
+export async function confirmStructuredGroup(
+  groupId: string,
+  params: { anchorDocId?: string; force?: boolean } = {},
+): Promise<{ record_count: number; stats: Record<string, unknown> }> {
+  const { data } = await api.post<{ record_count: number; stats: Record<string, unknown> }>(
+    `/structured/groups/${groupId}/confirm`,
+    {
+      anchor_doc_id: params.anchorDocId ?? null,
+      force: params.force ?? false,
+    },
+  );
+  return data;
+}
+
+/** 手动重建文件组的向量索引（202 Accepted；仅已确认且有正式关联记录的组允许）。 */
+export async function revectorizeStructuredGroup(groupId: string): Promise<StructuredGroup> {
+  const { data } = await api.post<StructuredGroup>(
+    `/structured/groups/${groupId}/revectorize`,
+  );
+  return data;
+}
+
+/** 关联记录分页浏览。 */
+export async function fetchStructuredGroupRecords(
+  groupId: string,
+  params: { limit?: number; offset?: number; keyword?: string; onlyAnomaly?: boolean } = {},
+): Promise<StructuredGroupRecordPage> {
+  const { limit = 20, offset = 0, keyword, onlyAnomaly } = params;
+  const { data } = await api.get<StructuredGroupRecordPage>(`/structured/groups/${groupId}/records`, {
+    params: {
+      limit,
+      offset,
+      ...(keyword ? { keyword } : {}),
+      ...(onlyAnomaly ? { only_anomaly: true } : {}),
+    },
+  });
+  return data;
+}
+
+/** 关联记录详情：参与文件、原始值、行号/JSON 路径、参与关联的字段与关系。 */
+export async function fetchStructuredGroupRecord(
+  groupId: string,
+  recordId: string,
+): Promise<StructuredGroupRecordDetail> {
+  const { data } = await api.get<StructuredGroupRecordDetail>(
+    `/structured/groups/${groupId}/records/${recordId}`,
+  );
   return data;
 }
 
@@ -726,41 +1100,6 @@ export async function fetchTrashKbs(): Promise<KnowledgeBase[]> {
   return data;
 }
 
-// ─────────────────────────── 知识库资源挂载（TASK-008 Stage 4-7）───────────────────────────
-
-/** 已挂载结构化资源列表（GET /kb/{id}/resources）。 */
-export async function fetchKbResources(
-  kbId: string,
-  params?: { resource_type?: KBResourceType; limit?: number; offset?: number },
-): Promise<KBResourceListResponse> {
-  const { data } = await api.get<KBResourceListResponse>(`/kb/${kbId}/resources`, {
-    params,
-  });
-  return data;
-}
-
-/** 挂载结构化资源（POST /kb/{id}/resources，仅 Owner/Admin）。 */
-export async function mountKbResource(
-  kbId: string,
-  resourceType: KBResourceType,
-  resourceId: string,
-): Promise<KBResource> {
-  const { data } = await api.post<KBResource>(`/kb/${kbId}/resources`, {
-    resource_type: resourceType,
-    resource_id: resourceId,
-  });
-  return data;
-}
-
-/** 卸载结构化资源（DELETE /kb/{id}/resources/{type}/{rid}，仅 Owner/Admin）。 */
-export async function unmountKbResource(
-  kbId: string,
-  resourceType: KBResourceType,
-  resourceId: string,
-): Promise<void> {
-  await api.delete(`/kb/${kbId}/resources/${resourceType}/${resourceId}`);
-}
-
 /** 恢回收站知识库。 */
 export async function restoreKb(kbId: string): Promise<KnowledgeBase> {
   const { data } = await api.post<KnowledgeBase>(`/kb/${kbId}/restore`);
@@ -830,275 +1169,7 @@ export async function resetSystemConfig(): Promise<SystemConfig> {
 }
 
 
-// ─────────────────────────── 中药（TASK-003）───────────────────────────
-
-/** 查询中药列表，支持关键词 / 分类 / 标签筛选 + 分页。 */
-export async function fetchHerbs(params?: {
-  keyword?: string;
-  category_id?: string;
-  tag_id?: string;
-  limit?: number;
-  offset?: number;
-}): Promise<HerbListResponse> {
-  const { data } = await api.get<HerbListResponse>('/herbs', { params });
-  return data;
-}
-
-/** 查询中药详情。 */
-export async function getHerb(herbId: string): Promise<Herb> {
-  const { data } = await api.get<Herb>(`/herbs/${herbId}`);
-  return data;
-}
-
-/** 新建中药（POST /herbs，仅 admin）。 */
-export async function createHerb(payload: {
-  name: string;
-  aliases?: string[];
-  category_id?: string | null;
-  properties?: string;
-  channels?: string[];
-  effects?: string;
-  source?: string;
-  description?: string;
-  tag_ids?: string[];
-}): Promise<Herb> {
-  const { data } = await api.post<Herb>('/herbs', payload);
-  return data;
-}
-
-/** 更新中药（PUT /herbs/{id}，partial update，仅 admin）。 */
-export async function updateHerb(
-  herbId: string,
-  payload: Partial<{
-    name: string;
-    aliases: string[];
-    category_id: string | null;
-    properties: string;
-    channels: string[];
-    effects: string;
-    source: string;
-    description: string;
-    tag_ids: string[];
-  }>,
-): Promise<Herb> {
-  const { data } = await api.put<Herb>(`/herbs/${herbId}`, payload);
-  return data;
-}
-
-/** 删除中药（DELETE /herbs/{id}，herb_tags 由 DB CASCADE 清理，仅 admin）。 */
-export async function deleteHerb(herbId: string): Promise<void> {
-  await api.delete(`/herbs/${herbId}`);
-}
-
-// ─────────────────────────── 方剂（TASK-004）───────────────────────────
-
-/** 方剂组成提交项（对应后端 IngredientIn；不含 herb_name）。 */
-export interface IngredientPayload {
-  herb_id: string;
-  amount?: number | null;
-  unit?: string;
-  processing?: string;
-  role?: string;
-  sort_order: number;
-}
-
-/** 查询方剂列表，支持关键词 / 分类 / 标签筛选 + 分页。 */
-export async function fetchPrescriptions(params?: {
-  keyword?: string;
-  category_id?: string;
-  tag_id?: string;
-  limit?: number;
-  offset?: number;
-}): Promise<PrescriptionListResponse> {
-  const { data } = await api.get<PrescriptionListResponse>('/prescriptions', { params });
-  return data;
-}
-
-/** 查询方剂详情（含组成 / 标签 / 分类）。 */
-export async function getPrescription(prescriptionId: string): Promise<Prescription> {
-  const { data } = await api.get<Prescription>(`/prescriptions/${prescriptionId}`);
-  return data;
-}
-
-/** 新建方剂（POST /prescriptions，仅 admin）。 */
-export async function createPrescription(payload: {
-  name: string;
-  aliases?: string[];
-  category_id?: string | null;
-  efficacy?: string;
-  indications?: string;
-  usage_method?: string;
-  source?: string;
-  description?: string;
-  ingredients?: IngredientPayload[];
-  tag_ids?: string[];
-}): Promise<Prescription> {
-  const { data } = await api.post<Prescription>('/prescriptions', payload);
-  return data;
-}
-
-/** 更新方剂（PUT /prescriptions/{id}，仅 admin）。
- * ingredients / tag_ids 提供时整体替换。 */
-export async function updatePrescription(
-  prescriptionId: string,
-  payload: Partial<{
-    name: string;
-    aliases: string[];
-    category_id: string | null;
-    efficacy: string;
-    indications: string;
-    usage_method: string;
-    source: string;
-    description: string;
-    ingredients: IngredientPayload[];
-    tag_ids: string[];
-  }>,
-): Promise<Prescription> {
-  const { data } = await api.put<Prescription>(`/prescriptions/${prescriptionId}`, payload);
-  return data;
-}
-
-/** 删除方剂（DELETE /prescriptions/{id}，组成行随 DB CASCADE 清理，仅 admin）。 */
-export async function deletePrescription(prescriptionId: string): Promise<void> {
-  await api.delete(`/prescriptions/${prescriptionId}`);
-}
-
-// ─────────────────────────── 中医理论（TASK-005）───────────────────────────
-
-/** 查询理论列表，支持关键词 / 分类 / 标签筛选 + 分页。 */
-export async function fetchTheories(params?: {
-  keyword?: string;
-  category_id?: string;
-  tag_id?: string;
-  limit?: number;
-  offset?: number;
-}): Promise<TheoryListResponse> {
-  const { data } = await api.get<TheoryListResponse>('/theories', { params });
-  return data;
-}
-
-/** 查询理论详情。 */
-export async function getTheory(theoryId: string): Promise<Theory> {
-  const { data } = await api.get<Theory>(`/theories/${theoryId}`);
-  return data;
-}
-
-/** 新建理论（POST /theories，仅 admin）。 */
-export async function createTheory(payload: {
-  name: string;
-  aliases?: string[];
-  category_id?: string | null;
-  content?: string;
-  source?: string;
-  tag_ids?: string[];
-}): Promise<Theory> {
-  const { data } = await api.post<Theory>('/theories', payload);
-  return data;
-}
-
-/** 更新理论（PUT /theories/{id}，partial update，仅 admin）。
- * tag_ids 提供时整体替换。 */
-export async function updateTheory(
-  theoryId: string,
-  payload: Partial<{
-    name: string;
-    aliases: string[];
-    category_id: string | null;
-    content: string;
-    source: string;
-    tag_ids: string[];
-  }>,
-): Promise<Theory> {
-  const { data } = await api.put<Theory>(`/theories/${theoryId}`, payload);
-  return data;
-}
-
-/** 删除理论（DELETE /theories/{id}，theory_tags 由 DB CASCADE 清理，仅 admin）。 */
-export async function deleteTheory(theoryId: string): Promise<void> {
-  await api.delete(`/theories/${theoryId}`);
-}
-
-// ─────────────────────────── 中医文献（TASK-006）───────────────────────────
-
-/** 查询文献列表，支持关键词 / 分类 / 标签筛选 + 分页。 */
-export async function fetchLiteratures(params?: {
-  keyword?: string;
-  category_id?: string;
-  tag_id?: string;
-  limit?: number;
-  offset?: number;
-}): Promise<LiteratureListResponse> {
-  const { data } = await api.get<LiteratureListResponse>('/literatures', { params });
-  return data;
-}
-
-/** 查询文献详情。 */
-export async function getLiterature(literatureId: string): Promise<Literature> {
-  const { data } = await api.get<Literature>(`/literatures/${literatureId}`);
-  return data;
-}
-
-/** 新建文献（POST /literatures，仅 admin）。 */
-export async function createLiterature(payload: {
-  name: string;
-  aliases?: string[];
-  category_id?: string | null;
-  author?: string;
-  dynasty?: string;
-  summary?: string;
-  content?: string;
-  source?: string;
-  tag_ids?: string[];
-}): Promise<Literature> {
-  const { data } = await api.post<Literature>('/literatures', payload);
-  return data;
-}
-
-/** 更新文献（PUT /literatures/{id}，partial update，仅 admin）。
- * tag_ids 提供时整体替换（空数组清空，不可被忽略）。 */
-export async function updateLiterature(
-  literatureId: string,
-  payload: Partial<{
-    name: string;
-    aliases: string[];
-    category_id: string | null;
-    author: string;
-    dynasty: string;
-    summary: string;
-    content: string;
-    source: string;
-    tag_ids: string[];
-  }>,
-): Promise<Literature> {
-  const { data } = await api.put<Literature>(`/literatures/${literatureId}`, payload);
-  return data;
-}
-
-/** 删除文献（DELETE /literatures/{id}，literature_tags 由 DB CASCADE 清理，仅 admin）。 */
-export async function deleteLiterature(literatureId: string): Promise<void> {
-  await api.delete(`/literatures/${literatureId}`);
-}
-
-// ───────────── 管理中心统一回收站（中药/方剂/理论/文献/分类/标签）─────────────
-
-/** 支持回收站生命周期的资源类型。 */
-export type TrashResourceType =
-  | 'herb'
-  | 'prescription'
-  | 'theory'
-  | 'literature'
-  | 'category'
-  | 'tag';
-
-/** 资源类型 → 后端基础路径（分类/标签路由无统一前缀，故单独映射）。 */
-const TRASH_BASE_PATH: Record<TrashResourceType, string> = {
-  herb: '/herbs',
-  prescription: '/prescriptions',
-  theory: '/theories',
-  literature: '/literatures',
-  category: '/categories',
-  tag: '/tags',
-};
+// ─────────────────────────── 批量操作结果 ───────────────────────────
 
 /** 批量操作返回结构（成功数 + 失败明细）。 */
 export interface BatchOpResult {
@@ -1107,87 +1178,6 @@ export interface BatchOpResult {
   purged?: number;
   message?: string;
   failed?: { id: string; reason: string }[];
-}
-
-/** 回收站列表返回结构。 */
-export interface TrashListResult<T> {
-  items: T[];
-  total: number;
-  limit: number | null;
-  offset: number;
-}
-
-function trashPath(rtype: TrashResourceType, suffix = ''): string {
-  return `${TRASH_BASE_PATH[rtype]}${suffix}`;
-}
-
-/** 批量删除 → 移入回收站（软删除）。 */
-export async function batchDeleteResources(
-  rtype: TrashResourceType,
-  ids: string[],
-): Promise<BatchOpResult> {
-  const { data } = await api.post<BatchOpResult>(trashPath(rtype, '/batch-delete'), { ids });
-  return data;
-}
-
-/** 回收站列表（后端进入时会自动清理超过保留期的条目）。 */
-export async function fetchResourceTrash<T>(
-  rtype: TrashResourceType,
-  params?: { limit?: number; offset?: number },
-): Promise<TrashListResult<T>> {
-  const { data } = await api.get<TrashListResult<T>>(
-    trashPath(rtype, '/trash/list'),
-    { params },
-  );
-  return data;
-}
-
-/** 批量恢复。 */
-export async function batchRestoreResources(
-  rtype: TrashResourceType,
-  ids: string[],
-): Promise<BatchOpResult> {
-  const { data } = await api.post<BatchOpResult>(trashPath(rtype, '/batch-restore'), { ids });
-  return data;
-}
-
-/** 单条恢复。 */
-export async function restoreResource(
-  rtype: TrashResourceType,
-  id: string,
-): Promise<{ id: string; restored: boolean }> {
-  const { data } = await api.post<{ id: string; restored: boolean }>(
-    trashPath(rtype, `/${id}/restore`),
-  );
-  return data;
-}
-
-/** 单条彻底删除（不可恢复）。 */
-export async function purgeResource(
-  rtype: TrashResourceType,
-  id: string,
-): Promise<{ id: string; purged: boolean }> {
-  const { data } = await api.delete<{ id: string; purged: boolean }>(
-    trashPath(rtype, `/${id}/purge`),
-  );
-  return data;
-}
-
-/** 批量彻底删除；单条失败只记录原因并继续其余记录。 */
-export async function batchPurgeResources(
-  rtype: TrashResourceType,
-  ids: string[],
-): Promise<BatchOpResult> {
-  const { data } = await api.post<BatchOpResult>(trashPath(rtype, '/batch-purge'), { ids });
-  return data;
-}
-
-/** 一键清空回收站（彻底删除回收站中的全部条目）。 */
-export async function purgeAllResourceTrash(
-  rtype: TrashResourceType,
-): Promise<BatchOpResult> {
-  const { data } = await api.delete<BatchOpResult>(trashPath(rtype, '/trash/purge-all'));
-  return data;
 }
 
 /** 用户回收站一键清空（仅 admin）。 */

@@ -26,10 +26,10 @@ const PREFIX_TO_ROUTE_FILE: Record<string, string> = {
   kb: 'knowledge_bases.py',
   'knowledge-bases': 'knowledge_bases.py',
   documents: 'documents.py',
-  herbs: 'herbs.py',
-  prescriptions: 'prescriptions.py',
-  theories: 'theories.py',
-  literatures: 'literatures.py',
+  folders: 'folders.py',
+  structured: 'structured.py',
+  // 第四阶段关联数据端点在独立路由文件，两段前缀优先命中，不会被 structured 抢走。
+  'structured/groups': 'structured_groups.py',
   users: 'users.py',
   admin: 'admin.py',
   audit: 'audit.py',
@@ -175,11 +175,7 @@ describe('阶段十六：前后端 API 契约守卫', () => {
       'GET /chat/conversations',
       'GET /chat/conversations/{p}/messages',
       'GET /kb',
-      'GET /kb/{p}/resources',
-      'GET /herbs',
-      'GET /prescriptions',
-      'GET /theories',
-      'GET /literatures',
+      'GET /documents',
     ]) {
       assert.ok(paths.includes(required), `未抽取到调用：${required}`);
     }

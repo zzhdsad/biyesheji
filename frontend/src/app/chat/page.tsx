@@ -148,7 +148,6 @@ export default function ChatPage() {
           ? '全部知识库'
           : `已选 ${selectedKbIds.length} 个知识库`
       }
-      onPickExample={(q) => setInput(q)}
     />
   ) : (
     <div style={{ maxWidth: 900, margin: '0 auto' }}>

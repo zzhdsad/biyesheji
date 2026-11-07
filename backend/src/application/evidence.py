@@ -35,11 +35,16 @@ SOURCE_KIND_DOCUMENT = "document"
 SOURCE_KIND_RESOURCE = "resource"
 # 阶段十三：知识图谱关系证据（与 document / resource 并列，走同一套 Evidence）
 SOURCE_KIND_KG = "kg"
+# 第六阶段：结构化数据（非关联记录）与关联结构化数据（文件组关联记录）
+SOURCE_KIND_STRUCTURED = "structured"
+SOURCE_KIND_STRUCTURED_GROUP = "structured_group"
 
 SOURCE_KIND_LABELS = {
     SOURCE_KIND_DOCUMENT: "文档",
     SOURCE_KIND_RESOURCE: "资源",
     SOURCE_KIND_KG: "知识图谱",
+    SOURCE_KIND_STRUCTURED: "结构化数据",
+    SOURCE_KIND_STRUCTURED_GROUP: "关联数据",
 }
 
 # Resource 细分类型 → 中文标签（与 Stage 4-4 Prompt 标注同源）
@@ -142,15 +147,34 @@ def hit_to_evidence(hit: dict, source_index: int) -> dict:
     level_score = rel if rel is not None else score
     is_kg = hit.get("source_kind") == SOURCE_KIND_KG
     is_resource = is_resource_hit(hit) or is_kg
+    is_structured = hit.get("source_kind") in (
+        SOURCE_KIND_STRUCTURED,
+        SOURCE_KIND_STRUCTURED_GROUP,
+    )
     source_kind = (
         SOURCE_KIND_KG
         if is_kg
-        else (SOURCE_KIND_RESOURCE if is_resource else SOURCE_KIND_DOCUMENT)
+        else (
+            SOURCE_KIND_STRUCTURED_GROUP
+            if hit.get("source_kind") == SOURCE_KIND_STRUCTURED_GROUP
+            else (
+                SOURCE_KIND_STRUCTURED
+                if hit.get("source_kind") == SOURCE_KIND_STRUCTURED
+                else (SOURCE_KIND_RESOURCE if is_resource else SOURCE_KIND_DOCUMENT)
+            )
+        )
     )
     content = hit.get("content", "") or ""
     chunk_id = hit.get("id")
 
-    if is_resource:
+    if is_structured:
+        # 结构化 / 关联记录：来源身份用记录 ID（一条记录一个向量），
+        # 展示名称用文件名 / 文件组名，来源类别区分「结构化数据 / 关联数据」。
+        source_id = hit.get("source_id") or chunk_id
+        source_name = hit.get("source_name") or hit.get("doc_name") or "结构化数据"
+        resource_type = None
+        source_label = SOURCE_KIND_LABELS[source_kind]
+    elif is_resource:
         # Resource：doc_id 为 SHA256（非真实文档），来源身份用 resource_id/name
         source_id = hit.get("resource_id") or hit.get("doc_id")
         source_name = (
@@ -178,7 +202,14 @@ def hit_to_evidence(hit: dict, source_index: int) -> dict:
         "chunk_id": chunk_id,
         "source_index": source_index,
         "doc_id": hit.get("doc_id"),
-        "doc_name": hit.get("doc_name") or ("资源" if is_resource else "未知文档"),
+        "doc_name": (
+            hit.get("doc_name")
+            or (
+                SOURCE_KIND_LABELS[source_kind]
+                if is_structured
+                else ("资源" if is_resource else "未知文档")
+            )
+        ),
         "page_num": hit.get("page_num"),
         "title_path": hit.get("title_path"),
         "content": content,
@@ -204,6 +235,29 @@ def hit_to_evidence(hit: dict, source_index: int) -> dict:
         "evidence_level": evidence_level(level_score),
         # 相关性门槛 / 分级实际依据的分数（dense COSINE；便于排障与前端调试）
         "relevance_score": rel,
+        # ── 第六阶段：结构化来源追溯（仅结构化 / 关联记录携带）─────────────
+        # 这些字段来自检索期 PG 回填：文件名、原始文件 ID、记录 ID、行号 / JSON
+        # 路径、字段和值、文件组与参与文件、关系。普通文档 / 资源命中不写。
+        **(
+            {
+                key: hit.get(key)
+                for key in (
+                    "source_doc_id",
+                    "document_id",
+                    "record_id",
+                    "locate",
+                    "fields",
+                    "group_id",
+                    "group_name",
+                    "member_files",
+                    "relations",
+                    "relation_ids",
+                )
+                if hit.get(key) is not None
+            }
+            if is_structured
+            else {}
+        ),
         # ── 阶段十四：KG 证据的关系属性（可选）───────────────────────────
         # Evidence Gate 需要按「关系类型 + 跳数 + 来源」判断 KG 证据可信度，
         # 不能只依赖 score（KG score 是实体匹配分，不是向量相似度）。
@@ -279,6 +333,12 @@ def _group_key_and_label(evidence: dict) -> tuple[str, str, str | None]:
             RESOURCE_TYPE_LABELS.get(subtype, subtype),
             subtype,
         )
+    if evidence.get("source_kind") in (
+        SOURCE_KIND_STRUCTURED,
+        SOURCE_KIND_STRUCTURED_GROUP,
+    ):
+        kind = evidence["source_kind"]
+        return kind, SOURCE_KIND_LABELS[kind], None
     return SOURCE_KIND_DOCUMENT, SOURCE_KIND_LABELS[SOURCE_KIND_DOCUMENT], None
 
 
@@ -340,8 +400,15 @@ def group_evidence(evidence: list[dict]) -> list[dict]:
             groups[group_key] = group
             order.append(group_key)
 
-        # 同一来源（同一味中药 / 同一个文档）的多个 chunk 聚合到一条来源下
-        sid = ev.get("source_id") or ev.get("source_name") or group_key
+        # 同一来源（同一味中药 / 同一个文档 / 同一份结构化文件或文件组）的
+        # 多条证据聚合到一条来源下。结构化知识按「文件 / 文件组」聚合
+        # （source_doc_id），记录 ID 仍保留在逐条证据上用于追溯。
+        sid = (
+            ev.get("source_doc_id")
+            or ev.get("source_id")
+            or ev.get("source_name")
+            or group_key
+        )
         source = group["_by_source"].get(sid)
         if source is None:
             source = {

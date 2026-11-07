@@ -20,7 +20,6 @@ import {
 import type { MenuProps } from 'antd';
 import {
   AppstoreOutlined,
-  BookOutlined,
   BulbFilled,
   BulbOutlined,
   ControlOutlined,
@@ -33,11 +32,8 @@ import {
   FileTextOutlined,
   HistoryOutlined,
   LogoutOutlined,
-  MedicineBoxOutlined,
   MessageOutlined,
   PlusOutlined,
-  ProfileOutlined,
-  ReadOutlined,
   SettingOutlined,
   TeamOutlined,
   UserOutlined,
@@ -59,8 +55,6 @@ const THEME_LABELS: Record<ThemeMode, string> = {
  * 顶部主导航：按用户任务（而非数据库表）组织信息架构。
  *
  * - 智能问答：系统核心入口，所有用户可见；
- * - 知识资源：中药/方剂/理论/文献的浏览入口，所有用户可见
- *   （页面内已有按钮级权限：member 只读浏览，admin 可编辑）；
  * - 管理中心：后台运维功能，仅 admin 可见（member 不应看到管理入口；
  *   页面级权限仍由后端 403 兜底，此处只做导航收起）。
  *
@@ -76,24 +70,6 @@ const CORE_NAV_ITEMS: Required<MenuProps>['items'] = [
     icon: <MessageOutlined />,
     label: '智能问答',
     onClick: () => window.location.assign('/chat'),
-  },
-];
-
-const RESOURCE_NAV_ITEMS: Required<MenuProps>['items'] = [
-  {
-    key: 'resource-group',
-    label: (
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-        <BookOutlined /> 知识资源
-      </span>
-    ),
-    type: 'group',
-    children: [
-      { key: '/herbs', icon: <MedicineBoxOutlined />, label: '中药' },
-      { key: '/prescriptions', icon: <ProfileOutlined />, label: '方剂' },
-      { key: '/theories', icon: <ReadOutlined />, label: '中医理论' },
-      { key: '/literatures', icon: <BookOutlined />, label: '文献' },
-    ],
   },
 ];
 
@@ -124,7 +100,7 @@ const ADMIN_NAV_ITEMS: Required<MenuProps>['items'] = [
  * 新增菜单项时无需再改任何匹配逻辑——匹配完全由数据结构递归推导。
  */
 export const NAV_ROUTE_KEYS: string[] = (
-  [...(CORE_NAV_ITEMS ?? []), ...(RESOURCE_NAV_ITEMS ?? []), ...(ADMIN_NAV_ITEMS ?? [])] as Required<MenuProps>['items']
+  [...(CORE_NAV_ITEMS ?? []), ...(ADMIN_NAV_ITEMS ?? [])] as Required<MenuProps>['items']
 ).flatMap(function flatten(item): Required<MenuProps>['items'] {
   if (!item || !('children' in item) || !Array.isArray(item.children)) return [item];
   // 分组节点（type: 'group'）自身不是路由，子项递归展平；submenu 父级同理
@@ -290,7 +266,7 @@ export function AppSider() {
     loadConversations,
     loadHealth,
   } = useChatStore();
-  // 菜单信息架构：管理中心仅 admin 可见（member 只看到问答与知识资源）
+  // 菜单信息架构：管理中心仅 admin 可见（member 只看到智能问答）
   const user = useUserStore((s) => s.user);
   const isAdmin = user?.role === 'admin';
 
@@ -393,7 +369,7 @@ export function AppSider() {
         </div>
       </div>
 
-      {/* 主导航：智能问答 + 知识资源 + 管理中心（仅 admin） */}
+      {/* 主导航：智能问答 + 管理中心（仅 admin） */}
       <Menu
         mode="inline"
         selectedKeys={selectedNavKeys}
@@ -401,7 +377,6 @@ export function AppSider() {
         onOpenChange={onNavOpenChange}
         items={[
           ...(CORE_NAV_ITEMS ?? []),
-          ...(RESOURCE_NAV_ITEMS ?? []),
           ...(isAdmin ? (ADMIN_NAV_ITEMS ?? []) : []),
         ]}
         onClick={onNavClick}

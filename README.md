@@ -100,8 +100,7 @@ npm run dev
 
 - `/chat`：智能问答、知识库选择、多轮会话、引用证据
 - `/documents`：文档上传、状态筛选、重新向量化、回收站
-- `/kb`：知识库、成员、资源挂载、回收站
-- `/herbs`、`/prescriptions`、`/theories`、`/literatures`：四类知识资源
+- `/kb`：知识库、成员、回收站
 - `/taxonomy`：分类与标签
 - `/evaluation`：测试集、评估、实验对比
 - `/users`：用户与回收站

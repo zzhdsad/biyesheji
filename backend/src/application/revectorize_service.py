@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from src.core.config import settings
 from src.core.exceptions import AppException
+from src.core.file_spaces import is_parse_enabled
 from src.domain.models import Chunk, Document, RevectorizeJob
 from src.infrastructure.embedding import get_embedding
 from src.infrastructure.milvus_store import VectorRow, get_vector_store
@@ -246,6 +247,10 @@ async def _process_doc_batch(
         doc = by_id.get(doc_id)
         if doc is None:
             bad.append((doc_id, "文档不存在"))
+            continue
+        if not is_parse_enabled(doc.space):
+            # 结构化数据空间的文件不参与向量化，逐篇拒绝（不影响同批其它文档）
+            bad.append((doc_id, f"空间（space={doc.space}）不参与解析与向量化"))
             continue
         if doc.parse_status not in _VECTORIZABLE_STATUS:
             bad.append((doc_id, f"切片未就绪（parse_status={doc.parse_status}）"))

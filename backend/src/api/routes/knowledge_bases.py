@@ -23,11 +23,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.routes.resource_trash import IdsRequest
 from src.application.audit_service import AuditService
 from src.core.runtime_config import get_system_value
 from src.core.deps import get_accessible_kb_ids, get_client_ip
 from src.core.exceptions import AppException, NotFoundError, PermissionDeniedError
+from src.core.file_spaces import DOCUMENT_SPACE
 from src.domain.models import (
     Document,
     Herb,
@@ -56,6 +56,10 @@ RESOURCE_TYPES = ("herb", "prescription", "theory", "literature")
 
 
 # ── Schemas ──────────────────────────────────────────────────────────────────
+
+
+class IdsRequest(BaseModel):
+    ids: list[uuid.UUID] = Field(min_length=1, max_length=2000)
 
 
 class KnowledgeBaseCreate(BaseModel):
@@ -141,7 +145,13 @@ async def _attach_document_counts(db: AsyncSession, kbs: list[KnowledgeBase]) ->
     rows = (
         await db.execute(
             select(Document.kb_id, func.count())
-            .where(Document.kb_id.in_(ids), Document.deleted_at.is_(None))
+            .where(
+                Document.kb_id.in_(ids),
+                Document.deleted_at.is_(None),
+                # 只数普通文档：结构化数据空间的文件不算进「知识库文档数」，
+                # 与「管理文档」列表（默认 space=document）保持一致。
+                Document.space == DOCUMENT_SPACE,
+            )
             .group_by(Document.kb_id)
         )
     ).all()

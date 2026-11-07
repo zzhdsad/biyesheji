@@ -1,8 +1,9 @@
 import { create } from 'zustand';
-import type { DocumentItem, KnowledgeBase } from '@/types';
+import type { DocumentItem, FileFolderItem, FileSpace, KnowledgeBase } from '@/types';
 import {
   deleteDocument,
   fetchDocumentsPage,
+  fetchFolders,
   fetchKnowledgeBases,
   reindexDocument,
   reparseDocument,
@@ -15,6 +16,11 @@ interface DocumentState {
   // 知识库（筛选与上传目标）
   knowledgeBases: KnowledgeBase[];
   selectedKbId: string | null;
+  // 文件空间：普通文档 / 结构化数据，各自一棵文件夹树
+  space: FileSpace;
+  folders: FileFolderItem[];
+  /** 当前所在文件夹；null = 空间根目录 */
+  currentFolderId: string | null;
   // 文档列表
   documents: DocumentItem[];
   total: number;
@@ -23,11 +29,17 @@ interface DocumentState {
   // 状态
   loadingKbs: boolean;
   loading: boolean;
+  loadingFolders: boolean;
   error: string | null;
   // 动作
   loadKnowledgeBases: () => Promise<void>;
   selectKb: (kbId: string) => void;
   loadDocuments: (page?: number, pageSize?: number) => Promise<void>;
+  loadFolders: () => Promise<void>;
+  /** 切换 Tab：换空间并回到该空间根目录 */
+  setSpace: (space: FileSpace) => void;
+  /** 进入文件夹 / 返回上级（null = 空间根目录） */
+  openFolder: (folderId: string | null) => void;
   removeDocument: (docId: string) => Promise<void>;
   reparse: (docId: string) => Promise<void>;
   reindex: (docId: string) => Promise<void>;
@@ -37,12 +49,16 @@ interface DocumentState {
 export const useDocumentStore = create<DocumentState>((set, get) => ({
   knowledgeBases: [],
   selectedKbId: null,
+  space: 'document',
+  folders: [],
+  currentFolderId: null,
   documents: [],
   total: 0,
   page: 1,
   pageSize: 10,
   loadingKbs: false,
   loading: false,
+  loadingFolders: false,
   error: null,
 
   loadKnowledgeBases: async () => {
@@ -66,19 +82,49 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
   },
 
   loadDocuments: async (page, pageSize) => {
-    const nextPage = page ?? get().page;
-    const nextSize = pageSize ?? get().pageSize;
+    const state = get();
+    const nextPage = page ?? state.page;
+    const nextSize = pageSize ?? state.pageSize;
     set({ loading: true, error: null, page: nextPage, pageSize: nextSize });
     try {
-      const { items, total } = await fetchDocumentsPage(
-        get().selectedKbId ?? undefined,
-        nextSize,
-        (nextPage - 1) * nextSize,
-      );
+      const { items, total } = await fetchDocumentsPage({
+        // 文件夹视图展示目录内全部文件（知识库筛选只在空间根目录生效）：
+        // 文件夹是跨知识库的全局树，若在目录内继续按 kb 过滤，会出现
+        // 「目录标着 3 个文件、列表却为空」的假丢失。
+        kbId: state.currentFolderId ? undefined : (state.selectedKbId ?? undefined),
+        space: state.space,
+        folderId: state.currentFolderId ?? undefined,
+        rootOnly: state.currentFolderId ? false : true,
+        limit: nextSize,
+        offset: (nextPage - 1) * nextSize,
+      });
       set({ documents: items, total, loading: false });
     } catch {
       set({ loading: false, error: '文档列表加载失败' });
     }
+  },
+
+  loadFolders: async () => {
+    set({ loadingFolders: true });
+    try {
+      const folders = await fetchFolders(get().space);
+      set({ folders, loadingFolders: false });
+    } catch {
+      // 文件夹拉取失败不弹全局错误：列表区已有错误提示，避免两个请求重复报同一个错
+      set({ loadingFolders: false });
+    }
+  },
+
+  setSpace: (space: FileSpace) => {
+    if (space === get().space) return;
+    set({ space, currentFolderId: null, page: 1, documents: [], folders: [] });
+    void get().loadFolders();
+    void get().loadDocuments(1, get().pageSize);
+  },
+
+  openFolder: (folderId: string | null) => {
+    set({ currentFolderId: folderId, page: 1 });
+    void get().loadDocuments(1, get().pageSize);
   },
 
   removeDocument: async (docId: string) => {
@@ -89,6 +135,8 @@ export const useDocumentStore = create<DocumentState>((set, get) => ({
       if (remaining.length === 0 && get().page > 1) {
         void get().loadDocuments(get().page - 1, get().pageSize);
       }
+      // 目录的文件计数随之变化，刷新文件夹列表
+      void get().loadFolders();
     } catch {
       set({ error: '删除失败，请稍后重试' });
     }

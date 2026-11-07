@@ -5,8 +5,9 @@ Collection: document_chunks
 - dense_vector (FLOAT_VECTOR, 1024d) → HNSW/COSINE
 - sparse_vector (SPARSE_FLOAT_VECTOR) → SPARSE_INVERTED_INDEX/IP
 - 动态标量（enable_dynamic_field=True 的集合）：source_type(VARCHAR)、
-  credibility_level(INT64)，来源可信度标注随向量写入、检索带回；
-  老集合（未开启动态字段）自动降级：不写/不取这两个字段，由 PG enrichment 兜底
+  credibility_level(INT64)、source_kind/source_id/source_name（统一知识来源标识），
+  来源可信度与来源坐标随向量写入、检索带回；
+  老集合（未开启动态字段）自动降级：不写/不取这些字段，由 PG enrichment 兜底
 """
 
 from abc import ABC, abstractmethod
@@ -63,6 +64,12 @@ class VectorRow:
     # 随向量一起写入 Milvus 动态字段，使得"存量向量由哪个模型生成"可追溯，
     # 切换模型后可用于识别旧模型向量，避免新旧向量混检。
     embedding_model: str | None = None
+    # 统一知识来源标识（第六阶段）：source_kind 区分 document / structured /
+    # structured_group / resource / kg；source_id 记录原始记录或文件组的主键；
+    # source_name 是展示用名称。均为动态字段，老集合自动降级，检索期由 PG 回表兜底。
+    source_kind: str | None = None
+    source_id: str | None = None
+    source_name: str | None = None
 
 
 class BaseVectorStore(ABC):
@@ -379,38 +386,14 @@ class MilvusStore(BaseVectorStore):
         client = self._get_client()
         # 老集合（未开启动态字段）无法写入来源标量：降级跳过，来源信息由 PG 兜底
         dynamic = self._supports_dynamic_fields()
-        data = []
-        for r in rows:
-            item = {
-                "id": r.id,
-                "doc_id": r.doc_id,
-                "kb_id": r.kb_id,
-                "chunk_index": r.chunk_index,
-                "content": r.content,
-                "page_num": r.page_num or 0,
-                "title_path": r.title_path or "",
-                "dense_vector": r.dense_vector,
-                "sparse_vector": r.sparse_vector,
-            }
-            if dynamic:
-                # 动态字段缺省值与 page_num 约定一致："" / 0 表示未标注
-                item["source_type"] = r.source_type or ""
-                item["credibility_level"] = r.credibility_level or 0
-                # TASK-008 Stage 4-3：Resource 元数据作为动态字段写入
-                # Document 向量行 resource_* 均为 None → 写入空串，与 source_type 约定一致
-                item["resource_type"] = r.resource_type or ""
-                item["resource_id"] = r.resource_id or ""
-                item["resource_name"] = r.resource_name or ""
-                item["era"] = r.era or ""
-                # 向量来源模型（空串表示未标注/legacy，与 source_type 约定一致）
-                item["embedding_model"] = r.embedding_model or ""
-            data.append(item)
         try:
-            # 分批插入，避免超大 payload
+            # 按批构造 payload 并按批发送：内存里任一时刻只有一批 dict，
+            # 不再在发送前把全部行摊平成一个 data 列表（大文件会随行数线性膨胀）
             total = 0
-            batch = settings.VECTORIZE_BATCH_SIZE
-            for i in range(0, len(data), batch):
-                res = client.insert(collection_name=self.COLLECTION, data=data[i : i + batch])
+            batch = max(int(settings.VECTORIZE_BATCH_SIZE or 0), 1)
+            for i in range(0, len(rows), batch):
+                data = [self._insert_item(r, dynamic) for r in rows[i : i + batch]]
+                res = client.insert(collection_name=self.COLLECTION, data=data)
                 total += res.get("insert_count", 0)
             # 批量任务可延迟落盘：整批结束后由调用方统一 flush（少 N-1 次落盘）
             if flush:
@@ -419,6 +402,38 @@ class MilvusStore(BaseVectorStore):
             return total
         except Exception as exc:
             raise VectorStoreError(f"Milvus 插入失败：{exc}") from exc
+
+    @staticmethod
+    def _insert_item(r: VectorRow, dynamic: bool) -> dict:
+        """单行 VectorRow → Milvus 插入 dict（随发送批次逐条构造）。"""
+        item = {
+            "id": r.id,
+            "doc_id": r.doc_id,
+            "kb_id": r.kb_id,
+            "chunk_index": r.chunk_index,
+            "content": r.content,
+            "page_num": r.page_num or 0,
+            "title_path": r.title_path or "",
+            "dense_vector": r.dense_vector,
+            "sparse_vector": r.sparse_vector,
+        }
+        if dynamic:
+            # 动态字段缺省值与 page_num 约定一致："" / 0 表示未标注
+            item["source_type"] = r.source_type or ""
+            item["credibility_level"] = r.credibility_level or 0
+            # TASK-008 Stage 4-3：Resource 元数据作为动态字段写入
+            # Document 向量行 resource_* 均为 None → 写入空串，与 source_type 约定一致
+            item["resource_type"] = r.resource_type or ""
+            item["resource_id"] = r.resource_id or ""
+            item["resource_name"] = r.resource_name or ""
+            item["era"] = r.era or ""
+            # 向量来源模型（空串表示未标注/legacy，与 source_type 约定一致）
+            item["embedding_model"] = r.embedding_model or ""
+            # 统一知识来源标识（第六阶段；Document 行留空，由 doc_id 还原）
+            item["source_kind"] = r.source_kind or ""
+            item["source_id"] = r.source_id or ""
+            item["source_name"] = r.source_name or ""
+        return item
 
     def flush(self) -> None:  # noqa: D102
         client = self._get_client()
@@ -453,6 +468,10 @@ class MilvusStore(BaseVectorStore):
                 "resource_id",
                 "resource_name",
                 "era",
+                "embedding_model",
+                "source_kind",
+                "source_id",
+                "source_name",
             ]
         rows = client.query(
             collection_name=self.COLLECTION,
@@ -475,6 +494,10 @@ class MilvusStore(BaseVectorStore):
                 "resource_id": r.get("resource_id") or None,
                 "resource_name": r.get("resource_name") or None,
                 "era": r.get("era") or None,
+                "embedding_model": r.get("embedding_model") or None,
+                "source_kind": r.get("source_kind") or None,
+                "source_id": r.get("source_id") or None,
+                "source_name": r.get("source_name") or None,
                 "dense_vector": [float(x) for x in r["dense_vector"]],
                 "sparse_vector": {int(k): float(v) for k, v in r["sparse_vector"].items()},
             }
@@ -646,6 +669,10 @@ class MilvusStore(BaseVectorStore):
                 "resource_id",
                 "resource_name",
                 "era",
+                "embedding_model",
+                "source_kind",
+                "source_id",
+                "source_name",
             ]
         try:
             results = client.search(
@@ -690,6 +717,10 @@ class MilvusStore(BaseVectorStore):
                 "resource_id",
                 "resource_name",
                 "era",
+                "embedding_model",
+                "source_kind",
+                "source_id",
+                "source_name",
             ]
         try:
             results = client.search(
@@ -728,6 +759,11 @@ class MilvusStore(BaseVectorStore):
             "resource_id": entity.get("resource_id") or None,
             "resource_name": entity.get("resource_name") or None,
             "era": entity.get("era") or None,
+            "embedding_model": entity.get("embedding_model") or None,
+            # 统一知识来源标识带回（空串 → None，老集合无该字段同样为 None）
+            "source_kind": entity.get("source_kind") or None,
+            "source_id": entity.get("source_id") or None,
+            "source_name": entity.get("source_name") or None,
             "score": float(hit.get("distance", 0.0)),
         }
 
@@ -813,6 +849,10 @@ class InMemoryVectorStore(BaseVectorStore):
                 "resource_id": v.resource_id,
                 "resource_name": v.resource_name,
                 "era": v.era,
+                "embedding_model": v.embedding_model,
+                "source_kind": v.source_kind,
+                "source_id": v.source_id,
+                "source_name": v.source_name,
                 "score": round(score, 6),
             }
             for score, v in scored[:top_k]
@@ -858,6 +898,10 @@ class InMemoryVectorStore(BaseVectorStore):
                 "resource_id": v.resource_id,
                 "resource_name": v.resource_name,
                 "era": v.era,
+                "embedding_model": v.embedding_model,
+                "source_kind": v.source_kind,
+                "source_id": v.source_id,
+                "source_name": v.source_name,
                 "score": round(score, 6),
             }
             for score, v in scored[:top_k]
@@ -879,6 +923,10 @@ class InMemoryVectorStore(BaseVectorStore):
                 "resource_id": r.resource_id,
                 "resource_name": r.resource_name,
                 "era": r.era,
+                "embedding_model": r.embedding_model,
+                "source_kind": r.source_kind,
+                "source_id": r.source_id,
+                "source_name": r.source_name,
                 "dense_vector": list(r.dense_vector),
                 "sparse_vector": dict(r.sparse_vector),
             }

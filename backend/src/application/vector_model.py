@@ -48,17 +48,23 @@ def key_from_config(config: dict | None) -> str:
 
 
 def _active_doc_filters() -> list:
-    """文档"仍在使用中"的过滤条件：未软删除 + 所属知识库不在回收站。
+    """文档"仍在使用中"的过滤条件：未软删除 + 所属知识库不在回收站 + 普通文档空间。
 
     回收站知识库里的文档同样不应计入"需要重新向量化"——它们已从所有列表与
     检索入口移除，统计进去只会让设置页长期显示一个无法消除的告警。
+
+    ``space`` 过滤：结构化数据空间的文件不参与向量化（无向量、也不会产生
+    向量），不应出现在"待重建 / 旧模型向量"集合里，否则批量重建任务会选中
+    无法向量化的文档。
     """
+    from src.core.file_spaces import DOCUMENT_SPACE
     from src.domain.models import KnowledgeBase
 
     trashed_kbs = select(KnowledgeBase.id).where(KnowledgeBase.deleted_at.is_not(None))
     return [
         Document.deleted_at.is_(None),
         Document.kb_id.not_in(trashed_kbs),
+        Document.space == DOCUMENT_SPACE,
     ]
 
 

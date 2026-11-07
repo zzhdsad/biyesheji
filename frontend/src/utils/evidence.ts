@@ -26,6 +26,8 @@ export const SOURCE_KIND_LABEL: Record<string, string> = {
   document: '文档',
   resource: '资源',
   kg: '知识图谱',
+  structured: '结构化数据',
+  structured_group: '关联数据',
 };
 
 /** Resource 细分类型 → 中文标签（与后端 RESOURCE_TYPE_LABELS 一致）。 */
@@ -121,29 +123,45 @@ export function normalizeEvidence(citation: Citation): Citation {
   // 阶段十三：KG 证据后端同时带 source_kind='kg' 与 resource_type，必须与 resource
   // 区分开（后端 group_evidence 把 KG 单独成组 kg:<type>，标签为「知识图谱·中药」）。
   const isKg = citation.source_kind === 'kg';
+  // 第六阶段：结构化 / 关联数据是独立来源类别，不能落进 document / resource 分支
+  const structuredKind =
+    citation.source_kind === 'structured' || citation.source_kind === 'structured_group'
+      ? citation.source_kind
+      : null;
+  const isStructured = structuredKind !== null;
   const isResource =
-    !isKg && (citation.source_kind === 'resource' || Boolean(citation.resource_type));
+    !isKg && !isStructured && (citation.source_kind === 'resource' || Boolean(citation.resource_type));
   const resourceType = isKg || isResource ? citation.resource_type ?? null : null;
 
-  const sourceId = isKg || isResource
-    ? citation.resource_id ?? citation.source_id ?? citation.doc_id
-    : citation.source_id ?? citation.doc_id;
+  const sourceId = isStructured
+    ? // 同一文件 / 同一文件组的多条记录聚合为一张来源卡片；记录 ID 仍在每条证据上
+      citation.source_doc_id ?? citation.group_id ?? citation.source_id ?? citation.doc_id
+    : isKg || isResource
+      ? citation.resource_id ?? citation.source_id ?? citation.doc_id
+      : citation.source_id ?? citation.doc_id;
   // 阶段十六：名称取值用 ||（而非 ??），空字符串按缺失处理，
   // 避免出现「来源名称为空」的空白证据卡片。
-  const sourceName = isKg || isResource
-    ? citation.resource_name || citation.source_name || citation.doc_name || '资源'
-    : citation.source_name || citation.doc_name || '未知文档';
+  const sourceName = isStructured
+    ? citation.source_name ||
+      citation.group_name ||
+      citation.doc_name ||
+      SOURCE_KIND_LABEL[structuredKind]
+    : isKg || isResource
+      ? citation.resource_name || citation.source_name || citation.doc_name || '资源'
+      : citation.source_name || citation.doc_name || '未知文档';
   // 优先沿用后端下发的 source_label（后端对 KG 已标注「图谱·中药」），缺失时本地推导
-  const fallbackLabel = isKg
-    ? `${SOURCE_KIND_LABEL.kg}·${resourceType ? RESOURCE_TYPE_LABEL[resourceType] ?? resourceType : SOURCE_KIND_LABEL.kg}`
-    : isResource
-      ? (resourceType ? RESOURCE_TYPE_LABEL[resourceType] ?? resourceType : SOURCE_KIND_LABEL.resource)
-      : SOURCE_KIND_LABEL.document;
+  const fallbackLabel = isStructured
+    ? SOURCE_KIND_LABEL[structuredKind]
+    : isKg
+      ? `${SOURCE_KIND_LABEL.kg}·${resourceType ? RESOURCE_TYPE_LABEL[resourceType] ?? resourceType : SOURCE_KIND_LABEL.kg}`
+      : isResource
+        ? (resourceType ? RESOURCE_TYPE_LABEL[resourceType] ?? resourceType : SOURCE_KIND_LABEL.resource)
+        : SOURCE_KIND_LABEL.document;
 
   return {
     ...citation,
     score,
-    source_kind: isKg ? 'kg' : isResource ? 'resource' : 'document',
+    source_kind: isKg ? 'kg' : isStructured ? structuredKind : isResource ? 'resource' : 'document',
     resource_type: resourceType,
     // 等级与后端 hit_to_evidence 同量纲：优先 relevance_score（dense），
     // 缺失时回退 score（reranker）；避免同一证据 level 与分组/相关度矛盾
@@ -173,6 +191,17 @@ function groupKeyOf(evidence: Citation): { groupKey: string; label: string; subt
       groupKey: `resource:${subtype}`,
       label: RESOURCE_TYPE_LABEL[subtype] ?? subtype,
       subtype,
+    };
+  }
+  // 第六阶段：结构化数据 / 关联数据各自成组，避免与其他来源混在一起
+  if (
+    evidence.source_kind === 'structured' ||
+    evidence.source_kind === 'structured_group'
+  ) {
+    return {
+      groupKey: evidence.source_kind,
+      label: SOURCE_KIND_LABEL[evidence.source_kind],
+      subtype: null,
     };
   }
   return { groupKey: 'document', label: SOURCE_KIND_LABEL.document, subtype: null };
@@ -312,34 +341,31 @@ export function parseCitationMarkers(content: string): AnswerSegment[] {
 export function sourceHref(
   ev: Pick<
     Citation,
-    | 'source_kind'
-    | 'doc_id'
-    | 'kb_id'
-    | 'resource_type'
-    | 'source_name'
-    | 'resource_name'
-    | 'doc_name'
+    'source_kind' | 'doc_id' | 'kb_id' | 'source_doc_id' | 'document_id' | 'group_id'
   >,
 ): string | null {
-  if ((ev.source_kind ?? 'document') === 'document') {
-    if (!ev.doc_id) return null;
-    const params = new URLSearchParams({ doc_id: ev.doc_id });
+  const kind = ev.source_kind ?? 'document';
+  // 结构化数据：回到「结构化数据」标签页并打开该文件
+  if (kind === 'structured') {
+    const docId = ev.document_id || ev.source_doc_id;
+    if (!docId) return null;
+    const params = new URLSearchParams({ space: 'structured', doc_id: docId });
     if (ev.kb_id) params.set('kb_id', ev.kb_id);
     return `/documents?${params.toString()}`;
   }
-  const path =
-    ev.resource_type === 'herb'
-      ? '/herbs'
-      : ev.resource_type === 'prescription'
-        ? '/prescriptions'
-        : ev.resource_type === 'theory'
-          ? '/theories'
-          : ev.resource_type === 'literature'
-            ? '/literatures'
-            : null;
-  if (!path) return null;
-  const name = ev.resource_name || ev.source_name || ev.doc_name || '';
-  return name ? `${path}?keyword=${encodeURIComponent(name)}` : path;
+  // 关联数据：回到结构化空间并直接打开对应文件组
+  if (kind === 'structured_group') {
+    if (!ev.group_id) return null;
+    const params = new URLSearchParams({ space: 'structured', group_id: ev.group_id });
+    if (ev.kb_id) params.set('kb_id', ev.kb_id);
+    return `/documents?${params.toString()}`;
+  }
+  // 结构化资源模块已下线，资源与知识图谱证据不再提供页面跳转。
+  if (kind !== 'document') return null;
+  if (!ev.doc_id) return null;
+  const params = new URLSearchParams({ doc_id: ev.doc_id });
+  if (ev.kb_id) params.set('kb_id', ev.kb_id);
+  return `/documents?${params.toString()}`;
 }
 
 /**

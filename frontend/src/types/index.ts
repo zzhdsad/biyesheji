@@ -61,9 +61,10 @@ export interface Citation {
   credibility_level?: number | null;
   /**
    * 来源类别：document（上传文献） / resource（中药·方剂·理论·文献条目） /
-   * kg（阶段十三知识图谱关系证据，后端 application/evidence.py 三值之一）。
+   * kg（阶段十三知识图谱关系证据） / structured（结构化数据记录） /
+   * structured_group（关联数据记录），与后端 SOURCE_KIND_LABELS 一致。
    */
-  source_kind?: 'document' | 'resource' | 'kg';
+  source_kind?: 'document' | 'resource' | 'kg' | 'structured' | 'structured_group';
   /** 文档所属知识库（来源定位链接用；历史数据可能为空） */
   kb_id?: string | null;
   /** 证据等级：high / medium / insufficient */
@@ -72,6 +73,25 @@ export interface Citation {
   resource_type?: ResourceType | null;
   resource_id?: string | null;
   resource_name?: string | null;
+  // ── 第六阶段：结构化 / 关联数据来源追溯 ──
+  /** 结构化文件（非关联）原始文档 ID；关联记录不使用该字段 */
+  source_doc_id?: string | null;
+  /** 普通文档的原始文档 ID（与 doc_id 同值，统一入口用） */
+  document_id?: string | null;
+  /** 结构化 / 关联知识记录 ID（一条记录一个向量） */
+  record_id?: string | null;
+  /** 记录定位：行号 / 工作表 / JSON 路径 / 关联记录序号 */
+  locate?: string | null;
+  /** 结构化记录字段与原始值（只读展示，后端已限量） */
+  fields?: Record<string, unknown> | null;
+  /** 关联数据文件组 ID / 名称 */
+  group_id?: string | null;
+  group_name?: string | null;
+  /** 关联记录的参与文件（文件名 / 角色名 / 记录定位） */
+  member_files?: { doc_id?: string; file_name?: string; alias?: string; locate?: string }[] | null;
+  /** 关联记录使用的关系（字段对与关联类型） */
+  relations?: { id?: string; from_field?: string; to_field?: string; kind?: string }[] | null;
+  relation_ids?: string[] | null;
   // ── 阶段十统一 Evidence 访问入口 ──
   evidence_id?: string;
   source_id?: string | null;
@@ -295,29 +315,6 @@ export interface KBMember {
   role: KBMemberRole;
 }
 
-// ─────────────────────────── 知识库资源挂载（TASK-008 Stage 4-7）───────────────────────────
-
-/** 知识库挂载的结构化资源类型（与后端 RESOURCE_TYPES 一致）。 */
-export type KBResourceType = 'herb' | 'prescription' | 'theory' | 'literature';
-
-/** 已挂载资源记录（与后端 ResourceMountedOut 对应）。 */
-export interface KBResource {
-  id: string;
-  knowledge_base_id: string;
-  resource_type: KBResourceType;
-  resource_id: string;
-  resource_name: string;
-  created_at: string;
-}
-
-/** 已挂载资源分页响应（GET /kb/{id}/resources）。 */
-export interface KBResourceListResponse {
-  items: KBResource[];
-  total: number;
-  limit: number;
-  offset: number;
-}
-
 /** 审计日志（BUSINESS_RULES §7）。 */
 export interface AuditLog {
   id: string;
@@ -349,8 +346,36 @@ export interface SystemConfig extends SystemConfigValues {
   defaults?: SystemConfigValues;
 }
 
-/** pending=待解析 / parsing=解析中 / success=切片就绪 / completed=已向量化 / failed=失败。 */
-export type ParseStatus = 'pending' | 'parsing' | 'success' | 'completed' | 'failed';
+/**
+ * 文件空间（与后端 src/core/file_spaces.py 一致）。
+ *
+ * - document：普通文档，进入解析 + 向量化（RAG 检索来源）
+ * - structured：结构化数据，只做字段识别 + 记录生成（不切片、不 Embedding、不写 Milvus）
+ *
+ * 两个空间各自拥有一棵文件夹树，文件不会跨空间混在一起。
+ */
+export type FileSpace = 'document' | 'structured';
+
+/**
+ * pending=待解析 / parsing=解析中 / success=切片就绪 / completed=已向量化 /
+ * failed=失败 / skipped=结构化数据文件（按设计不参与解析与向量化）。
+ */
+export type ParseStatus = 'pending' | 'parsing' | 'success' | 'completed' | 'failed' | 'skipped';
+
+/** 文件夹树节点（GET /folders 返回的扁平列表，前端按 parent_id 组树）。 */
+export interface FileFolderItem {
+  id: string;
+  space: FileSpace;
+  name: string;
+  /** null = 挂在空间根目录下 */
+  parent_id: string | null;
+  /** 该目录下的直接文件数（不递归） */
+  document_count: number;
+  /** 该目录下的直接子文件夹数（不递归） */
+  child_count: number;
+  created_at: string;
+  updated_at: string;
+}
 
 export interface DocumentItem {
   id: string;
@@ -365,6 +390,414 @@ export interface DocumentItem {
   era?: SourceEra | null;
   credibility_level?: number | null;
   created_at: string;
+  /** 替换文件/在线编辑后由后端更新（历史数据可能与 created_at 相同）。 */
+  updated_at?: string;
+  /** 所属文件空间；后端始终返回，缺省按普通文档处理。 */
+  space?: FileSpace;
+  /** 所在文件夹；null = 空间根目录。 */
+  folder_id?: string | null;
+  /**
+   * 结构化解析状态（仅结构化数据空间的 CSV / TSV / XLSX / JSON 有值）。
+   *
+   * 与 parse_status 是两套进度：parse_status 表达「切片 + 向量化」（结构化文件恒为
+   * skipped），structured_status 表达「字段识别 + 记录生成」，两者互不影响。
+   */
+  structured_status?: 'pending' | 'parsing' | 'success' | 'failed' | string | null;
+  structured_record_count?: number | null;
+  structured_field_count?: number | null;
+  structured_error_message?: string | null;
+  /**
+   * 向量索引的真实状态（统一处理状态用）：parse_status 只说明切片是否就绪，
+   * 是否真的进了 Milvus 由这两列决定，列表因此能区分「切片就绪」与「已可检索」。
+   */
+  index_status?: 'not_indexed' | 'indexed' | 'stale' | 'failed' | string;
+  vector_count?: number;
+  /** 上传/替换响应才有：同库内内容 sha256 完全相同的其他文件名（最多 5 个，仅提示）。 */
+  duplicate_names?: string[];
+}
+
+/** 结构化解析状态（与后端 structured_parses.status 一致）。 */
+export type StructuredParseStatus = 'pending' | 'parsing' | 'success' | 'failed';
+
+/** 识别出的一个字段：名称与类型都来自文件本身，后端不预设固定字段。 */
+export interface StructuredField {
+  name: string;
+  /** integer / float / bool / date / percent / null / mixed / string */
+  type: string;
+  /** 该字段在本文件中的空值数 */
+  null_count: number;
+  /** 该字段被记录的次数（列数多于表头等兜底列可能为 0） */
+  count: number;
+  /** XLSX 多工作表时标注来源表 */
+  sheet?: string | null;
+  /** 补充说明，如「同一列出现多种数据类型」 */
+  note?: string | null;
+}
+
+/** 一个文件的结构化解析概览（GET /structured/{doc_id}/parse）。 */
+export interface StructuredParseInfo {
+  doc_id: string;
+  file_name: string;
+  /** 所在文件夹链，如「古籍 / 本草 / 补益药」；根目录为空串 */
+  folder_path: string;
+  status: StructuredParseStatus | string;
+  detected_format: string;
+  encoding: string;
+  fields: StructuredField[];
+  field_count: number;
+  record_count: number;
+  /** 跳过的行数（全空行、超出上限等） */
+  skipped_count: number;
+  /** 含空值或异常提示的记录数 */
+  anomaly_count: number;
+  /** 记录数达到上限，后面未解析 */
+  truncated: boolean;
+  error_message: string;
+  parsed_at?: string | null;
+  /** 该格式是否属于结构化解析支持范围（csv/tsv/xlsx/json） */
+  supported: boolean;
+  /** 第六阶段：统一向量索引状态（pending / indexing / completed / failed） */
+  vector_status: string;
+  /** 已写入 Milvus 的向量条数（一条知识记录一个向量） */
+  vector_count: number;
+  /** 写入向量时使用的 Embedding 模型标识 */
+  vector_model?: string | null;
+  vector_error: string;
+  vectorized_at?: string | null;
+}
+
+/** 预览列表中的一条知识记录（不含完整原始字段）。 */
+export interface StructuredRecordItem {
+  id: string;
+  /** 原始行号（XLSX 为该工作表内行号，跨表可能重号） */
+  row_no: number;
+  sheet_name?: string | null;
+  json_path?: string | null;
+  /** JSON 对象按键展开时的键名 */
+  record_label: string;
+  /** 由实际字段拼成的独立知识记录文本 */
+  knowledge_text: string;
+  /** 空值与异常提示 */
+  anomalies: string[];
+  field_count: number;
+  empty_field_count: number;
+}
+
+/** 记录分页结果：每次只取一页，避免大文件全量加载。 */
+export interface StructuredRecordPage {
+  items: StructuredRecordItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  status: StructuredParseStatus | string;
+  error_message: string;
+}
+
+/** 单条记录详情：额外带原始字段与值 + 来源追溯。 */
+export interface StructuredRecordDetail extends StructuredRecordItem {
+  doc_id: string;
+  file_name: string;
+  file_type: string;
+  folder_path: string;
+  payload: Record<string, unknown>;
+  created_at?: string | null;
+}
+
+// ─────────────────── 关联结构化数据（第四阶段） ───────────────────
+// 一个文件组 = 一个独立的关联导入任务；正式关联记录只在用户确认关系后生成。
+
+/** 文件组状态：草稿 → 已校验 → 已确认；组内文件替换/删除后转 stale 需重新校验。 */
+export type StructuredGroupStatus = 'draft' | 'validated' | 'confirmed' | 'stale';
+
+/** 关联类型（由两侧字段的主键唯一性决定，不是靠字段名猜出来的）。 */
+export type RelationKind = 'one_to_one' | 'one_to_many' | 'many_to_one' | 'many_to_many';
+
+/** 组内一个文件：结构识别结果 + 主键候选（候选仍需用户确认）。 */
+export interface StructuredGroupFile {
+  doc_id: string;
+  file_name: string;
+  /** 文件当前的名字（重命名后与建组时快照不同） */
+  current_file_name: string;
+  alias: string;
+  order_no: number;
+  parse_status: StructuredParseStatus | string;
+  detected_format: string;
+  record_count: number;
+  anomaly_count: number;
+  error_message: string;
+  fields: string[];
+  field_specs: StructuredField[];
+  key_candidates: { field: string; type: string; unique: boolean; score: number; reason: string }[];
+  /** 文件已被删除或进了回收站 */
+  removed: boolean;
+}
+
+export interface StructuredGroup {
+  id: string;
+  kb_id: string;
+  name: string;
+  status: StructuredGroupStatus | string;
+  record_count: number;
+  error_message: string;
+  relation_count: number;
+  /** 尚未经用户确认的关系条数（>0 时不能生成正式关联记录） */
+  unconfirmed_count: number;
+  file_count: number;
+  created_at?: string | null;
+  updated_at?: string | null;
+  validated_at?: string | null;
+  confirmed_at?: string | null;
+  /** 第六阶段：统一向量索引状态（pending / indexing / completed / failed） */
+  vector_status: string;
+  vector_count: number;
+  vector_model?: string | null;
+  vector_error: string;
+  vectorized_at?: string | null;
+}
+
+/** 一条关联关系：origin=suggested 是系统推测，manual 是用户自选字段。 */
+export interface StructuredRelation {
+  id: string;
+  from_doc_id: string;
+  from_field: string;
+  to_doc_id: string;
+  to_field: string;
+  kind: RelationKind | string;
+  origin: 'suggested' | 'manual' | string;
+  confirmed: boolean;
+  confidence?: number | null;
+  coverage?: number;
+  /** 0–100 规则打分（不是概率）；旧数据可能没有 */
+  score?: number | null;
+  /** 评分等级：high ≥90 / medium 70–89 / low <70 */
+  tier?: 'high' | 'medium' | 'low' | string | null;
+  row_coverage?: number;
+  evidence?: string[];
+  warnings?: string[];
+  factors?: Record<string, number>;
+  /** 本次推测是否已自动预填为关系配置（仍为未确认） */
+  prefilled?: boolean;
+  reason?: string;
+}
+
+/** 校验报告：问题清单 + 每条关系的匹配/未匹配/重复/孤立计数。 */
+export interface StructuredGroupValidation {
+  issues: { level: 'error' | 'warning' | 'info' | string; type: string; relation_id: string; message: string }[];
+  relation_stats: Record<string, unknown>[];
+  error_count: number;
+  warning_count: number;
+  unconfirmed_count: number;
+  structural_error_count: number;
+  unmatched_error_count: number;
+  can_confirm: boolean;
+  /** 存在外键无法匹配的记录：确认生成前需要用户明确知情（force） */
+  force_required: boolean;
+  total_rows: number;
+  generation?: Record<string, unknown>;
+  checked_at?: string;
+}
+
+export interface StructuredGroupDetail {
+  group: StructuredGroup;
+  files: StructuredGroupFile[];
+  relations: StructuredRelation[];
+  validation: Partial<StructuredGroupValidation>;
+}
+
+// ── 统一处理状态（第五阶段）──────────────────────────────────────────────────
+// 三条链路（普通文档 / 非关联结构化 / 关联文件组）对外说同一套状态词汇，
+// 各业务原有的库字段（parse_status / structured_parses.status / 组 status）保持不变。
+
+/** 统一状态词汇；三条链路都不提供取消，因此没有 cancelled。 */
+export type ProcessingStatus =
+  | 'pending'
+  | 'processing'
+  | 'awaiting_confirm'
+  | 'success'
+  | 'failed';
+
+export type ProcessingStageState = 'done' | 'active' | 'pending' | 'failed';
+
+export interface ProcessingStage {
+  index: number;
+  label: string;
+  state: ProcessingStageState;
+}
+
+/** 后端 src/utils/processing_status.py 的派生结果（只读，不含估算百分比）。 */
+export interface ProcessingView {
+  pipeline: 'document' | 'structured' | 'group' | string;
+  status: ProcessingStatus | string;
+  stage_index: number;
+  stage_label: string;
+  stage_total: number;
+  stages: ProcessingStage[];
+  reason: string;
+  blocked_reason: string;
+  retryable: boolean;
+  retry_actions: string[];
+  next_action: string;
+  results: Record<string, unknown>;
+}
+
+/** GET /documents/{doc_id}/processing */
+export interface DocumentProcessingInfo extends ProcessingView {
+  doc_id: string;
+  file_name: string;
+  space: FileSpace | string;
+  duplicate_names: string[];
+  groups: {
+    id: string;
+    name: string;
+    status: string;
+    relation_count: number;
+    unconfirmed_count: number;
+    record_count: number;
+    error_message: string;
+  }[];
+  updated_at?: string | null;
+}
+
+/** GET /structured/groups/{group_id}/processing */
+export interface GroupProcessingInfo extends ProcessingView {
+  group_id: string;
+  name: string;
+  members: {
+    doc_id: string;
+    file_name: string;
+    alias: string;
+    parse_status: string;
+    record_count: number;
+    error_message: string;
+    removed: boolean;
+  }[];
+  updated_at?: string | null;
+}
+
+/** 一条关联知识记录（列表项，详情接口再取 parts / sources）。 */
+export interface StructuredGroupRecordItem {
+  id: string;
+  seq_no: number;
+  anchor_doc_id?: string | null;
+  knowledge_text: string;
+  anomaly_count: number;
+  source_count: number;
+  relation_count: number;
+}
+
+export interface StructuredGroupRecordPage {
+  items: StructuredGroupRecordItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  status: StructuredGroupStatus | string;
+  record_count: number;
+  error_message: string;
+}
+
+/** 关联记录详情：各参与文件的原始值 + 行号/工作表/JSON 路径 + 参与关联的字段。 */
+export interface StructuredGroupRecordDetail extends StructuredGroupRecordItem {
+  group_id: string;
+  group_name: string;
+  anchor_file: string;
+  anchor_record_id?: string | null;
+  parts: { doc_id: string; file_name: string; alias: string; locate: string; values: Record<string, unknown> }[];
+  sources: {
+    doc_id: string;
+    file_name: string;
+    alias: string;
+    record_id: string;
+    row_no?: number | null;
+    sheet_name?: string | null;
+    json_path?: string | null;
+    join_field?: string | null;
+    join_from_field?: string | null;
+    role: string;
+  }[];
+  relation_ids: string[];
+  anomalies: string[];
+  created_at?: string | null;
+}
+
+/** 站内预览类型：决定弹窗内使用文本、表格还是专用渲染器。 */
+export type DocumentPreviewKind =
+  | 'text'
+  | 'table'
+  | 'json'
+  | 'html'
+  | 'docx'
+  | 'xlsx'
+  | 'pptx'
+  | 'pdf'
+  | 'image'
+  | 'unsupported';
+
+/** JSON 预览的树节点（与后端 build_json_tree 输出一致，供 AntD Tree 使用）。 */
+export interface JsonTreeNode {
+  key: string;
+  title: string;
+  children?: JsonTreeNode[];
+}
+
+export interface DocxBlock {
+  type: 'heading' | 'paragraph';
+  level?: number | null;
+  text: string;
+}
+
+export interface XlsxSheet {
+  name: string;
+  rows: string[][];
+}
+
+export interface PptxSlide {
+  index: number;
+  lines: string[];
+}
+
+/** GET /documents/{id}/preview 返回的站内预览数据。 */
+export interface DocumentPreview {
+  id: string;
+  file_name: string;
+  file_type: string;
+  file_size: number;
+  parse_status: ParseStatus;
+  kind: DocumentPreviewKind;
+  editable: boolean;
+  encoding?: string | null;
+  content?: string | null;
+  rows?: string[][] | null;
+  delimiter?: string | null;
+  blocks?: DocxBlock[] | null;
+  sheets?: XlsxSheet[] | null;
+  slides?: PptxSlide[] | null;
+  /** kind=json：JSON 结构树（超限截断或非法时为 null） */
+  tree?: JsonTreeNode[] | null;
+  /** kind=html：服务端白名单清洗后的 HTML（仅用于 sandbox iframe 渲染） */
+  html?: string | null;
+  message?: string | null;
+  truncated: boolean;
+}
+
+/** POST /documents/{id}/content 保存结果。 */
+export interface SaveDocumentResult {
+  id: string;
+  file_size: number;
+  encoding: string;
+  parse_status: string;
+  chunk_count: number;
+  message: string;
+}
+
+/** POST /documents/{id}/replace 替换结果（文档 ID 不变）。 */
+export interface ReplaceDocumentResult {
+  id: string;
+  file_name: string;
+  file_size: number;
+  parse_status: string;
+  chunk_count: number;
+  index_status: string;
+  message: string;
 }
 
 /** 后端会话记录（GET /chat/conversations）。 */
@@ -391,110 +824,4 @@ export interface HealthResponse {
   version?: string;
   env?: string;
   components: Record<string, string>;
-}
-
-// ─────────────────────────── 中药（TASK-003）───────────────────────────
-
-/** 中药资源（与后端 HerbOut 对应）。 */
-export interface Herb {
-  id: string;
-  name: string;
-  aliases: string[];
-  properties: string;
-  channels: string[];
-  effects: string;
-  source: string;
-  description: string;
-  created_at: string;
-  updated_at: string;
-}
-
-/** 中药分页响应（GET /herbs）。 */
-export interface HerbListResponse {
-  items: Herb[];
-  total: number;
-  limit: number;
-  offset: number;
-}
-
-// ─────────────────────────── 方剂（TASK-004）───────────────────────────
-
-/** 方剂组成中的一味药材（与后端 PrescriptionIngredientOut 对应）。 */
-export interface PrescriptionIngredient {
-  id: string;
-  herb_id: string;
-  herb_name: string;
-  amount: number | null;
-  unit: string;
-  processing: string;
-  role: string;
-  sort_order: number;
-}
-
-/** 方剂资源（与后端 PrescriptionOut 对应）。 */
-export interface Prescription {
-  id: string;
-  name: string;
-  aliases: string[];
-  efficacy: string;
-  indications: string;
-  usage_method: string;
-  source: string;
-  description: string;
-  ingredients: PrescriptionIngredient[];
-  created_at: string;
-  updated_at: string;
-}
-
-/** 方剂分页响应（GET /prescriptions）。 */
-export interface PrescriptionListResponse {
-  items: Prescription[];
-  total: number;
-  limit: number;
-  offset: number;
-}
-
-// ─────────────────────────── 中医理论（TASK-005）───────────────────────────
-
-/** 中医理论资源（与后端 TheoryOut 对应）。 */
-export interface Theory {
-  id: string;
-  name: string;
-  aliases: string[];
-  content: string;
-  source: string;
-  created_at: string;
-  updated_at: string;
-}
-
-/** 理论分页响应（GET /theories）。 */
-export interface TheoryListResponse {
-  items: Theory[];
-  total: number;
-  limit: number;
-  offset: number;
-}
-
-// ─────────────────────────── 中医文献（TASK-006）───────────────────────────
-
-/** 中医文献资源（与后端 LiteratureOut 对应）。 */
-export interface Literature {
-  id: string;
-  name: string;
-  aliases: string[];
-  author: string;
-  dynasty: string;
-  summary: string;
-  content: string;
-  source: string;
-  created_at: string;
-  updated_at: string;
-}
-
-/** 文献分页响应（GET /literatures）。 */
-export interface LiteratureListResponse {
-  items: Literature[];
-  total: number;
-  limit: number;
-  offset: number;
 }

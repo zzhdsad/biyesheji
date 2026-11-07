@@ -12,10 +12,6 @@ $ErrorActionPreference = 'Stop'
 $Base = 'http://localhost:3000'
 $Routes = @(
     '/chat',
-    '/herbs',
-    '/prescriptions',
-    '/theories',
-    '/literatures',
     '/kb',
     '/documents',
     '/users',

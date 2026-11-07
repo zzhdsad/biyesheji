@@ -1,6 +1,8 @@
 """文件存储抽象：本地磁盘 / MinIO 可切换（依赖倒置，便于替换实现）。"""
 
 import io
+import os
+import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -19,6 +21,14 @@ class BaseStorage(ABC):
     @abstractmethod
     def save(self, file_key: str, content: bytes) -> str:
         """保存文件，返回存储引用（本地为相对路径，MinIO 为 s3:// URI）。"""
+
+    @abstractmethod
+    def replace(self, file_key: str, content: bytes) -> None:
+        """原子替换已有文件：新内容先落临时对象，写入成功才切到目标 key。
+
+        任何一步失败时目标文件保持原内容，调用方可安全重试（在线编辑/替换文件
+        依赖这一保证，避免半写文件覆盖用户原有文档）。
+        """
 
     @abstractmethod
     def delete(self, file_key: str) -> None:
@@ -45,6 +55,18 @@ class LocalStorage(BaseStorage):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
         return str(path)
+
+    def replace(self, file_key: str, content: bytes) -> None:
+        """同目录临时文件 + os.replace：写失败或进程中断都不会损坏原文件。"""
+        path = self._resolve(file_key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.tmp-{uuid.uuid4().hex}")
+        try:
+            tmp.write_bytes(content)
+            os.replace(tmp, path)
+        finally:
+            if tmp.exists():  # 成功时已被 rename 走，这里只清理失败残留
+                tmp.unlink()
 
     def delete(self, file_key: str) -> None:
         path = self._resolve(file_key)
@@ -83,6 +105,28 @@ class MinIOStorage(BaseStorage):
             self._bucket, file_key, io.BytesIO(content), length=len(content)
         )
         return f"s3://{self._bucket}/{file_key}"
+
+    def replace(self, file_key: str, content: bytes) -> None:
+        """先写临时对象再 copy 覆盖：copy 成功前原对象始终可读。"""
+        from minio.commonconfig import CopySource
+        from minio.error import S3Error
+
+        self._ensure_bucket()
+        tmp_key = f"{file_key}.tmp-{uuid.uuid4().hex}"
+        try:
+            self._client.put_object(
+                self._bucket, tmp_key, io.BytesIO(content), length=len(content)
+            )
+            self._client.copy_object(
+                self._bucket, file_key, CopySource(self._bucket, tmp_key)
+            )
+        except S3Error as exc:
+            raise StorageError(f"MinIO 替换失败：{exc}") from exc
+        finally:
+            try:
+                self._client.remove_object(self._bucket, tmp_key)
+            except Exception as exc:  # noqa: BLE001 - 临时对象残留不影响正确性
+                logger.warning(f"清理 MinIO 临时对象失败 {tmp_key}: {exc}")
 
     def delete(self, file_key: str) -> None:
         from minio.error import S3Error

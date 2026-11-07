@@ -5,6 +5,8 @@ token 计数为近似估算（中文 ≈ 字数，英文 ≈ 字符数/4），
 TODO: 接入 BGE-m3 tokenizer（XLM-RoBERTa）后替换为精确计数。
 """
 
+import csv
+import io
 import re
 from dataclasses import dataclass
 
@@ -200,6 +202,62 @@ def chunk_document(md: str) -> list[RawChunk]:
         return []
 
     results = _merge_tiny_chunks(results, min_tokens)
+    for idx, rc in enumerate(results):
+        rc.chunk_index = idx
+    return results
+
+
+def _render_delimited_row(row: list[str], delimiter: str) -> str:
+    """按 CSV 引号规则还原一行，避免含分隔符/引号的字段被拆散。"""
+    buf = io.StringIO()
+    csv.writer(buf, delimiter=delimiter, lineterminator="").writerow(row)
+    return buf.getvalue()
+
+
+def chunk_delimited(text: str, delimiter: str) -> list[RawChunk]:
+    """CSV/TSV 专用切片：按整行组块，每块重复表头，单行永不拆开。
+
+    通用 chunk_document 会把一行数据从中间切开且后续块丢失表头，
+    检索回来的片段无法解释列含义，因此表格类走这条路径。
+    """
+    try:
+        rows = [
+            row
+            for row in csv.reader(io.StringIO(text, newline=""), delimiter=delimiter)
+            if row and any(cell.strip() for cell in row)
+        ]
+    except csv.Error:
+        return chunk_document(text)  # 畸形表格退回通用切片，保证内容不丢
+    if not rows:
+        return []
+
+    chunk_size = settings.CHUNK_SIZE_TOKENS
+    header = _render_delimited_row(rows[0], delimiter)
+    data = rows[1:]
+    results: list[RawChunk] = []
+
+    def label(start: int, end: int) -> str:
+        return f"表格 第 {start} 行" if start == end else f"表格 第 {start}-{end} 行"
+
+    if not data:
+        results.append(RawChunk(content=header, title_path="表格 表头"))
+    index = 0
+    total = len(data)
+    while index < total:
+        start = index + 1
+        buf = [header]
+        used = estimate_tokens(header)
+        while index < total:
+            line = _render_delimited_row(data[index], delimiter)
+            tokens = estimate_tokens(line)
+            # 首行无条件保留：宁可超预算也不把一行拆到两个片段
+            if len(buf) > 1 and used + tokens > chunk_size:
+                break
+            buf.append(line)
+            used += tokens
+            index += 1
+        results.append(RawChunk(content="\n".join(buf), title_path=label(start, index)))
+
     for idx, rc in enumerate(results):
         rc.chunk_index = idx
     return results

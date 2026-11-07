@@ -228,8 +228,7 @@ Query → QueryAnalyzer → EntityResolver → DynamicRouter → HyDE
 | --- | --- |
 | `/auth` | 登录 / 退出 / 当前用户 / 改密 |
 | `/users` `/audit` `/admin` | 用户管理、审计、仪表盘（admin）；`/admin/import` 导入中心 |
-| `/kb` `/documents` | 知识库 / 成员 / 资源挂载；文档上传 / 解析 / 向量化 / 回收站 |
-| `/herbs` `/prescriptions` `/theories` `/literatures` `/taxonomy` | 四类资源与分类标签 |
+| `/kb` `/documents` | 知识库 / 成员；文档上传 / 解析 / 向量化 / 回收站 |
 | `/chat` | `ask`、`ask-stream`、`evidence/translate`、会话管理 |
 | `/kg` `/evaluation` `/feedbacks` | 知识图谱、评测、用户反馈 |
 | `/settings` | 模型配置、Embedding 状态 / 重建、系统参数 |

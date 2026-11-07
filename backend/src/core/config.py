@@ -201,6 +201,23 @@ class Settings(BaseSettings):
     MILVUS_DIM: int = 1024
     VECTORIZE_BATCH_SIZE: int = 32
 
+    # ── 结构化数据解析 / 关联记录生成的分批大小 ──────────────────────────────
+    # 解析：每批从文件产出多少条记录、每次 INSERT 多少条；关联生成：每次从
+    # structured_records 读多少条锚点、每次 INSERT 多少条关联记录。
+    # 批次只限制内存峰值，不限制业务总行数（不再有 2 万条硬上限）。
+    STRUCTURED_PARSE_READ_BATCH: int = 2000
+    STRUCTURED_PARSE_WRITE_BATCH: int = 1000
+    STRUCTURED_GROUP_READ_BATCH: int = 2000
+    STRUCTURED_GROUP_WRITE_BATCH: int = 500
+    # 结构化向量化：每批从 PG 读多少条记录（读一批 → 编码一批 → 写一批）。
+    # 内存峰值 ≈ 该值 × 单条记录向量大小，不随文件总行数增长；
+    # 批内 Embedding / Milvus 发送仍按 VECTORIZE_BATCH_SIZE 细分。
+    STRUCTURED_VECTOR_READ_BATCH: int = 500
+    # 关联知识生成的最大跳数：从锚点沿已确认关系最多展开几跳（A→B 为 1 跳，
+    # A→B→C 为 2 跳）。默认 2；调大可支持更长链式关联，循环与重复路径会自动停止。
+    # 只影响正式关联生成，不影响关系推测与校验。
+    STRUCTURED_RELATION_MAX_HOPS: int = 2
+
     # ── 批量向量化任务（文档重新向量化 / 资源批量挂载）的批次与并发 ──────────
     # 目标机器：15GB RAM + CPU BGE-M3 + Milvus Docker。默认一律取保守值：
     # 单进程、单 embedding worker、串行流水线，优先稳定而非吃满资源。

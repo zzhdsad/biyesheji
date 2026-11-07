@@ -16,6 +16,7 @@ resource_type 过滤，Baseline 策略 baseline_hybrid 参数全部沿用全局�
 """
 
 import asyncio
+import json
 import re
 import uuid
 from collections.abc import AsyncIterator
@@ -26,8 +27,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.config import settings
 from src.core.exceptions import NotFoundError, PermissionDeniedError
+from src.core.file_spaces import STRUCTURED_SPACE
 from src.core.runtime_config import get_system_value
 from src.domain.models import (  # noqa: E402
+    STRUCTURED_GROUP_CONFIRMED,
     Conversation,
     Document,
     Herb,
@@ -35,6 +38,9 @@ from src.domain.models import (  # noqa: E402
     Literature,
     Message,
     Prescription,
+    StructuredGroup,
+    StructuredGroupRecord,
+    StructuredRecord,
     Theory,
     User,
 )
@@ -46,6 +52,17 @@ from src.infrastructure.rerank import BaseRerank, RerankError, get_rerank
 from src.infrastructure.redis_client import BaseConversationCache, get_conversation_cache
 from src.utils.retrieval import rrf_fusion
 from src.application.model_config_service import get_effective_config_cached
+from src.application.structured_vector_service import (
+    SOURCE_KIND_STRUCTURED,
+    SOURCE_KIND_STRUCTURED_GROUP,
+    doc_uuid_of_structured_key,
+    group_record_uuid_of_vector_id,
+    group_uuid_of_doc_key,
+    is_structured_doc_key,
+    is_structured_group_doc_key,
+    locate_text as structured_locate_text,
+    record_uuid_of_vector_id,
+)
 
 SYSTEM_PROMPT = (
     "你是企业知识库智能问答助手，回答风格借鉴腾讯 ima：用自然、流畅的中文，"
@@ -635,7 +652,12 @@ class RagService:
         need = [
             h
             for h in hits
-            if not h.get("resource_type") and not self._is_document_doc_id(h.get("doc_id"))
+            if not h.get("resource_type")
+            and not self._is_document_doc_id(h.get("doc_id"))
+            # 结构化 / 关联记录的 doc_id 带 sr: / sgr: 前缀，来源元数据由
+            # _enrich_hits_with_doc_name 回表补齐，不参与资源元数据映射
+            and not _is_structured_doc_key(h.get("doc_id"))
+            and not _is_structured_group_doc_key(h.get("doc_id"))
         ]
         if not need:
             return
@@ -661,8 +683,23 @@ class RagService:
 
         doc_ids: set[uuid.UUID] = set()
         resource_ids: dict[str, set[uuid.UUID]] = {}
+        # 第六阶段：结构化记录（sr:<record>）与关联记录（sgr:<record>）命中
+        structured_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
+        group_pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
         for hit in hits:
             doc_id = hit.get("doc_id")
+            if is_structured_doc_key(doc_id):
+                did = doc_uuid_of_structured_key(doc_id)
+                rid = record_uuid_of_vector_id(hit.get("id"))
+                if did is not None and rid is not None:
+                    structured_pairs.add((did, rid))
+                continue
+            if is_structured_group_doc_key(doc_id):
+                gid = group_uuid_of_doc_key(doc_id)
+                rid = group_record_uuid_of_vector_id(hit.get("id"))
+                if gid is not None and rid is not None:
+                    group_pairs.add((gid, rid))
+                continue
             if self._is_document_doc_id(doc_id):
                 try:
                     doc_ids.add(uuid.UUID(str(doc_id)))
@@ -679,6 +716,9 @@ class RagService:
 
         active_docs: set[uuid.UUID] = set()
         active_resources: set[tuple[str, str]] = set()
+        # 结构化记录 → (doc_id, record_id)；关联记录 → (group_id, record_id)
+        active_structured: set[tuple[uuid.UUID, uuid.UUID]] = set()
+        active_group_records: set[tuple[uuid.UUID, uuid.UUID]] = set()
         try:
             if doc_ids:
                 rows = await self.db.scalars(
@@ -700,12 +740,92 @@ class RagService:
                     )
                 )
                 active_resources.update((rtype, str(rid)) for rid in rows.all())
+
+            if structured_pairs:
+                # 文件未软删除 + 仍在结构化空间 + 记录确实属于该文件：
+                # 记录被整体替换（重新解析）后残留的旧向量在这里被剔除。
+                structured_docs = {pair[0] for pair in structured_pairs}
+                structured_records = {pair[1] for pair in structured_pairs}
+                live_docs = set(
+                    (
+                        await self.db.scalars(
+                            select(Document.id).where(
+                                Document.id.in_(structured_docs),
+                                Document.deleted_at.is_(None),
+                                Document.space == STRUCTURED_SPACE,
+                            )
+                        )
+                    ).all()
+                )
+                record_doc = {
+                    row[0]: row[1]
+                    for row in (
+                        await self.db.execute(
+                            select(StructuredRecord.id, StructuredRecord.doc_id).where(
+                                StructuredRecord.id.in_(structured_records)
+                            )
+                        )
+                    ).all()
+                }
+                active_structured = {
+                    (did, rid)
+                    for did, rid in structured_pairs
+                    if did in live_docs and record_doc.get(rid) == did
+                }
+
+            if group_pairs:
+                # 只有「关系已确认」的文件组 + 仍然存在的关联记录才算有效来源：
+                # stale / draft / validated 的组即便向量尚未清理，也不得参与检索。
+                group_ids = {pair[0] for pair in group_pairs}
+                group_records = {pair[1] for pair in group_pairs}
+                live_groups = set(
+                    (
+                        await self.db.scalars(
+                            select(StructuredGroup.id).where(
+                                StructuredGroup.id.in_(group_ids),
+                                StructuredGroup.status == STRUCTURED_GROUP_CONFIRMED,
+                            )
+                        )
+                    ).all()
+                )
+                record_group = {
+                    row[0]: row[1]
+                    for row in (
+                        await self.db.execute(
+                            select(
+                                StructuredGroupRecord.id,
+                                StructuredGroupRecord.group_id,
+                            ).where(StructuredGroupRecord.id.in_(group_records))
+                        )
+                    ).all()
+                }
+                active_group_records = {
+                    (gid, rid)
+                    for gid, rid in group_pairs
+                    if gid in live_groups and record_group.get(rid) == gid
+                }
         except Exception as exc:  # noqa: BLE001 - 状态校验失败时按安全侧拒答
             logger.warning(f"检索命中状态校验失败，丢弃本批命中: {exc}")
             return []
 
         def _active(hit: dict) -> bool:
             doc_id = hit.get("doc_id")
+            if is_structured_doc_key(doc_id):
+                did = doc_uuid_of_structured_key(doc_id)
+                rid = record_uuid_of_vector_id(hit.get("id"))
+                return bool(
+                    did is not None
+                    and rid is not None
+                    and (did, rid) in active_structured
+                )
+            if is_structured_group_doc_key(doc_id):
+                gid = group_uuid_of_doc_key(doc_id)
+                rid = group_record_uuid_of_vector_id(hit.get("id"))
+                return bool(
+                    gid is not None
+                    and rid is not None
+                    and (gid, rid) in active_group_records
+                )
             if self._is_document_doc_id(doc_id):
                 try:
                     return uuid.UUID(str(doc_id)) in active_docs
@@ -1651,8 +1771,25 @@ class RagService:
                 return False
             return True
 
-        doc_hits = [h for h in hits if _is_doc_row(h)]
-        res_hits = [h for h in hits if not _is_doc_row(h)]
+        structured_hits = [h for h in hits if is_structured_doc_key(h.get("doc_id"))]
+        group_hits = [h for h in hits if is_structured_group_doc_key(h.get("doc_id"))]
+        doc_hits = [
+            h
+            for h in hits
+            if h not in structured_hits and h not in group_hits and _is_doc_row(h)
+        ]
+        res_hits = [
+            h
+            for h in hits
+            if h not in structured_hits and h not in group_hits and not _is_doc_row(h)
+        ]
+
+        # 第六阶段：结构化记录 / 关联记录回表补齐来源坐标（文件、记录、行号 / JSON
+        # 路径、字段与值、文件组、参与文件、关系）。这一层是引用追溯的事实来源。
+        if structured_hits:
+            await self._enrich_structured_hits(structured_hits)
+        if group_hits:
+            await self._enrich_group_hits(group_hits)
 
         # Document 命中：按 doc_id（UUID）批量查 documents 表
         doc_ids = {h["doc_id"] for h in doc_hits if h.get("doc_id")}
@@ -1686,6 +1823,165 @@ class RagService:
                 h["source_kind"] = "resource"
             # source_type / credibility_level 在 Stage 4-3 写入时为 None（资源表无此字段）
             # 保留 Milvus 带回的值（可能为 None）
+            h.setdefault("source_type", None)
+            h.setdefault("era", None)
+            h.setdefault("credibility_level", None)
+
+    # 记录字段回填上限：限制响应体积，原文仍可在现有页面查看完整记录
+    _FIELDS_LIMIT = 20
+    _FIELD_VALUE_CHARS = 160
+    _MEMBERS_LIMIT = 12
+    _RELATIONS_LIMIT = 12
+
+    @classmethod
+    def _display_fields(cls, payload: dict | None) -> dict[str, str]:
+        """记录字段与值（截断展示用；不修改数据库里的原始 payload）。"""
+        out: dict[str, str] = {}
+        for key, value in list((payload or {}).items())[: cls._FIELDS_LIMIT]:
+            if isinstance(value, str):
+                text = value
+            else:
+                try:
+                    text = json.dumps(value, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    text = str(value)
+            out[str(key)] = text[: cls._FIELD_VALUE_CHARS]
+        return out
+
+    async def _enrich_structured_hits(self, hits: list[dict]) -> None:
+        """结构化记录命中：回填文件名 / 文件 ID / 记录 ID / 行号或 JSON 路径 / 字段值。"""
+        doc_ids = {
+            did
+            for h in hits
+            if (did := doc_uuid_of_structured_key(h.get("doc_id"))) is not None
+        }
+        record_ids = {
+            rid
+            for h in hits
+            if (rid := record_uuid_of_vector_id(h.get("id"))) is not None
+        }
+        docs = {
+            d.id: d
+            for d in (
+                await self.db.scalars(select(Document).where(Document.id.in_(doc_ids)))
+            ).all()
+        } if doc_ids else {}
+        records = {
+            r.id: r
+            for r in (
+                await self.db.scalars(
+                    select(StructuredRecord).where(StructuredRecord.id.in_(record_ids))
+                )
+            ).all()
+        } if record_ids else {}
+
+        for h in hits:
+            did = doc_uuid_of_structured_key(h.get("doc_id"))
+            rid = record_uuid_of_vector_id(h.get("id"))
+            doc = docs.get(did) if did is not None else None
+            record = records.get(rid) if rid is not None else None
+            name = doc.file_name if doc is not None else "结构化文件"
+            h["source_kind"] = SOURCE_KIND_STRUCTURED
+            # 分组键：同一文件的多条记录聚合到一张来源卡片
+            h["source_doc_id"] = h.get("doc_id")
+            h["source_name"] = name
+            h["doc_name"] = name
+            if doc is not None:
+                h["document_id"] = str(doc.id)
+            if record is not None:
+                h["record_id"] = str(record.id)
+                h["locate"] = structured_locate_text(record)
+                h["fields"] = self._display_fields(record.payload)
+                if not h.get("title_path"):
+                    h["title_path"] = h["locate"]
+            h.setdefault("source_type", None)
+            h.setdefault("era", None)
+            h.setdefault("credibility_level", None)
+
+    async def _enrich_group_hits(self, hits: list[dict]) -> None:
+        """关联记录命中：回填文件组 / 参与文件 / 关联记录 ID / 关系与原始记录位置。"""
+        group_ids = {
+            gid
+            for h in hits
+            if (gid := group_uuid_of_doc_key(h.get("doc_id"))) is not None
+        }
+        record_ids = {
+            rid
+            for h in hits
+            if (rid := group_record_uuid_of_vector_id(h.get("id"))) is not None
+        }
+        groups = {
+            g.id: g
+            for g in (
+                await self.db.scalars(select(StructuredGroup).where(StructuredGroup.id.in_(group_ids)))
+            ).all()
+        } if group_ids else {}
+        records = {
+            r.id: r
+            for r in (
+                await self.db.scalars(
+                    select(StructuredGroupRecord).where(
+                        StructuredGroupRecord.id.in_(record_ids)
+                    )
+                )
+            ).all()
+        } if record_ids else {}
+
+        for h in hits:
+            gid = group_uuid_of_doc_key(h.get("doc_id"))
+            rid = group_record_uuid_of_vector_id(h.get("id"))
+            group = groups.get(gid) if gid is not None else None
+            record = records.get(rid) if rid is not None else None
+            name = (group.name if group is not None else "") or "关联文件组"
+            h["source_kind"] = SOURCE_KIND_STRUCTURED_GROUP
+            h["source_doc_id"] = h.get("doc_id")
+            h["source_name"] = name
+            h["doc_name"] = name
+            if group is not None:
+                h["group_id"] = str(group.id)
+                h["group_name"] = name
+            if record is not None:
+                h["record_id"] = str(record.id)
+                sources = list(record.sources or [])
+                members: dict[str, dict] = {}
+                for src in sources:
+                    member_id = str(src.get("doc_id") or "")
+                    if not member_id or member_id in members:
+                        continue
+                    members[member_id] = {
+                        "doc_id": member_id,
+                        "file_name": src.get("file_name") or "",
+                        "alias": src.get("alias") or "",
+                    }
+                h["member_files"] = list(members.values())[: self._MEMBERS_LIMIT]
+                # 每条参与文件对应的原始记录位置（行号 / JSON 路径）
+                h["locate"] = (
+                    "；".join(
+                        f"{src.get('file_name') or src.get('alias') or '文件'}"
+                        + (f" · {src['locate']}" if src.get("locate") else "")
+                        for src in sources[: self._MEMBERS_LIMIT]
+                    )
+                    or None
+                )
+                relation_ids = [str(rel) for rel in (record.relation_ids or [])]
+                h["relation_ids"] = relation_ids[: self._RELATIONS_LIMIT]
+                if group is not None and group.relations:
+                    wanted = set(relation_ids)
+                    h["relations"] = [
+                        {
+                            key: rel.get(key)
+                            for key in (
+                                "id",
+                                "kind",
+                                "from_doc_id",
+                                "from_field",
+                                "to_doc_id",
+                                "to_field",
+                            )
+                        }
+                        for rel in group.relations
+                        if not wanted or str(rel.get("id")) in wanted
+                    ][: self._RELATIONS_LIMIT]
             h.setdefault("source_type", None)
             h.setdefault("era", None)
             h.setdefault("credibility_level", None)
@@ -1725,6 +2021,26 @@ class RagService:
                 )
                 blocks.append(
                     f"[{i}] 资源：{rtype_label} {h.get('doc_name', '未知')}{provenance} | "
+                    f"{page_label} | 标题：{source}\n{h['content']}"
+                )
+            elif h.get("source_kind") == SOURCE_KIND_STRUCTURED:
+                # 结构化记录：标注文件名 + 原始记录位置（行号 / JSON 路径）
+                locate = h.get("locate") or source
+                blocks.append(
+                    f"[{i}] 结构化数据：{h.get('doc_name', '未知')} · {locate}{provenance} | "
+                    f"{page_label} | 标题：{source}\n{h['content']}"
+                )
+            elif h.get("source_kind") == SOURCE_KIND_STRUCTURED_GROUP:
+                # 关联记录：标注文件组 + 参与文件（保留一对多 / 多对多上下文）
+                members = "、".join(
+                    m.get("file_name") or m.get("alias") or "文件"
+                    for m in (h.get("member_files") or [])
+                )
+                group_label = h.get("group_name") or h.get("doc_name") or "关联文件组"
+                if members:
+                    group_label = f"{group_label}（参与文件：{members}）"
+                blocks.append(
+                    f"[{i}] 关联数据：{group_label}{provenance} | "
                     f"{page_label} | 标题：{source}\n{h['content']}"
                 )
             else:
