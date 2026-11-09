@@ -176,10 +176,18 @@ _rerank: BaseRerank | None = None  # 仅 env 路径 / 测试注入用
 
 
 def _resolve_rerank_config(config: dict | None) -> tuple[str, str, str]:
-    """解析生效配置（None/空值回退 env），与 BGERerank.__init__ 语义一致。"""
+    """解析生效配置（None/空值回退 env），与 BGERerank.__init__ 语义一致。
+
+    本地预下载优先：运行时配置（DB）里的 rerank_model 通常仍是默认模型 ID
+    （如 BAAI/bge-reranker-v2-m3），若镜像已内置同名权重，就直接用
+    RERANK_MODEL_PATH 本地路径，避免离线/内网环境回落到 HuggingFace 下载而失败。
+    """
     c = config or {}
     backend = (c.get("rerank_backend") or settings.RERANK_BACKEND).lower()
-    model = c.get("rerank_model") or settings.RERANK_MODEL_PATH or settings.RERANK_MODEL
+    model = c.get("rerank_model") or settings.RERANK_MODEL
+    if settings.RERANK_MODEL_PATH and model == settings.RERANK_MODEL:
+        model = settings.RERANK_MODEL_PATH
+    model = model or settings.RERANK_MODEL
     device = (c.get("rerank_device") or settings.RERANK_DEVICE).lower()
     return backend, model, device
 

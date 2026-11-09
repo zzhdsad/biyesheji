@@ -997,7 +997,7 @@ def test_ask_stream_keeps_event_order_and_carries_reflection(client, monkeypatch
 
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 def test_ask_stream_insufficient_keeps_contract(client, monkeypatch):
-    """Gate insufficient：SSE 仍为 citations → delta → done，Evidence 保留。"""
+    """Gate insufficient：SSE 仍为 citations → delta → done（citations 为空，不展示无关证据）。"""
     weak_kg = [
         _kg_hit("金银花相关：辛凉解表", score=0.9, relation=KG_RELATION_RELATED_TO,
                 provenance=KG_PROVENANCE_SHARED_TAG)

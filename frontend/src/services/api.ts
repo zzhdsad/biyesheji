@@ -281,6 +281,8 @@ export interface DocumentListParams {
   folderId?: string | null;
   /** true = 只看空间根目录（folder_id IS NULL），与 folderId 互斥 */
   rootOnly?: boolean;
+  /** 仅结构化空间：true = 只看文件组引用的文件，false = 只看未关联的文件 */
+  related?: boolean;
   limit?: number;
   offset?: number;
 }
@@ -289,13 +291,14 @@ export interface DocumentListParams {
 export async function fetchDocumentsPage(
   params: DocumentListParams = {},
 ): Promise<DocumentPage> {
-  const { kbId, space, folderId, rootOnly, limit, offset } = params;
+  const { kbId, space, folderId, rootOnly, related, limit, offset } = params;
   const { data, headers } = await api.get<DocumentItem[]>('/documents', {
     params: {
       ...(kbId ? { kb_id: kbId } : {}),
       ...(space ? { space } : {}),
       ...(folderId ? { folder_id: folderId } : {}),
       ...(rootOnly ? { root_only: true } : {}),
+      ...(related != null ? { related } : {}),
       ...(limit != null ? { limit } : {}),
       ...(offset != null ? { offset } : {}),
     },
@@ -376,8 +379,13 @@ export async function reindexDocument(docId: string): Promise<DocumentItem> {
 // 每个文件空间一棵独立的文件夹树；文件夹只负责组织文件，不重复保存内容。
 
 /** 该空间全部文件夹（扁平列表 + 直接子级计数），前端按 parent_id 组树。 */
-export async function fetchFolders(space: FileSpace): Promise<FileFolderItem[]> {
-  const { data } = await api.get<FileFolderItem[]>('/folders', { params: { space } });
+export async function fetchFolders(
+  space: FileSpace,
+  related?: boolean,
+): Promise<FileFolderItem[]> {
+  const { data } = await api.get<FileFolderItem[]>('/folders', {
+    params: { space, ...(related != null ? { related } : {}) },
+  });
   return data;
 }
 
@@ -469,6 +477,16 @@ export async function reparseStructured(docId: string): Promise<StructuredParseI
 /** 手动重建结构化文件的向量索引（202 Accepted，返回派发时的当前概览）。 */
 export async function revectorizeStructured(docId: string): Promise<StructuredParseInfo> {
   const { data } = await api.post<StructuredParseInfo>(`/structured/${docId}/revectorize`);
+  return data;
+}
+
+/** 停止结构化文件正在等待 / 执行的向量化（202；服务层在下一批之间退出）。 */
+export async function cancelStructuredVectorize(
+  docId: string,
+): Promise<StructuredParseInfo> {
+  const { data } = await api.post<StructuredParseInfo>(
+    `/structured/${docId}/cancel-vectorize`,
+  );
   return data;
 }
 
@@ -564,13 +582,7 @@ export async function removeStructuredGroupFile(
   return data;
 }
 
-/** 推测跨文件关系：返回的每条都是 confirmed=false 的候选，不会自动入库。 */
-export async function suggestStructuredRelations(groupId: string): Promise<StructuredRelation[]> {
-  const { data } = await api.post<StructuredRelation[]>(`/structured/groups/${groupId}/suggest`);
-  return data;
-}
-
-/** 整份保存关系配置（用户勾选确认的推测结果 或 手动选择的字段）。 */
+/** 整份保存关系配置（只能由用户手动选择两侧文件与关联字段）。 */
 export async function saveStructuredRelations(
   groupId: string,
   relations: Omit<StructuredRelation, 'id'>[],
@@ -581,7 +593,7 @@ export async function saveStructuredRelations(
   return data;
 }
 
-/** 逐条确认/取消确认一条关系（推测的关系只有在这里才能变成已确认）。 */
+/** 逐条确认/取消确认一条关系（兼容历史遗留的未确认关系）。 */
 export async function setStructuredRelationConfirmation(
   groupId: string,
   relationId: string,
@@ -621,6 +633,16 @@ export async function confirmStructuredGroup(
 export async function revectorizeStructuredGroup(groupId: string): Promise<StructuredGroup> {
   const { data } = await api.post<StructuredGroup>(
     `/structured/groups/${groupId}/revectorize`,
+  );
+  return data;
+}
+
+/** 停止文件组正在等待 / 执行的向量化（202；服务层在下一批之间退出）。 */
+export async function cancelStructuredGroupVectorize(
+  groupId: string,
+): Promise<StructuredGroup> {
+  const { data } = await api.post<StructuredGroup>(
+    `/structured/groups/${groupId}/cancel-vectorize`,
   );
   return data;
 }

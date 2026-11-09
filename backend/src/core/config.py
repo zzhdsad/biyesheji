@@ -197,9 +197,18 @@ class Settings(BaseSettings):
     # 向量化（TECH_DESIGN：BGE-M3 稠密 1024d + 稀疏向量）
     EMBEDDING_BACKEND: str = "flagembedding"
     EMBEDDING_DEVICE: str = "cpu"
+    # 模型内部真正的前向微批（一次前向编码多少条）：实测 2 线程 CPU 上
+    # 16 已是最优，放大到 32/64 反而明显变慢（长序列的内存/缓存压力更大）。
     EMBEDDING_BATCH_SIZE: int = 16
     MILVUS_DIM: int = 1024
-    VECTORIZE_BATCH_SIZE: int = 32
+    # Milvus 单次 insert RPC 发送的行数（结构化向量化与分批写入共用）。
+    # 只影响 RPC 分片，不改变写入总量；保持较小值避免单条 gRPC 消息过大。
+    VECTORIZE_BATCH_SIZE: int = 64
+    # 一次 Embedding 调用传入的文本条数（外层批次），也是进度回写粒度。
+    # 放大后 FlagEmbedding 能在更大集合内按长度排序再切微批，减少动态
+    # padding 的填充；模型内部前向仍按 EMBEDDING_BATCH_SIZE 控制，单条
+    # 由 max_length=1024 截断，因此不抬高单次前向的 token 上限。
+    VECTORIZE_ENCODE_BATCH_SIZE: int = 256
 
     # ── 结构化数据解析 / 关联记录生成的分批大小 ──────────────────────────────
     # 解析：每批从文件产出多少条记录、每次 INSERT 多少条；关联生成：每次从
@@ -215,7 +224,7 @@ class Settings(BaseSettings):
     STRUCTURED_VECTOR_READ_BATCH: int = 500
     # 关联知识生成的最大跳数：从锚点沿已确认关系最多展开几跳（A→B 为 1 跳，
     # A→B→C 为 2 跳）。默认 2；调大可支持更长链式关联，循环与重复路径会自动停止。
-    # 只影响正式关联生成，不影响关系推测与校验。
+    # 只影响正式关联生成，不影响关系配置与校验。
     STRUCTURED_RELATION_MAX_HOPS: int = 2
 
     # ── 批量向量化任务（文档重新向量化 / 资源批量挂载）的批次与并发 ──────────
@@ -263,7 +272,7 @@ class Settings(BaseSettings):
     RERANK_MODEL_PATH: str | None = None
     # 设备：cpu / cuda:0 / mps；CPU 上自动禁用 fp16
     RERANK_DEVICE: str = "cpu"
-    # HyDE 查询改写（TECH_DESIGN §4.5：检索前生成假设答案替换原问题）
+    # HyDE 查询改写（TECH_DESIGN §4.5：检索前生成假设答案，作补充召回；原问题始终保留）
     # 默认开启并复用主 LLM；关闭改动的开关是 HYDE_ENABLED=false
     HYDE_ENABLED: bool = True
     HYDE_BACKEND: str = "openai"  # openai（OpenAI 兼容，默认复用主 LLM）

@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import {
   Alert,
   Breadcrumb,
@@ -9,6 +9,7 @@ import {
   Input,
   Modal,
   Popconfirm,
+  Progress,
   Select,
   Space,
   Table,
@@ -34,6 +35,7 @@ import {
   FolderOutlined,
   ExportOutlined,
   ReloadOutlined,
+  StopOutlined,
   SwapOutlined,
   TableOutlined,
   ThunderboltOutlined,
@@ -42,15 +44,17 @@ import type { ColumnsType } from 'antd/es/table';
 import type { RcFile, UploadFile } from 'antd/es/upload';
 import type { DocumentItem, FileFolderItem, FileSpace, ParseStatus } from '@/types';
 import {
+  cancelStructuredVectorize,
   createFolder,
+  deleteDocument,
   deleteFolder,
-  ensureFolderPath,
   fetchDocument,
   fetchDocumentContent,
   moveDocument,
   renameDocument,
   reparseStructured,
   replaceDocument,
+  revectorizeStructured,
   updateFolder,
   uploadDocument,
 } from '@/services/api';
@@ -73,7 +77,6 @@ import {
   acceptFor,
   isEditableFormat,
   isStructuredFormat,
-  isUploadableFormat,
 } from '@/utils/documentFormats';
 
 const STATUS_MAP: Record<ParseStatus, { label: string; color: string }> = {
@@ -86,28 +89,33 @@ const STATUS_MAP: Record<ParseStatus, { label: string; color: string }> = {
   skipped: { label: '不参与解析', color: 'default' },
 };
 
-/** 两个文件空间：各自一棵文件夹树，文件互不混在一起。 */
-const SPACE_TABS: { key: FileSpace; label: string; note: string }[] = [
+/** 页签键：structured 与 related 共用结构化数据空间，仅工具栏不同。 */
+type TabKey = 'document' | 'structured' | 'related';
+
+/** 三个页签对应两个文件空间：各自一棵文件夹树，文件互不混在一起。 */
+const SPACE_TABS: { key: TabKey; space: FileSpace; label: string; note: string }[] = [
   {
     key: 'document',
+    space: 'document',
     label: '普通文档',
     note: '上传后可预览、下载、在线编辑，并进入解析与向量化（供问答检索）。',
   },
   {
     key: 'structured',
-    label: '结构化数据',
-    note: 'CSV / TSV / XLSX / JSON 自动识别字段并生成独立知识记录，可分页预览与追溯来源；不切片、不向量化，不参与问答检索。',
+    space: 'structured',
+    label: '非关联性结构化数据',
+    note: '仅显示未被文件组引用的 CSV / TSV / XLSX / JSON：自动识别字段并生成独立知识记录，可分页预览；解析完成后可点「开始向量化」写入向量，参与问答检索。',
+  },
+  {
+    key: 'related',
+    space: 'structured',
+    label: '关联性结构化数据',
+    note: '上传一批相互关联的结构化文件（如学生表 + 课程表 + 选课表）并新建文件组，配置主外键关系后生成关联知识记录供问答检索。',
   },
 ];
 
-/** 上传文件夹时，本地相对目录 → 平台文件夹 id 的映射（同一批次只创建一次）。 */
-function dirOf(relativePath: string): string {
-  const idx = relativePath.lastIndexOf('/');
-  return idx > 0 ? relativePath.slice(0, idx) : '';
-}
-
-/** 当前空间的说明文案（Tab 下方一行，避免把功能写死在别处）。 */
-const spaceNote = (space: FileSpace) => SPACE_TABS.find((s) => s.key === space)?.note ?? '';
+/** 当前页签的说明文案（Tab 下方一行，避免把功能写死在别处）。 */
+const spaceNote = (tab: TabKey) => SPACE_TABS.find((s) => s.key === tab)?.note ?? '';
 
 /** 字节 → 友好显示。 */
 function formatBytes(bytes: number): string {
@@ -250,6 +258,7 @@ export default function DocumentsPage() {
     clearError,
     space,
     setSpace,
+    setStructuredScope,
     folders,
     loadingFolders,
     loadFolders,
@@ -263,19 +272,33 @@ export default function DocumentsPage() {
   const [formatHelpOpen, setFormatHelpOpen] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [replacingId, setReplacingId] = useState<string | null>(null);
+  /** 正在派发「开始向量化」的文件 id（按钮 loading 用；真正进度看列表里的进度条）。 */
+  const [vectorizingId, setVectorizingId] = useState<string | null>(null);
+  /** 正在派发「停止向量化」的文件 id。 */
+  const [stoppingId, setStoppingId] = useState<string | null>(null);
+  /** 手动触发向量化后的一段时间内持续轮询，好让进度条从 0% 走到 100%。 */
+  const [vectorPollUntil, setVectorPollUntil] = useState(0);
   const [folderForm, setFolderForm] = useState<FolderFormState | null>(null);
   const [folderSaving, setFolderSaving] = useState(false);
   const [renameDoc, setRenameDoc] = useState<DocumentItem | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renaming, setRenaming] = useState(false);
   const [structuredDoc, setStructuredDoc] = useState<DocumentItem | null>(null);
-  /** 关联数据（第四阶段）抽屉：groupsCreate=true 时进去直接弹上传框。 */
+  /** 关联数据（第四阶段）抽屉：新建文件组（上传一批关联文件）在抽屉内进行。 */
   const [groupsOpen, setGroupsOpen] = useState(false);
-  const [groupsCreate, setGroupsCreate] = useState(false);
   /** 引用来源跳转（?group_id=）：抽屉打开后直接进入该文件组详情。 */
   const [initialGroupId, setInitialGroupId] = useState<string | null>(null);
-  /** 上传文件夹批次内共享：同一本地目录只调用一次 /folders/ensure。 */
-  const dirCacheRef = useRef<Map<string, Promise<string>>>(new Map());
+  /** 文档表格批量选择（仅当前页，翻页/切换目录或空间时清空）。 */
+  const [selectedRowKeys, setSelectedRowKeys] = useState<string[]>([]);
+  const [batchDeleting, setBatchDeleting] = useState(false);
+  /** 剪切板：Ctrl+X 记住待移动文件，Ctrl+V 移动到当前所在文件夹。 */
+  const [movingIds, setMovingIds] = useState<string[]>([]);
+  const [batchMoving, setBatchMoving] = useState(false);
+  /** 拖拽中的文件 id 集合；当前高亮的放置目标（undefined=无，null=根目录）。 */
+  const dragIdsRef = useRef<string[]>([]);
+  const [dropTarget, setDropTarget] = useState<string | null | undefined>(undefined);
+  /** Shift 范围选择锚点：当前页最后点击的行下标。 */
+  const lastClickedIndexRef = useRef<number | null>(null);
   /** 本批次里后端回报「内容完全相同」的文件描述，批次结束时统一提示一次。 */
   const duplicatedRef = useRef<string[]>([]);
 
@@ -289,7 +312,10 @@ export default function DocumentsPage() {
     }
   };
 
+  /** 当前页签：structured（非关联）与 related（关联）共用结构化空间，仅工具栏不同。 */
+  const [activeTab, setActiveTab] = useState<TabKey>('document');
   const isStructured = space === 'structured';
+  const isRelatedTab = activeTab === 'related';
 
   // 初始化：加载知识库 + 当前空间文件夹树，并按 URL ?kb_id= 预选（来自「管理文档」跳转）
   useEffect(() => {
@@ -299,10 +325,16 @@ export default function DocumentsPage() {
     const qSpace = params.get('space');
     const qGroup = params.get('group_id');
     // 引用来源跳转（结构化 / 关联数据）需要先切到结构化空间
-    if (qSpace === 'structured') setSpace('structured');
+    if (qSpace === 'structured') {
+      setSpace('structured');
+      setStructuredScope(false);
+      setActiveTab('structured');
+    }
     if (qGroup) {
+      setSpace('structured');
+      setStructuredScope(true);
+      setActiveTab('related');
       setInitialGroupId(qGroup);
-      setGroupsCreate(false);
       setGroupsOpen(true);
     }
     void loadKnowledgeBases().then(() => {
@@ -329,13 +361,26 @@ export default function DocumentsPage() {
     (d) =>
       isParsing(d.parse_status) ||
       d.structured_status === 'pending' ||
-      d.structured_status === 'parsing',
-  );
+      d.structured_status === 'parsing' ||
+      // 手动触发的向量化正在跑：轮询刷新进度条（pending 是等用户点按钮，不轮询）
+      d.structured_vector_status === 'indexing',
+  ) || Date.now() < vectorPollUntil;
   useEffect(() => {
     if (!needPoll) return;
-    const t = setInterval(() => void loadDocuments(), 4_000);
+    // silent=true：轮询只更新数据，不切表格 loading，避免每 4 秒闪一次转圈
+    const t = setInterval(() => void loadDocuments(undefined, undefined, true), 4_000);
     return () => clearInterval(t);
   }, [needPoll, loadDocuments]);
+
+  // 批量选择仅对当前页有效：切换空间 / 目录 / 知识库或翻页时清空
+  useEffect(() => {
+    setSelectedRowKeys([]);
+  }, [space, currentFolderId, selectedKbId, page, pageSize]);
+
+  // 切换空间 / 知识库时清空剪切板（目录切换不清空：Ctrl+V 正是要粘贴到别的目录）
+  useEffect(() => {
+    setMovingIds([]);
+  }, [space, selectedKbId]);
 
   // 批次上传全部完成（done/error）后，清空列表并刷新表格
   useEffect(() => {
@@ -398,52 +443,6 @@ export default function DocumentsPage() {
     }
   };
 
-  // 结构化空间专用：按本地相对路径重建目录层级，再上传该目录内的文件。
-  // AntD 的 directory 上传会为每个文件回调一次 customRequest，因此同一目录的
-  // ensure 结果要按「父目录 + 相对路径」缓存复用，避免并发创建出重复文件夹。
-  const ensureDirForUpload = async (relativeDir: string): Promise<string | null> => {
-    if (!relativeDir) return currentFolderId;
-    const cacheKey = `${currentFolderId ?? 'root'}::${relativeDir}`;
-    const cache = dirCacheRef.current;
-    const cached = cache.get(cacheKey);
-    if (cached) return cached;
-    const task = ensureFolderPath(relativeDir, space).then((folder) => folder.id);
-    cache.set(cacheKey, task);
-    try {
-      return await task;
-    } catch (err) {
-      // 失败不应污染缓存：后续文件可以重试同一个目录
-      cache.delete(cacheKey);
-      throw err;
-    }
-  };
-
-  const handleFolderUpload: UploadProps['customRequest'] = async (options) => {
-    const { file, onSuccess, onError, onProgress } = options;
-    if (!selectedKbId) {
-      onError?.(new Error('未选择知识库'));
-      return;
-    }
-    const rc = file as RcFile;
-    const relativePath = rc.webkitRelativePath || rc.name;
-    const ext = rc.name.includes('.') ? rc.name.split('.').pop()!.toLowerCase() : '';
-    if (!isUploadableFormat(ext)) {
-      onError?.(new Error(`不支持的格式：.${ext || '未知'}（本地已跳过）`));
-      return;
-    }
-    try {
-      const folderId = await ensureDirForUpload(dirOf(relativePath));
-      const uploaded = await uploadDocument(rc, selectedKbId, (p) => onProgress?.({ percent: p }), {
-        space,
-        folderId,
-      });
-      noteDuplicates(uploaded);
-      onSuccess?.({}, file);
-    } catch (err) {
-      onError?.(err instanceof Error ? err : new Error(String(err)));
-    }
-  };
-
   /** 手动重新解析结构化文件：派发后台任务后由列表轮询接管状态刷新。 */
   const handleStructuredReparse = async (row: DocumentItem) => {
     try {
@@ -454,6 +453,133 @@ export default function DocumentsPage() {
       message.error(describeApiError(err));
     }
   };
+
+  /** 手动开始向量化：只写向量，不重新解析；进度由列表轮询刷新。 */
+  const handleStructuredVectorize = async (row: DocumentItem) => {
+    setVectorizingId(row.id);
+    try {
+      await revectorizeStructured(row.id);
+      setVectorPollUntil(Date.now() + 10 * 60_000);
+      message.success(`已开始向量化：${row.file_name}`);
+      void loadDocuments();
+    } catch (err) {
+      message.error(describeApiError(err));
+    } finally {
+      setVectorizingId(null);
+    }
+  };
+
+  /** 停止向量化：后端在下一批记录之间退出，清理本次部分向量后回到待向量化。 */
+  const handleStructuredStop = async (row: DocumentItem) => {
+    setStoppingId(row.id);
+    try {
+      await cancelStructuredVectorize(row.id);
+      setVectorPollUntil(Date.now() + 2 * 60_000);
+      message.success(`已请求停止：${row.file_name}`);
+      void loadDocuments(undefined, undefined, true);
+    } catch (err) {
+      message.error(describeApiError(err));
+    } finally {
+      setStoppingId(null);
+    }
+  };
+
+  /** 批量删除：逐个走软删除接口，统计成功/失败，结束后清空选择并刷新列表与文件夹计数。 */
+  const handleBatchDelete = async () => {
+    if (selectedRowKeys.length === 0) return;
+    setBatchDeleting(true);
+    let ok = 0;
+    let failed = 0;
+    try {
+      for (const id of selectedRowKeys) {
+        try {
+          await deleteDocument(id);
+          ok += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+    } finally {
+      setBatchDeleting(false);
+      setSelectedRowKeys([]);
+      void loadDocuments();
+      void loadFolders();
+    }
+    if (failed === 0) {
+      message.success(`已删除 ${ok} ${isStructured ? '个文件' : '篇文档'}（已移入回收站）`);
+    } else {
+      message.warning(`删除完成：成功 ${ok} 个，失败 ${failed} 个`);
+    }
+  };
+
+  /** 批量移动到目标文件夹（null=根目录）：跳过已在该位置的，逐个调移动接口并统计结果。 */
+  const moveDocumentsTo = useCallback(
+    async (ids: string[], targetFolderId: string | null) => {
+      const movable = ids.filter((id) => {
+        const doc = documents.find((d) => d.id === id);
+        // 当前页找不到的（极端情况）也放行，交给后端校验
+        return !doc || (doc.folder_id ?? null) !== (targetFolderId ?? null);
+      });
+      if (movable.length === 0) {
+        message.info('所选文件已在目标位置，无需移动');
+        return;
+      }
+      setBatchMoving(true);
+      let ok = 0;
+      let failed = 0;
+      try {
+        for (const id of movable) {
+          try {
+            await moveDocument(id, targetFolderId);
+            ok += 1;
+          } catch {
+            failed += 1;
+          }
+        }
+      } finally {
+        setBatchMoving(false);
+        setMovingIds([]);
+        setSelectedRowKeys([]);
+        void loadDocuments();
+        void loadFolders();
+      }
+      const targetName =
+        targetFolderId === null
+          ? '根目录'
+          : `文件夹「${folders.find((f) => f.id === targetFolderId)?.name ?? ''}」`;
+      if (failed === 0) {
+        message.success(`已将 ${ok} 个文件移动到${targetName}`);
+      } else {
+        message.warning(`移动完成：成功 ${ok} 个，失败 ${failed} 个`);
+      }
+    },
+    [documents, folders, loadDocuments, loadFolders],
+  );
+
+  // Ctrl+X 剪切选中文件；Ctrl+V 粘贴（移动）到当前所在文件夹。输入框聚焦时不拦截。
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) {
+        return;
+      }
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const key = e.key.toLowerCase();
+      if (key === 'x') {
+        if (selectedRowKeys.length === 0) return;
+        e.preventDefault();
+        setMovingIds(selectedRowKeys);
+        setSelectedRowKeys([]);
+        message.info(`已剪切 ${selectedRowKeys.length} 个文件，进入目标文件夹后按 Ctrl+V 粘贴`);
+      } else if (key === 'v') {
+        if (movingIds.length === 0) return;
+        e.preventDefault();
+        void moveDocumentsTo(movingIds, currentFolderId);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [selectedRowKeys, movingIds, currentFolderId, moveDocumentsTo]);
 
   const openPreview = (row: DocumentItem, editing = false) => {
     setPreviewEditing(editing);
@@ -740,21 +866,49 @@ export default function DocumentsPage() {
         const reason = isStructured
           ? row.structured_error_message || ''
           : row.error_message || '';
+        // 向量化进度：只有解析成功且有记录、且尚未完成时显示（0% 表示等待手动触发）
+        const records = row.structured_record_count ?? 0;
+        const showVectorProgress =
+          isStructured &&
+          row.structured_status === 'success' &&
+          records > 0 &&
+          row.structured_vector_status !== 'completed' &&
+          row.structured_vector_status !== null &&
+          row.structured_vector_status !== undefined;
+        const vectorPercent = showVectorProgress
+          ? Math.min(100, Math.round(((row.structured_vector_count ?? 0) / records) * 100))
+          : 0;
         return (
-          <Space size={6}>
-            <ProcessingStatusTag status={unified} detail={detail} />
-            {reason ? (
-              <Tooltip title={reason}>
-                <Typography.Text type="danger" style={{ maxWidth: 96 }} ellipsis>
-                  {reason}
+          <div>
+            <Space size={6}>
+              <ProcessingStatusTag status={unified} detail={detail} />
+              {reason ? (
+                <Tooltip title={reason}>
+                  <Typography.Text type="danger" style={{ maxWidth: 96 }} ellipsis>
+                    {reason}
+                  </Typography.Text>
+                </Tooltip>
+              ) : counts ? (
+                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                  {counts}
                 </Typography.Text>
+              ) : null}
+            </Space>
+            {showVectorProgress && (
+              <Tooltip
+                title={`向量 ${row.structured_vector_count ?? 0} / ${records} 条${
+                  row.structured_vector_error ? `：${row.structured_vector_error}` : ''
+                }`}
+              >
+                <Progress
+                  percent={vectorPercent}
+                  size="small"
+                  status={row.structured_vector_status === 'failed' ? 'exception' : undefined}
+                  style={{ width: 150, margin: '4px 0 0' }}
+                />
               </Tooltip>
-            ) : counts ? (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                {counts}
-              </Typography.Text>
-            ) : null}
-          </Space>
+            )}
+          </div>
         );
       },
     },
@@ -831,6 +985,50 @@ export default function DocumentsPage() {
                   onClick={() => setStructuredDoc(row)}
                 >
                   数据预览
+                </Button>
+              </Tooltip>
+            )}
+            {isStructured &&
+              isStructuredFormat(row.file_type) &&
+              row.structured_status === 'success' &&
+              (row.structured_record_count ?? 0) > 0 && (
+                <Tooltip
+                  title={
+                    row.structured_vector_status === 'completed'
+                      ? '按当前知识记录重建向量（不重新解析、不产生重复向量）'
+                      : '开始为该文件的每条知识记录写入向量（供问答检索）'
+                  }
+                >
+                  <Button
+                    size="small"
+                    type={
+                      row.structured_vector_status === 'pending' ? 'primary' : 'default'
+                    }
+                    ghost
+                    icon={<ThunderboltOutlined />}
+                    loading={vectorizingId === row.id}
+                    disabled={row.structured_vector_status === 'indexing'}
+                    onClick={() => void handleStructuredVectorize(row)}
+                  >
+                    {row.structured_vector_status === 'indexing'
+                      ? '向量化中'
+                      : row.structured_vector_status === 'completed'
+                        ? '重新向量化'
+                        : '开始向量化'}
+                  </Button>
+                </Tooltip>
+              )}
+            {isStructured && row.structured_vector_status === 'indexing' && (
+              <Tooltip title="停止本次向量化（后端在下一批记录之间退出，已写入的部分向量会被清理）">
+                <Button
+                  size="small"
+                  danger
+                  ghost
+                  icon={<StopOutlined />}
+                  loading={stoppingId === row.id}
+                  onClick={() => void handleStructuredStop(row)}
+                >
+                  停止
                 </Button>
               </Tooltip>
             )}
@@ -957,110 +1155,101 @@ export default function DocumentsPage() {
       <Button icon={<FileTextOutlined />} onClick={() => setFormatHelpOpen(true)}>
         格式支持说明
       </Button>
-      <Upload
-        fileList={fileList}
-        multiple
-        accept={ACCEPT}
-        showUploadList
-        customRequest={handleUpload}
-        disabled={!selectedKbId}
-        onChange={({ fileList: fl }) => setFileList(fl)}
-      >
-        <Tooltip
-          title={
-            !selectedKbId
-              ? '请先选择知识库'
-              : `支持 ${UPLOAD_HINT}，另支持常见图片格式，可多选${
-                  currentFolderId ? '，将上传到当前文件夹' : ''
-                }`
-          }
-        >
-          <Button type="primary" icon={<CloudUploadOutlined />} disabled={!selectedKbId}>
-            {isStructured ? '上传文件' : '上传文档'}
-          </Button>
-        </Tooltip>
-      </Upload>
-      {isStructured && (
+      {!isRelatedTab && (
         <Upload
           fileList={fileList}
-          directory
           accept={ACCEPT}
           showUploadList
-          customRequest={handleFolderUpload}
           disabled={!selectedKbId}
+          multiple
+          customRequest={handleUpload}
           onChange={({ fileList: fl }) => setFileList(fl)}
         >
           <Tooltip
             title={
               !selectedKbId
                 ? '请先选择知识库'
-                : `选择本地文件夹，按其中的相对路径在当前目录下重建同名子文件夹后逐个上传（仅接受 ${UPLOAD_HINT} 与图片格式）`
+                : `支持 ${UPLOAD_HINT}，另支持常见图片格式，可多选${
+                    currentFolderId ? '，将上传到当前文件夹' : ''
+                  }`
             }
           >
-            <Button icon={<FolderOutlined />} disabled={!selectedKbId}>
-              上传文件夹
+            <Button type="primary" icon={<CloudUploadOutlined />} disabled={!selectedKbId}>
+              {isStructured ? '上传非关联性数据' : '上传文档'}
             </Button>
           </Tooltip>
         </Upload>
       )}
-      {isStructured && (
-        <>
-          <Tooltip
-            title={
-              !selectedKbId
-                ? '请先选择知识库'
-                : '一次多选属于同一批的关联文件（如学生表 + 课程表 + 选课表），上传后作为一个文件组配置关系；普通的多文件批量上传不会走这里'
-            }
+      {isRelatedTab && (
+        <Tooltip
+          title={
+            !selectedKbId
+              ? '请先选择知识库'
+              : '查看已有文件组：结构识别、关系确认、数据校验与关联知识记录；也可在抽屉内一次多选同批关联文件（如学生表 + 课程表 + 选课表），上传后新建文件组'
+          }
+        >
+          <Button
+            type="primary"
+            icon={<CloudUploadOutlined />}
+            disabled={!selectedKbId}
+            onClick={() => setGroupsOpen(true)}
           >
-            <Button
-              icon={<CloudUploadOutlined />}
-              disabled={!selectedKbId}
-              onClick={() => {
-                setGroupsCreate(true);
-                setGroupsOpen(true);
-              }}
-            >
-              上传关联数据
-            </Button>
-          </Tooltip>
-          <Tooltip
-            title={
-              !selectedKbId
-                ? '请先选择知识库'
-                : '查看已有文件组：结构识别、关系确认、数据校验与关联知识记录'
-            }
-          >
-            <Button
-              icon={<TableOutlined />}
-              disabled={!selectedKbId}
-              onClick={() => {
-                setGroupsCreate(false);
-                setGroupsOpen(true);
-              }}
-            >
-              关联数据管理
-            </Button>
-          </Tooltip>
-        </>
+            上传关联数据
+          </Button>
+        </Tooltip>
       )}
       <AdminHeaderRight />
     </Space>
   );
 
+  /** 面包屑项兼作拖拽放置目标：把文件拖到某级目录即移动到该目录。 */
+  const wrapDropTarget = (node: ReactNode, folderId: string | null) => (
+    <span
+      onDragOver={(e) => {
+        if (dragIdsRef.current.length === 0) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        setDropTarget(folderId);
+      }}
+      onDragLeave={() => setDropTarget((prev) => (prev === folderId ? undefined : prev))}
+      onDrop={(e) => {
+        e.preventDefault();
+        const ids = dragIdsRef.current;
+        dragIdsRef.current = [];
+        setDropTarget(undefined);
+        if (ids.length > 0) void moveDocumentsTo(ids, folderId);
+      }}
+      style={
+        dropTarget === folderId
+          ? {
+              background: '#e6f4ff',
+              outline: '1px dashed #1677ff',
+              borderRadius: 4,
+              padding: '0 4px',
+            }
+          : undefined
+      }
+    >
+      {node}
+    </span>
+  );
+
   const breadcrumbItems = [
     {
-      title: (
+      title: wrapDropTarget(
         <a onClick={() => openFolder(null)}>
           {isStructured ? '结构化数据根目录' : '普通文档根目录'}
-        </a>
+        </a>,
+        null,
       ),
     },
     ...trail.map((f) => ({
-      title: (
+      title: wrapDropTarget(
         <a onClick={() => openFolder(f.id)}>
           <FolderOutlined style={{ marginRight: 4 }} />
           {f.name}
-        </a>
+        </a>,
+        f.id,
       ),
     })),
   ];
@@ -1068,8 +1257,16 @@ export default function DocumentsPage() {
   return (
     <AppLayout pageTitle="" headerLeft={headerLeft} headerRight={headerRight}>
       <Tabs
-        activeKey={space}
-        onChange={(key) => setSpace(key as FileSpace)}
+        activeKey={activeTab}
+        onChange={(key) => {
+          const tab = key as TabKey;
+          setActiveTab(tab);
+          const target = SPACE_TABS.find((s) => s.key === tab)?.space ?? 'document';
+          // 非关联/关联两个页签共用 structured 空间，但展示范围互斥：
+          // 非关联页签只看未被文件组引用的文件，关联页签只看文件组成员
+          if (target === 'structured') setStructuredScope(tab === 'related');
+          else if (target !== space) setSpace(target);
+        }}
         items={SPACE_TABS.map((s) => ({ key: s.key, label: s.label }))}
       />
 
@@ -1110,13 +1307,18 @@ export default function DocumentsPage() {
 
       <Space style={{ marginBottom: 8 }} align="center" wrap>
         <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {spaceNote(space)}
+          {spaceNote(activeTab)}
         </Typography.Text>
       </Space>
 
       <Space style={{ marginBottom: 12, width: '100%', justifyContent: 'space-between' }} wrap>
         <Breadcrumb items={breadcrumbItems} />
         <Space size={8}>
+          {movingIds.length > 0 && (
+            <Tag closable color="processing" onClose={() => setMovingIds([])}>
+              已剪切 {movingIds.length} 个文件，Ctrl+V 粘贴到当前目录
+            </Tag>
+          )}
           <Button
             icon={<ArrowLeftOutlined />}
             disabled={currentFolderId === null}
@@ -1132,6 +1334,27 @@ export default function DocumentsPage() {
           >
             新建文件夹
           </Button>
+          <Popconfirm
+            title={`确认删除选中的 ${selectedRowKeys.length} ${isStructured ? '个文件' : '篇文档'}？`}
+            description={
+              isStructured
+                ? '将删除这些文件及其已生成的结构化知识记录，不影响文件夹。'
+                : '将同时删除其切片与向量数据，不可恢复。'
+            }
+            okText="删除"
+            okButtonProps={{ danger: true }}
+            cancelText="取消"
+            onConfirm={() => void handleBatchDelete()}
+          >
+            <Button
+              danger
+              icon={<DeleteOutlined />}
+              disabled={selectedRowKeys.length === 0}
+              loading={batchDeleting}
+            >
+              批量删除{selectedRowKeys.length > 0 ? `（${selectedRowKeys.length}）` : ''}
+            </Button>
+          </Popconfirm>
         </Space>
       </Space>
 
@@ -1144,6 +1367,28 @@ export default function DocumentsPage() {
           dataSource={childFolders}
           loading={loadingFolders}
           pagination={false}
+          onRow={(record) => ({
+            // 文件夹行是拖拽放置目标：把文件（可多选批量）拖进来即移动
+            onDragOver: (e) => {
+              if (dragIdsRef.current.length === 0) return;
+              e.preventDefault();
+              e.dataTransfer.dropEffect = 'move';
+              setDropTarget(record.id);
+            },
+            onDragLeave: () =>
+              setDropTarget((prev) => (prev === record.id ? undefined : prev)),
+            onDrop: (e) => {
+              e.preventDefault();
+              const ids = dragIdsRef.current;
+              dragIdsRef.current = [];
+              setDropTarget(undefined);
+              if (ids.length > 0) void moveDocumentsTo(ids, record.id);
+            },
+            style:
+              dropTarget === record.id
+                ? { background: '#e6f4ff', outline: '1px dashed #1677ff' }
+                : undefined,
+          })}
         />
       )}
 
@@ -1159,6 +1404,40 @@ export default function DocumentsPage() {
         columns={columns}
         dataSource={documents}
         loading={loading}
+        rowSelection={{
+          selectedRowKeys,
+          onChange: (keys) => setSelectedRowKeys(keys as string[]),
+        }}
+        onRow={(record, index) => ({
+          // 行可拖拽：拖已选中的行=批量拖动整个选择，否则只拖当前行
+          draggable: true,
+          style: movingIds.includes(record.id) ? { opacity: 0.45 } : undefined,
+          onClick: (e) => {
+            if (!e.shiftKey) {
+              lastClickedIndexRef.current = index ?? null;
+              return;
+            }
+            // Shift+点击：以最后一次点击为锚点，把当前页范围内所有行并入选择
+            e.preventDefault();
+            const anchor = lastClickedIndexRef.current;
+            if (anchor == null || index == null || anchor === index) return;
+            const [from, to] = anchor < index ? [anchor, index] : [index, anchor];
+            const rangeKeys = documents.slice(from, to + 1).map((d) => d.id);
+            setSelectedRowKeys((prev) => Array.from(new Set([...prev, ...rangeKeys])));
+            lastClickedIndexRef.current = index;
+          },
+          onDragStart: (e) => {
+            dragIdsRef.current = selectedRowKeys.includes(record.id)
+              ? selectedRowKeys
+              : [record.id];
+            e.dataTransfer.effectAllowed = 'move';
+            e.dataTransfer.setData('text/plain', dragIdsRef.current.join(','));
+          },
+          onDragEnd: () => {
+            dragIdsRef.current = [];
+            setDropTarget(undefined);
+          },
+        })}
         rowClassName={(record) =>
           focusDoc && record.id === focusDoc.id ? 'source-focus-row' : ''
         }
@@ -1198,12 +1477,8 @@ export default function DocumentsPage() {
         kbId={selectedKbId}
         folderId={currentFolderId}
         open={groupsOpen}
-        autoCreate={groupsCreate}
         initialGroupId={initialGroupId}
-        onClose={() => {
-          setGroupsOpen(false);
-          setGroupsCreate(false);
-        }}
+        onClose={() => setGroupsOpen(false)}
         onChanged={() => void loadDocuments()}
       />
 

@@ -111,7 +111,7 @@ REFUSAL_ANSWER = (
     "请尝试更换提问方式，或确认知识库中已包含相关文档。"
 )
 
-# 阶段十四：Evidence Gate 判定证据不足时的拒答文案（保留证据/引用，禁止编造）。
+# 阶段十四：Evidence Gate 判定证据不足时的拒答文案（不调用 LLM、不展示引用，禁止编造）。
 # 与 REFUSAL_ANSWER 同前缀，保证前端与既有测试对"拒答"的识别逻辑不变。
 GATE_REFUSAL_ANSWER = (
     "根据现有资料，我无法回答该问题。当前检索到的证据不足以支撑可靠回答"
@@ -122,7 +122,8 @@ _CONTEXT_MARKER = "参考资料"
 # [citation: 1, 3] / [citation: 1] / 模型误写 [citation: 1, 页码]
 # 页码只做语法兼容；最终页码始终以检索命中的权威 page_num 为准。
 _CITATION_PATTERN = re.compile(r"\[citation:\s*(\d+)\s*(?:,\s*([^\]\s]+)\s*)?\]", re.IGNORECASE)
-# 拒答 / 保守回答前缀：这类回答没有引用标记时，保留检索证据供用户判断。
+# 拒答 / 保守回答前缀：用于统一识别拒答类回答；这类回答不展示引用来源
+# （命中的证据不足以回答问题，展示出来只会误导用户）。
 _REFUSAL_PREFIX = "根据现有资料，我无法"
 
 
@@ -341,7 +342,7 @@ class RagService:
         # 阶段十四：Evidence Gate（Vector + KG 证据合并后的统一质量判断）
         # - accept：继续生成（行为与阶段十三完全一致）
         # - retry：换一个已注册的检索策略重试一次（最多一次）
-        # - insufficient：返回拒答文案 + 保留 hits（证据/引用仍展示），不调用 LLM
+        # - insufficient：返回拒答文案 + 保留 hits（供评估/日志），不调用 LLM、不展示引用
         gate_before = len(hits)
         hits, gate_decision = await self._apply_evidence_gate(
             kb_ids, question, hits, analysis, router_decision, strategy
@@ -450,16 +451,21 @@ class RagService:
         rtypes = tuple(cfg["resource_types"]) or None
         include_document = cfg["include_document"]
 
-        # HyDE 查询改写（TECH_DESIGN：用假设答案替换原问题做向量检索）
-        # 仅改写检索查询；最终 Prompt 仍用原始问题。失败回退原问题。
-        query_text = question
+        # HyDE 查询改写（TECH_DESIGN：用假设答案增强向量检索）
+        # 防投毒：假设答案只作为**补充召回通道**，原始问题始终参与稠密检索，
+        # 两路在 RRF 中合并。否则 LLM 臆造的内容（如把「阿胶补血膏的功效」
+        # 改写成「补益气血、滋阴润肺」）会独占查询通道，把检索带向问题里
+        # 并不存在的术语。仅改写检索查询；最终 Prompt 仍用原始问题。
+        query_texts = [question]
+        hyde_text = ""
         if cfg["hyde_enabled"] and self.hyde is not None:
             try:
                 hypo = await asyncio.to_thread(self.hyde.generate, question)
                 if hypo and hypo.strip():
-                    query_text = hypo.strip()
+                    hyde_text = hypo.strip()
+                    query_texts.append(hyde_text)
                     logger.info(
-                        f"HyDE 改写: {question[:30]}... -> {query_text[:50]}..."
+                        f"HyDE 补充召回: {question[:30]}... -> {hyde_text[:50]}..."
                     )
             except HyDEError as exc:
                 logger.warning(f"HyDE 改写失败，回退原问题: {exc}")
@@ -467,11 +473,12 @@ class RagService:
         # 混合检索（CPU/IO 密集放线程池）：稠密语义召回 + 稀疏关键词召回
         try:
             query_dense, query_sparse = await asyncio.to_thread(
-                self.embedding.encode, [query_text]
+                self.embedding.encode, query_texts
             )
             kb_str = [str(k) for k in kb_ids]
             dense_hits = []
-            if cfg["dense_enabled"]:
+            if cfg["dense_enabled"] and query_dense:
+                # 第 0 位固定是原始问题：HyDE 改写漂移时原始实体仍能召回
                 dense_hits = await asyncio.to_thread(
                     self.store.search,
                     query_dense[0],
@@ -480,10 +487,22 @@ class RagService:
                     list(rtypes) if rtypes else None,
                     include_document,
                 )
+            hyde_hits = []
+            if cfg["dense_enabled"] and hyde_text and len(query_dense) > 1:
+                hyde_hits = await asyncio.to_thread(
+                    self.store.search,
+                    query_dense[1],
+                    kb_str,
+                    recall,
+                    list(rtypes) if rtypes else None,
+                    include_document,
+                )
             # 保留稠密语义相似度：RRF 融合会用排名分覆盖 score 字段，
             # 相关性门槛（_is_relevant）需要原始 COSINE 相似度
             dense_hits = [{**h, "dense_score": h.get("score", 0.0)} for h in dense_hits]
+            hyde_hits = [{**h, "dense_score": h.get("score", 0.0)} for h in hyde_hits]
             sparse_hits = []
+            # 稀疏路只用原问题的词法权重：假设答案里的臆造术语不得进入关键词召回
             if cfg["sparse_enabled"] and query_sparse and query_sparse[0]:
                 sparse_hits = await asyncio.to_thread(
                     self.store.search_sparse,
@@ -501,10 +520,11 @@ class RagService:
         # resource_type/resource_name，导致 Dynamic Router 的资源类型过滤在后置
         # filter_hits 处失效、引用卡片把资源显示成"资源"。这里按 doc_id 从 PG
         # 事实源补齐，使 resource_types 真正作用到检索层（不改变排序与打分）。
-        await self._attach_resource_meta(kb_ids, dense_hits + sparse_hits)
+        await self._attach_resource_meta(kb_ids, dense_hits + hyde_hits + sparse_hits)
 
         # PG 状态校验：软删除文档 / 资源、未完成向量化的文档不得进入引用。
         dense_hits = await self._filter_inactive_hits(dense_hits)
+        hyde_hits = await self._filter_inactive_hits(hyde_hits)
         sparse_hits = await self._filter_inactive_hits(sparse_hits)
 
         # 新旧 embedding 模型隔离：剔除由**其它模型**生成的向量。
@@ -513,11 +533,14 @@ class RagService:
         stale_docs = await self._stale_doc_ids()
         if stale_docs:
             dense_hits = [h for h in dense_hits if str(h.get("doc_id")) not in stale_docs]
+            hyde_hits = [h for h in hyde_hits if str(h.get("doc_id")) not in stale_docs]
             sparse_hits = [h for h in sparse_hits if str(h.get("doc_id")) not in stale_docs]
             logger.info(f"已排除旧模型向量文档 {len(stale_docs)} 篇（避免新旧模型混检）")
 
-        # RRF 融合 → Top-recall 候选
-        fused = rrf_fusion([dense_hits, sparse_hits], k=cfg["rrf_k"], top_n=recall)
+        # RRF 融合 → Top-recall 候选（原问题稠密路 / HyDE 补充路 / 稀疏路）
+        fused = rrf_fusion(
+            [dense_hits, hyde_hits, sparse_hits], k=cfg["rrf_k"], top_n=recall
+        )
 
         # 统一命中数据结构：dense_score（BGE-M3 COSINE）只存在于稠密路命中，
         # 稀疏路命中没有该字段。RRF 之后若 Top-N 恰好全是纯稀疏命中，
@@ -526,7 +549,12 @@ class RagService:
         # 这里对**同一条记录**（同一向量 id）回填稠密分数：不改变排序、
         # 不新增/丢弃命中、不绕过任何 Gate；真正未被稠密路召回的稀疏命中
         # 仍然没有 dense_score，保持"纯稀疏命中不参与相关性豁免"的既有语义。
-        dense_scores = {str(h.get("id")): float(h.get("dense_score") or 0.0) for h in dense_hits}
+        # 防投毒：原问题路的相似度优先——相关性门槛判断的是"是否真能回答该问题"，
+        # 不能被假设答案臆造出来的高相似度豁免。
+        dense_scores = {str(h.get("id")): float(h.get("dense_score") or 0.0) for h in hyde_hits}
+        dense_scores.update(
+            {str(h.get("id")): float(h.get("dense_score") or 0.0) for h in dense_hits}
+        )
         for h in fused:
             if h.get("dense_score") is None:
                 ds = dense_scores.get(str(h.get("id")))
@@ -656,8 +684,8 @@ class RagService:
             and not self._is_document_doc_id(h.get("doc_id"))
             # 结构化 / 关联记录的 doc_id 带 sr: / sgr: 前缀，来源元数据由
             # _enrich_hits_with_doc_name 回表补齐，不参与资源元数据映射
-            and not _is_structured_doc_key(h.get("doc_id"))
-            and not _is_structured_group_doc_key(h.get("doc_id"))
+            and not is_structured_doc_key(h.get("doc_id"))
+            and not is_structured_group_doc_key(h.get("doc_id"))
         ]
         if not need:
             return
@@ -1431,7 +1459,7 @@ class RagService:
             raise
 
         # 引用后处理：解析答案中的 [citation: 编号, 页码] → 引用来源；
-        # 正常回答无标记时不返回候选，拒答 / 保守回答保留证据供用户判断。
+        # 正常回答无标记时不返回候选，拒答 / 保守回答不返回引用。
         citations = await self._build_citations(answer, hits)
         elapsed_ms = int((asyncio.get_event_loop().time() - started_at) * 1000)
         logger.info(
@@ -1548,12 +1576,13 @@ class RagService:
             }
             yield {"event": "delta", "data": {"content": answer}}
         elif gate_decision is not None and gate_decision.decision != DECISION_ACCEPT:
-            # 阶段十四：证据不足 → 拒答 + 保留证据/引用（禁止模型编造）
+            # 阶段十四：证据不足 → 拒答，不调用 LLM，也不展示引用
+            # （与相关性门槛同理：展示与问题无关的候选会误导用户）
             logger.info(
                 f"Evidence Gate 判定 {gate_decision.decision}"
                 f"（{gate_decision.reason}），拒答: question={question[:50]!r}"
             )
-            citations = self._hits_to_citations(hits)
+            citations = []
             answer = GATE_REFUSAL_ANSWER
             yield {
                 "event": "citations",
@@ -2084,7 +2113,7 @@ class RagService:
         - 编号对应 _build_user_prompt 中的资料编号（1-based）。
         - 页码以检索命中的权威 page_num 为准（模型标注仅作提示，不信任）。
         - 正常回答只返回正文实际引用的来源；无标记 / 编号全部越界时不返回候选。
-        - 拒答 / 保守回答没有引用标记时，回退全部可展示证据供用户判断。
+        - 拒答 / 保守回答不返回引用：命中的证据与问题不相关，展示会误导用户。
         - BUSINESS_RULES §6：只展示相关度 ≥ 阈值的引用。
 
         Stage 4-5：区分 document / resource 来源。Resource Citation 携带
@@ -2106,8 +2135,8 @@ class RagService:
         if idxs:
             picked = idxs
         elif _is_refusal_answer(answer):
-            # 拒答 / 保守回答没有引用标记：保留证据供用户判断
-            picked = list(range(len(shown)))
+            # 拒答 / 保守回答不展示引用（如问「阿胶补血膏」却列出无关术语，会误导用户）
+            picked = []
         else:
             # 正常回答未标注引用：不能把检索候选当引用
             picked = []

@@ -84,7 +84,7 @@ export const NEXT_ACTION_LABELS: Record<string, string> = {
   structured_reparse: '重新识别字段',
   reparse_members: '重新解析组内文件',
   add_files: '补充文件',
-  suggest: '推测关联关系',
+  manual_relations: '手动配置关联字段',
   confirm_relations: '确认关联关系',
   validate: '运行数据校验',
   generate: '确认并生成关联记录',
@@ -191,15 +191,36 @@ export function documentRowStatus(row: DocumentItem): ProcessingStatus {
   }
 }
 
-/** 结构化空间行 → 统一状态（用 structured_status，而不是恒为 skipped 的 parse_status）。 */
+/** 结构化空间行 → 统一状态（用 structured_status，而不是恒为 skipped 的 parse_status）。
+ *
+ * 解析成功不等于可检索：向量化现在由用户手动触发，因此还要看
+ * structured_vector_status —— 已完成才算「已完成」，排队/进行中算「处理中」，
+ * 未开始算「待处理」，失败算「处理失败」。
+ */
 export function structuredRowStatus(row: DocumentItem): ProcessingStatus {
   switch (row.structured_status) {
     case 'parsing':
       return 'processing';
     case 'failed':
       return 'failed';
-    case 'success':
-      return (row.structured_record_count ?? 0) > 0 ? 'success' : 'pending';
+    case 'success': {
+      if ((row.structured_record_count ?? 0) === 0) return 'pending';
+      switch (row.structured_vector_status) {
+        case 'completed':
+          return 'success';
+        case 'indexing':
+          return 'processing';
+        case 'failed':
+          return 'failed';
+        case 'pending':
+          return 'pending';
+        case undefined:
+        case null:
+          return 'success'; // 兼容未返回向量状态的旧接口
+        default:
+          return 'pending';
+      }
+    }
     default:
       return 'pending';
   }
@@ -231,8 +252,20 @@ export function memberParseStatus(
  */
 export function groupRowStatus(group: StructuredGroup): ProcessingStatus {
   switch (group.status) {
-    case 'confirmed':
-      return group.record_count > 0 ? 'success' : 'pending';
+    case 'confirmed': {
+      if (group.record_count === 0) return 'pending';
+      // 与结构化文件同一口径：确认生成记录后还要完成向量化才算「已完成」
+      switch (group.vector_status) {
+        case 'completed':
+          return 'success';
+        case 'indexing':
+          return 'processing';
+        case 'failed':
+          return 'failed';
+        default:
+          return 'pending';
+      }
+    }
     case 'validated':
       return 'awaiting_confirm';
     case 'stale':

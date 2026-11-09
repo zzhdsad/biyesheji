@@ -119,8 +119,11 @@ def _ask(client, question, kb_id):
     ).json()
 
 
-def test_hyde_rewrites_retrieval_query(client, monkeypatch):
-    """开启 HyDE 后，embedding 收到的检索文本是假设答案而非原问题。"""
+def test_hyde_adds_supplementary_query_without_replacing_question(client, monkeypatch):
+    """开启 HyDE 后，假设答案作为**补充**送入检索，原始问题始终保留在首位。
+
+    防投毒契约：HyDE 不再替换原问题（替换会让臆造术语独占检索通道）。
+    """
     # 开启 HyDE（mock）并保存原状态以便还原
     monkeypatch.setattr(settings, "HYDE_ENABLED", True)
     monkeypatch.setattr(settings, "HYDE_BACKEND", "mock")
@@ -133,7 +136,7 @@ def test_hyde_rewrites_retrieval_query(client, monkeypatch):
     orig_encode = real_emb.encode  # 替换前先捕获原始方法，避免递归
 
     def spy_encode(texts):
-        captured.append(texts[0])
+        captured.extend(texts)
         return orig_encode(texts)
 
     real_emb.encode = spy_encode  # type: ignore[assignment]
@@ -148,9 +151,10 @@ def test_hyde_rewrites_retrieval_query(client, monkeypatch):
         _ask(client, question, kb_id)
 
         assert captured, "embedding.encode 应被调用"
-        # 检索用的是假设答案，不是原问题
-        assert captured[-1] != question
-        assert "假设性回答" in captured[-1]
+        # 原问题必须保留（HyDE 不得独占检索通道）
+        assert captured[0] == question
+        # 假设答案作为补充通道一并送入
+        assert any("假设性回答" in text for text in captured)
     finally:
         hyde.set_hyde(orig_hyde)
 

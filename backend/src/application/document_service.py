@@ -107,8 +107,32 @@ class DocumentService:
         doc_id = uuid.uuid4()
         file_key = f"{kb_id}/{doc_id}.{suffix}"
         # 内容指纹：字节已经在内存里（大小校验时读过），顺手算一次，不额外 IO。
-        # 只用于「同库内容完全相同」的提示，不参与任何删除、覆盖或合并判断。
+        # 用于同库内容去重（同空间同内容复用已有文档，不再新增副本）。
         content_hash = hashlib.sha256(content).hexdigest()
+
+        # 幂等去重：同一知识库、同一空间内内容完全相同的文件 → 直接复用已有文档，
+        # 不再新增一条副本（历史实现只提示不处理，重复上传一次就多一份文档、一份
+        # 解析结果和一份向量，清理后又会因为再次上传而"重新出现"）。
+        existing = await self.db.scalar(
+            select(Document)
+            .where(
+                Document.kb_id == kb_id,
+                Document.space == space,
+                Document.content_hash == content_hash,
+                Document.deleted_at.is_(None),
+            )
+            .order_by(Document.created_at)
+            .limit(1)
+        )
+        if existing is not None:
+            existing.duplicate_names = await self.find_duplicates(existing)
+            existing.deduplicated = True
+            logger.info(
+                f"内容与已有文件完全相同，复用 doc_id={existing.id} "
+                f"kb_id={kb_id} file={filename!r}"
+            )
+            return existing
+
         self.storage.save(file_key, content)
 
         # 6. 写入 documents 表（parse_status=pending，待 Celery 异步解析）

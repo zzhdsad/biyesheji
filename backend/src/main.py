@@ -32,8 +32,9 @@ async def lifespan(app: FastAPI):
         logger.info(f"运行时系统配置已预热：{cfg}")
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"运行时系统配置预热跳过：{exc}")
-    # 后台线程随进程结束消失，遗留的 indexing 会永久悬空：启动时在线程里只做
-    # 状态修复（有完整向量→completed，否则→pending），**不自动重新派发任务**。
+    # 后台线程随进程结束消失，遗留的 indexing 会永久悬空；启动时在线程里修复状态
+    # （有完整向量→completed，否则→pending）。**不再自动续跑 pending**：向量化改为
+    # 用户在页面点「开始向量化」手动触发，避免重启即把海量记录排进长时间队列。
     try:
         import threading
 

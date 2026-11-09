@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.routes.documents import _require_kb_write_access, _validate_kb_id_access
 from src.application.structured_group_service import StructuredGroupService
 from src.application.structured_runner import (
+    cancel_structured_job,
     is_structured_vector_job_active,
     run_group_vectorize_safely,
 )
@@ -54,8 +55,6 @@ router = APIRouter(prefix="/structured/groups", tags=["structured-groups"])
 _MAX_PAGE_SIZE = 200
 # 一次建组最多带多少个文件：防止误把整个知识库全选成一个无法人工审阅的巨型组
 _MAX_GROUP_FILES = 30
-# 同一文件组同时只允许一次关系推测：多标签页/重复点击不能叠加执行
-_SUGGEST_IN_FLIGHT: set[uuid.UUID] = set()
 
 
 # ── 请求体 ──────────────────────────────────────────────────────────────────
@@ -85,8 +84,8 @@ class RelationIn(BaseModel):
     to_doc_id: uuid.UUID
     to_field: str
     kind: str = "one_to_many"
-    # 用户自己选出来的字段即视为已确认；从推测列表勾选时由前端显式传 confirmed
-    # 不传时由服务层按 origin 决定：manual 默认已确认，suggested 默认仍未确认
+    # 用户手动选出的字段即视为已确认；不传时由服务层按 origin 决定默认值。
+    # origin=suggested 仅用于兼容历史遗留关系，当前没有自动生成入口。
     confirmed: bool | None = None
     # 来源与评分只是展示/追溯用：origin 只允许 manual / suggested，评分由服务层夹紧
     origin: str = "manual"
@@ -380,7 +379,7 @@ async def get_group_processing(
 
     只读，不触发任何解析或生成：阶段与状态全部由组内文件的真实解析结果、
     关系是否已确认、校验报告是否存在、关联记录条数推出。
-    ``next_action`` 直接告诉前端下一步该做什么（推测 / 确认 / 校验 / 生成）。
+    ``next_action`` 直接告诉前端下一步该做什么（手动配置关联 / 确认 / 校验 / 生成）。
     """
     user: User = request.state.user
     group = await _require_group_read(db, user, group_id)
@@ -500,29 +499,6 @@ async def remove_group_file(
 # ── 结构识别与关系配置 ──────────────────────────────────────────────────────
 
 
-@router.post("/{group_id}/suggest")
-async def suggest_group_relations(
-    group_id: uuid.UUID,
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-) -> list[dict[str, Any]]:
-    """推测跨文件的关联关系（每个文件对最多一条）。
-
-    返回的每条关系都带 ``confirmed=false``：这只是**候选建议**。评分 ≥90 的高置信度
-    结果会写入关系配置作为自动预填（仍为未确认），因此需要文件组写权限。
-    未经用户确认不会参与校验与正式生成。
-    """
-    user: User = request.state.user
-    await _require_group_write(db, user, group_id)
-    if group_id in _SUGGEST_IN_FLIGHT:
-        raise AppException(409, "该文件组的关系推测正在进行，请等待本次结果返回后再试")
-    _SUGGEST_IN_FLIGHT.add(group_id)
-    try:
-        return await StructuredGroupService(db).refresh_suggestions(group_id)
-    finally:
-        _SUGGEST_IN_FLIGHT.discard(group_id)
-
-
 @router.put("/{group_id}/relations", response_model=GroupOut)
 async def save_group_relations(
     group_id: uuid.UUID,
@@ -530,7 +506,7 @@ async def save_group_relations(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> GroupOut:
-    """整份保存关系配置（用户手动选字段 或 勾选确认后的推测结果）。
+    """整份保存关系配置（只能由用户手动选择两侧文件与关联字段）。
 
     关系一变，校验报告立即作废；若此前已生成正式关联记录，整组转 stale，
     必须重新校验并再次确认——不允许「旧记录 + 新关系」混在一起。
@@ -550,7 +526,7 @@ async def confirm_group_relation(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> GroupOut:
-    """逐条确认/取消确认某条关系（推测出来的关系只有在这里才能变成已确认）。"""
+    """逐条确认/取消确认某条关系（兼容历史遗留的未确认关系）。"""
     user: User = request.state.user
     await _require_group_write(db, user, group_id)
     group = await StructuredGroupService(db).set_relation_confirmation(
@@ -607,9 +583,10 @@ async def confirm_group(
         .values(vector_status=VECTOR_STATUS_PENDING, vector_error="")
     )
     await db.commit()
-    background_tasks.add_task(run_group_vectorize_safely, str(group_id))
+    # 不自动向量化：确认后仅置 pending，等用户在列表里点「开始向量化」再派发，
+    # 避免一次确认就把整组记录排进长时间 CPU 队列。
     logger.info(
-        f"关联记录已确认生成并进入向量化队列 group_id={group_id} "
+        f"关联记录已确认生成，待手动向量化 group_id={group_id} "
         f"条数={result['record_count']} 用户={user.id}"
     )
     return {
@@ -656,6 +633,44 @@ async def revectorize_group(
 
     background_tasks.add_task(run_group_vectorize_safely, str(group_id))
     logger.info(f"已派发关联数据向量化 group_id={group_id} 用户={user.id}")
+    counts = await _file_counts(db, [group.id])
+    return _group_out(group, counts.get(str(group.id), 0))
+
+
+@router.post("/{group_id}/cancel-vectorize", response_model=GroupOut, status_code=202)
+async def cancel_vectorize_group(
+    group_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> GroupOut:
+    """停止该文件组正在等待或执行的向量化。
+
+    排队中的任务直接移出队列并复位 pending；执行中的任务设置停止标记，服务层在
+    下一批记录之间退出，清理本次已写入的部分向量后回到 pending（可重新开始）。
+    """
+    user: User = request.state.user
+    group = await _require_group_write(db, user, group_id)
+    outcome = cancel_structured_job("group", str(group_id))
+    if outcome == "idle":
+        stale = (
+            group.vector_status == VECTOR_STATUS_INDEXING
+            and is_stale_processing(group.updated_at)
+        )
+        if not stale:
+            raise AppException(409, "该文件组当前没有等待或正在执行的向量化任务")
+
+    await db.execute(
+        update(StructuredGroup)
+        .where(StructuredGroup.id == group_id)
+        .values(
+            vector_status=VECTOR_STATUS_PENDING,
+            vector_count=0,
+            vector_error="已停止向量化",
+        )
+    )
+    await db.commit()
+    await db.refresh(group)
+    logger.info(f"已请求停止关联数据向量化 group_id={group_id} outcome={outcome}")
     counts = await _file_counts(db, [group.id])
     return _group_out(group, counts.get(str(group.id), 0))
 

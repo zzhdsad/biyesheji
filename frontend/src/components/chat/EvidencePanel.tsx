@@ -1,7 +1,8 @@
 'use client';
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { Collapse, Segmented, Spin, Tag, Tooltip, Typography, theme, Button } from 'antd';
+import { Collapse, Segmented, Spin, Table, Tag, Tooltip, Typography, theme, Button } from 'antd';
+import type { ColumnsType } from 'antd/es/table';
 import { FileTextOutlined, GlobalOutlined, LinkOutlined } from '@ant-design/icons';
 import type { Citation, Evidence, EvidenceGroup, EvidenceLevel } from '@/types';
 import { credibilityColor } from '@/constants/source';
@@ -17,6 +18,7 @@ import {
   summarizeEvidence,
 } from '@/utils/evidence';
 import { getEvidenceTranslation, needsTranslation } from '@/utils/translation';
+import { cellValueText } from '@/utils/structuredDisplay';
 
 const { Text, Paragraph } = Typography;
 
@@ -225,7 +227,7 @@ function cardLabel(ev: Evidence, token: ReturnType<typeof theme.useToken>['token
  * 结构化 / 关联数据的来源追溯（第六阶段）。
  *
  * 只展示后端从 PostgreSQL 回填的真实字段：原始文件或文件组、知识记录 ID、
- * 行号 / JSON 路径 / 参与文件位置、字段与值、参与文件、关联关系。
+ * 行号 / JSON 路径 / 参与文件位置、字段与值（.head() 风格小表格）、参与文件、关联关系。
  * 普通文档仍沿用原来的「原始文件」提示，不受影响。
  */
 function StructuredOrigin({ ev }: { ev: Evidence }) {
@@ -233,6 +235,26 @@ function StructuredOrigin({ ev }: { ev: Evidence }) {
   const members = ev.member_files ?? [];
   const relations = ev.relations ?? [];
   const textStyle = { fontSize: 12, display: 'block' } as const;
+  // 字段与值以 jupyter .head() 风格的小表格展示：字段名为列、单行值、横向滚动。
+  // dataIndex 用序号占位，避免字段名里的点号被 antd 当作嵌套路径解析。
+  const fieldColumns: ColumnsType<Record<string, unknown>> = fields.map(([key], index) => ({
+    title: key,
+    dataIndex: `c${index}`,
+    key: `c${index}`,
+    ellipsis: true,
+    render: (value: unknown) => {
+      const text = cellValueText(value);
+      if (!text) return <Text type="secondary">-</Text>;
+      return (
+        <Tooltip title={text} placement="topLeft">
+          <span>{text}</span>
+        </Tooltip>
+      );
+    },
+  }));
+  const fieldRow: Record<string, unknown> = Object.fromEntries(
+    fields.map(([, value], index) => [`c${index}`, value]),
+  );
   return (
     <div style={{ marginTop: 8 }}>
       {ev.source_kind === 'structured' ? (
@@ -257,14 +279,21 @@ function StructuredOrigin({ ev }: { ev: Evidence }) {
         </Text>
       )}
       {fields.length > 0 && (
-        <Text type="secondary" style={{ ...textStyle, whiteSpace: 'pre-wrap' }}>
-          字段与值：
-          {fields
-            .slice(0, 12)
-            .map(([key, value]) => `${key}=${String(value)}`)
-            .join('；')}
-          {fields.length > 12 ? ' …' : ''}
-        </Text>
+        <div style={{ marginTop: 4 }}>
+          <Text type="secondary" style={{ ...textStyle, marginBottom: 4 }}>
+            字段与值：
+          </Text>
+          <Table<Record<string, unknown>>
+            size="small"
+            bordered
+            pagination={false}
+            rowKey={() => 'fields-row'}
+            scroll={{ x: true }}
+            style={{ fontSize: 12 }}
+            columns={fieldColumns}
+            dataSource={[fieldRow]}
+          />
+        </div>
       )}
       {members.length > 0 && (
         <Text type="secondary" style={textStyle}>

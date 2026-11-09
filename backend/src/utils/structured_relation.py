@@ -3,13 +3,12 @@
 职责边界：
 - 输入是**第三阶段已经解析好的**文件结构与记录（字段清单 + 记录 payload），
   本模块不读文件、不重新解析、不写数据库，因此服务层可以在内存里反复调用
-  （推测关系 → 校验 → 生成关联记录），失败也碰不到已有结果。
-- 输出三份东西：主键/外键候选与推测关系、校验报告、关联知识记录。
+  （校验 → 生成关联记录），失败也碰不到已有结果。
+- 输出两份东西：主键候选（仅供用户手动选择时参考）、校验报告、关联知识记录。
 
-三条硬约束（对应任务要求）：
-1. **推测不等于确认**：suggest_relations 给出的每条关系都带 ``confirmed=False``，
-   只有用户显式确认（或自己选了字段）后才参与正式生成。判定证据以「值能对上」为主，
-   字段名相似只作为加分与说明，绝不单凭名字认定关联。
+两条硬约束（对应任务要求）：
+1. **关系一律由用户手动填写**：本模块不提供任何主外键自动推测入口；用户填写的
+   关系经校验报告确认后才参与正式生成。
 2. **不改原始数据**：比较走只读的规范化键（``match_key``），payload 原值原样保留；
    未匹配、空键、重复主键的行同样生成记录并带提示，不为了关联成功率丢行或改值。
 3. 不调用 Embedding、不写 Milvus：产出只是文本与结构，向量化统一留到第六阶段。
@@ -17,7 +16,6 @@
 
 from __future__ import annotations
 
-import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from typing import Any
@@ -29,29 +27,8 @@ from src.utils.structured_data import MAX_KNOWLEDGE_TEXT_CHARS, value_text
 # 只限制 knowledge_text 的展开数量；parts / sources 溯源始终完整保留全部匹配，
 # 超出部分在文本与提示里标注「展开 X 条、省略 Y 条，完整列表见详情」。
 MAX_LINK_VALUES = 20
-# 推测关系的最低值覆盖率：低于此值说明两边根本对不上，不端给用户
-MIN_KEY_COVERAGE = 0.6
-# 关系评分是 0–100 的规则打分（不是概率）：≥90 自动预填、70–89 供用户选择、<70 仅参考
-HIGH_SCORE = 90
-MEDIUM_SCORE = 70
-# 对侧（主键侧）唯一率低于该值说明不能直接当主键，评分压到中置信度，绝不自动预填
-MIN_PK_UNIQUE_RATIO = 0.95
-# 参与比对的去重值太少时，值匹配更像巧合，评分压到低置信度
-MIN_EVIDENCE_VALUES = 10
-# 字段值平均长度超过该值视为长文本，不自动预填
-MAX_KEY_VALUE_LENGTH = 30
-# 字段名带这些特征更像标识符（只加分，不作为唯一依据）
+# 字段名带这些特征更像标识符（只作为候选参考，不作为结论）
 _KEY_HINTS = ("编号", "代码", "主键", "外键", "代号", "编码", "ID", "Id", "id", "号")
-# 字段名相似度里不携带语义的通用词元（避免 CPM_ID / CHP_ID 因共享 ID 被当成相似）
-_NAME_STOP_TOKENS = {"id", "no", "num", "code", "group", "term", "type", "value"}
-_NAME_STOP_SUFFIXES = {"id", "no", "num", "code"}
-# 字段名同义词组：只作为加分与说明，绝不单凭名字认定关联
-_NAME_SYNONYM_GROUPS = (
-    ("编号", "编码", "代码", "代号", "序号"),
-    ("名称", "名字", "姓名", "药名", "品名", "术语", "词条"),
-    ("日期", "时间"),
-    ("类型", "类别", "分类", "种类"),
-)
 # 实体展示字段优先取「名字」类（用于「学生：张三」这样的可读文本）
 _LABEL_HINTS = ("姓名", "名称", "名字", "标题", "题名", "药名", "品名", "名", "title", "name")
 
@@ -231,77 +208,10 @@ def _kind_of(left_unique: bool, right_unique: bool) -> str:
     return RELATION_MANY_TO_MANY
 
 
-def _normalize_name(name: str) -> str:
-    return "".join(ch for ch in name.strip().casefold() if ch.isalnum())
-
-
-def _name_tokens(name: str) -> set[str]:
-    tokens = {
-        token.casefold()
-        for token in re.split(r"[^0-9a-zA-Z\u4e00-\u9fff]+", name.strip())
-        if token
-    }
-    return {token for token in tokens if token not in _NAME_STOP_TOKENS}
-
-
-def _name_hits(name: str, tokens: set[str], hints: tuple[str, ...]) -> set[str]:
-    hits: set[str] = set()
-    for hint in hints:
-        if hint.isascii():
-            if hint.casefold() in tokens:
-                hits.add(hint)
-        elif hint in name:
-            hits.add(hint)
-    return hits
-
-
-def _name_similarity(left_name: str, right_name: str) -> tuple[float, list[str]]:
-    """字段名相似度（0–1）：只是评分中的加分项，不单独决定关联。"""
-    left, right = _normalize_name(left_name), _normalize_name(right_name)
-    if not left or not right:
-        return 0.0, []
-    if left == right:
-        return 1.0, ["字段名完全一致"]
-    left_tokens, right_tokens = _name_tokens(left_name), _name_tokens(right_name)
-    common = left_tokens & right_tokens
-    if common:
-        jaccard = len(common) / len(left_tokens | right_tokens)
-        return round(0.55 + 0.35 * jaccard, 2), [f"字段名共享词元：{'、'.join(sorted(common))}"]
-    if left in right or right in left:
-        return 0.6, ["字段名互相包含"]
-    for size in (4, 3, 2):
-        if (
-            len(left) >= size
-            and len(right) >= size
-            and left[-size:] == right[-size:]
-            and left[-size:] not in _NAME_STOP_SUFFIXES
-        ):
-            return 0.5, [f"字段名共享后缀「{left[-size:]}」"]
-    for group in _NAME_SYNONYM_GROUPS:
-        if _name_hits(left_name, left_tokens, group) and _name_hits(
-            right_name, right_tokens, group
-        ):
-            return 0.45, ["字段名用词同义（如 编号/代码/ID）"]
-    return 0.0, []
-
-
-def _type_compatibility(left_type: str, right_type: str) -> float:
-    if not left_type or not right_type:
-        return 0.5
-    if left_type == right_type:
-        return 1.0
-    if {left_type, right_type} <= {"integer", "float"}:
-        return 0.8
-    if {left_type, right_type} <= {"integer", "float", "string"}:
-        # 数字与文本仍可按规范化文本比对，只是不如同类型可靠
-        return 0.4
-    return 0.2
-
-
 class FieldProfileProbe:
     """按批累积字段画像：只保留去重值与计数，不需要把记录留在内存里。
 
-    推测关系与主键候选都要看「整个字段的取值分布」。逐批喂给本类后，内存里只
+    主键候选要看「整个字段的取值分布」。逐批喂给本类后，内存里只
     有「去重值 → 出现次数」，规模由**不同取值的个数**决定，而不是由行数决定；
     7 万行与 2 万行占用的内存是同一量级，因此不再有行数上限的必要。
     """
@@ -359,202 +269,6 @@ def _field_profile(schema: GroupFileSchema, name: str) -> dict[str, Any]:
     probe = FieldProfileProbe([name])
     probe.add(schema.records)
     return probe.profile(name)
-
-
-def _score_relation(
-    left: GroupFileSchema,
-    left_name: str,
-    right: GroupFileSchema,
-    right_name: str,
-    left_profile: dict[str, Any],
-    right_profile: dict[str, Any],
-) -> dict[str, Any] | None:
-    """给一个「left.field → right.field」方向打分（0–100 规则打分，不是概率）。
-
-    值匹配是主证据；字段名、类型、唯一性只做加减分与说明。任何单一因素
-    （尤其字段名）都不足以把关系推到自动预填线。
-    """
-    if not left_profile["distinct"] or not right_profile["distinct"]:
-        return None
-    # 必要条件快速排除：覆盖率不可能高于两侧去重值的数量比
-    if right_profile["distinct"] < MIN_KEY_COVERAGE * left_profile["distinct"]:
-        return None
-    hit_values = left_profile["values"] & right_profile["values"]
-    coverage = len(hit_values) / left_profile["distinct"]
-    if coverage < MIN_KEY_COVERAGE:
-        return None
-    matched_rows = sum(
-        count for key, count in left_profile["counts"].items() if key in right_profile["values"]
-    )
-    row_coverage = matched_rows / left_profile["non_empty"] if left_profile["non_empty"] else 0.0
-    non_empty_ratio = left_profile["non_empty"] / left_profile["rows"] if left_profile["rows"] else 0.0
-    name_similarity, name_notes = _name_similarity(left_name, right_name)
-    left_type = left.field_type(left_name)
-    right_type = right.field_type(right_name)
-    type_compatibility = _type_compatibility(left_type, right_type)
-    pk_unique_ratio = right_profile["unique_ratio"]
-
-    score = 100 * (
-        0.40 * coverage
-        + 0.15 * row_coverage
-        + 0.15 * name_similarity
-        + 0.10 * type_compatibility
-        + 0.10 * pk_unique_ratio
-        + 0.10 * non_empty_ratio
-    )
-    notes = [
-        f"「{left.display_name}」的「{left_name}」有 {left_profile['distinct']} 个非空去重值，"
-        f"其中 {len(hit_values)} 个（{coverage:.0%}）能在「{right.display_name}」的「{right_name}」中找到",
-        f"按行统计：{matched_rows}/{left_profile['non_empty']} 行匹配（{row_coverage:.0%}）",
-        f"「{right.display_name}」的「{right_name}」唯一率 {pk_unique_ratio:.0%}"
-        + ("，可作主键" if right_profile["unique"] else "，不能直接当主键"),
-        *name_notes,
-        f"类型 {left_type or '未知'} / {right_type or '未知'}",
-    ]
-    caps: list[int] = []
-    warnings: list[str] = []
-    if left_profile["distinct"] < MIN_EVIDENCE_VALUES:
-        caps.append(MEDIUM_SCORE - 1)
-        warnings.append(f"参与比对的去重值只有 {left_profile['distinct']} 个，样本太少，评分已下调")
-    if max(left_profile["avg_len"], right_profile["avg_len"]) > MAX_KEY_VALUE_LENGTH:
-        caps.append(MEDIUM_SCORE - 1)
-        warnings.append(
-            f"字段值平均长度 {max(left_profile['avg_len'], right_profile['avg_len']):.0f} 字符，"
-            "更像长文本而不是标识符，评分已下调"
-        )
-    if (
-        name_similarity == 0
-        and not _is_key_like(left_name)
-        and not _is_key_like(right_name)
-        and left_profile["distinct"] < 100
-    ):
-        caps.append(MEDIUM_SCORE - 1)
-        warnings.append("字段名没有标识符特征且去重值较少，值相同可能只是枚举巧合，评分已下调")
-    if pk_unique_ratio < MIN_PK_UNIQUE_RATIO:
-        caps.append(HIGH_SCORE - 1)
-        warnings.append("对侧字段值不唯一，不能直接当主键，不会自动预填")
-    if non_empty_ratio < 1:
-        notes.append(f"「{left_name}」非空率 {non_empty_ratio:.0%}，空值行无法关联（仍保留原行）")
-    if caps:
-        score = min(score, min(caps))
-    score_value = int(round(max(0.0, min(100.0, score))))
-    tier = "high" if score_value >= HIGH_SCORE else "medium" if score_value >= MEDIUM_SCORE else "low"
-    return {
-        "id": relation_id(left.doc_id, left_name, right.doc_id, right_name),
-        "from_doc_id": left.doc_id,
-        "from_field": left_name,
-        "to_doc_id": right.doc_id,
-        "to_field": right_name,
-        "kind": _kind_of(left_profile["unique"], right_profile["unique"]),
-        "origin": "suggested",
-        "confirmed": False,
-        # 兼容旧字段：0–1 的值就是评分/100，不是经过校准的概率
-        "confidence": round(score_value / 100, 3),
-        "score": score_value,
-        "tier": tier,
-        "coverage": round(coverage, 3),
-        "row_coverage": round(row_coverage, 3),
-        "factors": {
-            "coverage": round(coverage, 3),
-            "row_coverage": round(row_coverage, 3),
-            "name": round(name_similarity, 2),
-            "type": round(type_compatibility, 2),
-            "pk_unique": round(pk_unique_ratio, 3),
-            "non_empty": round(non_empty_ratio, 3),
-        },
-        "evidence": notes,
-        "warnings": warnings,
-        "reason": "；".join(notes + warnings),
-        # 仅用于同一文件对内部的择优，不对外返回
-        "_rank": (
-            score_value,
-            name_similarity,
-            int(_is_key_like(left_name)) + int(_is_key_like(right_name)),
-            left_profile["distinct"],
-        ),
-    }
-
-
-def suggest_relations(schemas: list[GroupFileSchema]) -> list[dict[str, Any]]:
-    """按数据特征推测跨文件关系（每条都 confirmed=False，等用户确认）。"""
-    profiles = {
-        schema.doc_id: {name: _field_profile(schema, name) for name in schema.field_names()}
-        for schema in schemas
-    }
-    return suggest_relations_from_profiles(profiles, schemas)
-
-
-def suggest_relations_from_profiles(
-    profiles: dict[str, dict[str, dict[str, Any]]], schemas: list[GroupFileSchema]
-) -> list[dict[str, Any]]:
-    """画像版本的关系推测。
-
-    每个文件对只保留最可信的一条（含方向）：先比「值能不能对上」，再看字段名、
-    类型、唯一性。评分是规则打分而非概率，判断依据逐条写在 evidence 里。
-    ``profiles`` 可以由服务层分批累积得到，因此这里不需要任何记录常驻内存。
-    """
-    suggestions: list[dict[str, Any]] = []
-    for index, left in enumerate(schemas):
-        for right in schemas[index + 1 :]:
-            best: dict[str, Any] | None = None
-            for source, target in ((left, right), (right, left)):
-                for left_name, left_profile in profiles[source.doc_id].items():
-                    if not left_profile["distinct"]:
-                        continue
-                    for right_name, right_profile in profiles[target.doc_id].items():
-                        if not right_profile["distinct"]:
-                            continue
-                        item = _score_relation(
-                            source,
-                            left_name,
-                            target,
-                            right_name,
-                            left_profile,
-                            right_profile,
-                        )
-                        if item is None:
-                            continue
-                        if best is None or item["_rank"] > best["_rank"]:
-                            best = item
-            if best is not None:
-                best.pop("_rank", None)
-                suggestions.append(best)
-    suggestions.sort(
-        key=lambda item: (-item["score"], -item["coverage"], item["from_field"], item["to_field"])
-    )
-    return suggestions
-
-
-def high_confidence_relations(suggestions: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """把评分 ≥90 的推测关系转成「自动预填但未确认」的关系配置（纯函数，不写库）。
-
-    自动预填只是替用户把推荐的字段与关联类型选好；``confirmed`` 恒为 False，
-    仍然必须逐条确认后才能通过校验并参与正式生成。
-    """
-    prefilled: list[dict[str, Any]] = []
-    for item in suggestions:
-        if item.get("tier") != "high" or int(item.get("score") or 0) < HIGH_SCORE:
-            continue
-        prefilled.append(
-            {
-                "id": item["id"],
-                "from_doc_id": item["from_doc_id"],
-                "from_field": item["from_field"],
-                "to_doc_id": item["to_doc_id"],
-                "to_field": item["to_field"],
-                "kind": item["kind"],
-                "origin": "suggested",
-                "confirmed": False,
-                "confidence": item.get("confidence"),
-                "score": item.get("score"),
-                "tier": item.get("tier"),
-                "coverage": item.get("coverage"),
-                "row_coverage": item.get("row_coverage"),
-                "evidence": item.get("evidence", []),
-                "reason": item.get("reason", ""),
-            }
-        )
-    return prefilled
 
 
 def _index_by_key(schema: GroupFileSchema, name: str) -> dict[str, list[dict[str, Any]]]:

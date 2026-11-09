@@ -30,7 +30,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import uuid
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime, timezone
 
 from loguru import logger
@@ -154,6 +154,32 @@ def locate_text(row: StructuredRecord) -> str:
     return f"{sheet}第 {row.row_no} 行"
 
 
+class VectorizeCancelled(Exception):
+    """用户主动停止向量化（批次之间检查，已写入的部分向量由调用方清理）。"""
+
+
+def _progress_chunk() -> int:
+    """每批记录数：一次编码 + 一次进度回写（Milvus 内部再按 64 分片发送）。
+
+    取 VECTORIZE_ENCODE_BATCH_SIZE（默认 256）：一次 Embedding 调用传入 256 条，
+    FlagEmbedding 能在更大集合内按长度排序再切微批，动态 padding 的填充更少；
+    Milvus 侧 insert_batch 仍按 VECTORIZE_BATCH_SIZE（64）分片，单条 RPC 大小
+    不变。模型内部前向微批仍由 EMBEDDING_BATCH_SIZE 控制，所以合并批次不会抬高
+    单次前向的 token 上限。
+    """
+    return max(int(settings.VECTORIZE_ENCODE_BATCH_SIZE or 0), 1)
+
+
+async def _safe_progress(
+    callback: Callable[[int], Awaitable[None]], count: int
+) -> None:
+    """进度回写失败不得影响向量化本身（进度只是展示数据）。"""
+    try:
+        await callback(count)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"向量化进度回写失败 count={count}: {exc}")
+
+
 class StructuredVectorService:
     """结构化 / 关联知识记录的向量化与清理（复用现有 Embedding + Milvus）。"""
 
@@ -187,7 +213,9 @@ class StructuredVectorService:
 
     # ── 非关联结构化：按文件整份替换 ──────────────────────────────────────
 
-    async def vectorize_document(self, doc_id: uuid.UUID) -> int:
+    async def vectorize_document(
+        self, doc_id: uuid.UUID, should_cancel: Callable[[], bool] | None = None
+    ) -> int:
         """把该文件的全部有效知识记录写入统一向量索引（按文件幂等替换，分批流式）。
 
         记录按键集分页逐批读取：每批构造 VectorRow、每批单独编码、每批单独写入，
@@ -227,10 +255,27 @@ class StructuredVectorService:
                 await self._ensure_embedding()
                 # 只取标量字段进生成器：批处理期间不保留整份 ORM 对象
                 doc_pk, kb_id, file_name = doc.id, str(doc.kb_id), doc.file_name
+
+                async def _on_progress(n: int) -> None:
+                    # 每批写入后回写已入库条数，列表页进度条据此推进
+                    await self._set_parse_status(
+                        doc_pk, VECTOR_STATUS_INDEXING, n, ""
+                    )
+
                 total = await self._replace_in_batches(
                     doc_key,
                     lambda: self._document_batches(doc_pk, kb_id, file_name, doc_key),
+                    _on_progress,
+                    should_cancel,
                 )
+            except VectorizeCancelled:
+                # 用户主动停止：丢弃本次已写入的部分向量，回到待向量化（可重新开始）
+                logger.info(f"结构化向量化已被用户停止 doc_id={doc.id}")
+                await self._delete_doc_vectors(doc_key)
+                await self._set_parse_status(
+                    doc.id, VECTOR_STATUS_PENDING, 0, "已停止向量化"
+                )
+                return 0
             except Exception as exc:  # noqa: BLE001 - 记录失败原因；清旧之前的失败不触碰旧索引
                 logger.error(f"结构化记录向量化失败 doc_id={doc.id}: {exc}")
                 await self._set_parse_status(
@@ -257,7 +302,9 @@ class StructuredVectorService:
 
     # ── 关联结构化：仅 confirmed 组允许写入 ───────────────────────────────
 
-    async def vectorize_group(self, group_id: uuid.UUID) -> int:
+    async def vectorize_group(
+        self, group_id: uuid.UUID, should_cancel: Callable[[], bool] | None = None
+    ) -> int:
         """把已确认（confirmed）文件组的关联记录写入统一向量索引（分批流式）。"""
         group_key = structured_group_doc_id(group_id)
         group = await self.db.get(StructuredGroup, group_id)
@@ -284,10 +331,27 @@ class StructuredVectorService:
                 await self._ensure_embedding()
                 group_pk, kb_id = group.id, str(group.kb_id)
                 group_name = group.name
+
+                async def _on_progress(n: int) -> None:
+                    # 每批写入后回写已入库条数，列表页进度条据此推进
+                    await self._set_group_status(
+                        group_pk, VECTOR_STATUS_INDEXING, n, ""
+                    )
+
                 total = await self._replace_in_batches(
                     group_key,
                     lambda: self._group_batches(group_pk, kb_id, group_name, group_key),
+                    _on_progress,
+                    should_cancel,
                 )
+            except VectorizeCancelled:
+                # 用户主动停止：丢弃本次已写入的部分向量，回到待向量化
+                logger.info(f"关联记录向量化已被用户停止 group_id={group.id}")
+                await self._delete_doc_vectors(group_key)
+                await self._set_group_status(
+                    group.id, VECTOR_STATUS_PENDING, 0, "已停止向量化"
+                )
+                return 0
             except Exception as exc:  # noqa: BLE001 - 记录失败原因；清旧之前的失败不触碰旧索引
                 logger.error(f"关联记录向量化失败 group_id={group.id}: {exc}")
                 await self._set_group_status(
@@ -364,7 +428,12 @@ class StructuredVectorService:
                 if (r.knowledge_text or "").strip()
             ]
             if batch:
-                yield await self._encode(batch)
+                # 按批产出：一次编码 / 一次进度回写（Milvus 内部再按 64 分片）。
+                # 本机 CPU 2 线程下 256 条短文本约 80 秒，进度条约每批推进一次；
+                # 停止信号同样在批次之间检查，最多再等当前这一批。
+                chunk = _progress_chunk()
+                for start in range(0, len(batch), chunk):
+                    yield await self._encode(batch[start : start + chunk])
             if len(rows) < size:
                 return
 
@@ -410,7 +479,9 @@ class StructuredVectorService:
                 if (r.knowledge_text or "").strip()
             ]
             if batch:
-                yield await self._encode(batch)
+                chunk = _progress_chunk()
+                for start in range(0, len(batch), chunk):
+                    yield await self._encode(batch[start : start + chunk])
             if len(rows) < size:
                 return
 
@@ -418,6 +489,8 @@ class StructuredVectorService:
         self,
         doc_key: str,
         make_batches: Callable[[], AsyncIterator[list[VectorRow]]],
+        on_progress: Callable[[int], Awaitable[None]] | None = None,
+        should_cancel: Callable[[], bool] | None = None,
     ) -> int:
         """分批 staged 替换：先写入全部新向量，全部成功后才清理旧向量（BUG-046）。
 
@@ -437,6 +510,10 @@ class StructuredVectorService:
         keep: set[str] = set()
         total = 0
         async for batch in make_batches():
+            # 批次之间检查停止信号：单批编码不可中断，但用户点击「停止」后
+            # 最多再等当前一批（默认 256 条，短文本约 80 秒）完成就会退出。
+            if should_cancel is not None and should_cancel():
+                raise VectorizeCancelled()
             keep.update(r.id for r in batch)
             written = await asyncio.to_thread(store.insert_batch, batch, flush=False)
             if written != len(batch):
@@ -444,6 +521,9 @@ class StructuredVectorService:
                     f"向量入库不完整：期望 {len(batch)} 条，实际 {written} 条"
                 )
             total += written
+            # 进度回写：每批结束后更新 vector_count，前端进度条据此推进
+            if on_progress is not None:
+                await _safe_progress(on_progress, total)
 
         stale = [i for i in old_ids if i not in keep]
         await asyncio.to_thread(self._delete_stale_and_flush, stale)
@@ -460,12 +540,16 @@ class StructuredVectorService:
         await asyncio.to_thread(store.delete_by_doc, doc_key)
         replayed = 0
         async for batch in make_batches():
+            if should_cancel is not None and should_cancel():
+                raise VectorizeCancelled()
             written = await asyncio.to_thread(store.insert_batch, batch, flush=False)
             if written != len(batch):
                 raise VectorStoreError(
                     f"向量入库不完整：期望 {len(batch)} 条，实际 {written} 条"
                 )
             replayed += written
+            if on_progress is not None:
+                await _safe_progress(on_progress, replayed)
         await asyncio.to_thread(store.flush)
         actual = await asyncio.to_thread(store.count_by_doc, doc_key)
         if actual != replayed:
@@ -483,10 +567,10 @@ class StructuredVectorService:
     async def _encode(self, rows: list[VectorRow]) -> list[VectorRow]:
         """为**当前一批**生成 dense + sparse 向量（CPU/GPU 密集，放线程池）。
 
-        批内再按 VECTORIZE_BATCH_SIZE 细分调用 Embedding；不累积跨批的
+        批内再按 VECTORIZE_ENCODE_BATCH_SIZE 细分调用 Embedding；不累积跨批的
         texts 列表或结果列表，处理完即返回原批次。
         """
-        batch = max(int(settings.VECTORIZE_BATCH_SIZE or 0), 1)
+        batch = _progress_chunk()
         for start in range(0, len(rows), batch):
             chunk = rows[start : start + batch]
             dense, sparse = await asyncio.to_thread(
@@ -564,7 +648,11 @@ class StructuredVectorService:
 
 
 async def sync_structured_document(db: AsyncSession, doc_id: uuid.UUID) -> None:
-    """结构化解析成功 / 文件替换后：置 pending 并入队，不在调用线程里跑 Embedding。"""
+    """结构化解析成功 / 文件替换后：只把状态置 pending，**不自动入队**。
+
+    向量化改为用户在页面点「开始向量化」手动触发：上传完一批文件先看解析结果与
+    记录数，确认无误后再决定何时占用 CPU（避免一次上传把几十万条记录排进长队列）。
+    """
     try:
         await db.execute(
             update(StructuredParse)
@@ -574,18 +662,15 @@ async def sync_structured_document(db: AsyncSession, doc_id: uuid.UUID) -> None:
         await db.commit()
     except Exception as exc:  # noqa: BLE001
         logger.warning(f"结构化向量状态更新失败（不影响解析结果）doc_id={doc_id}: {exc}")
-        return
-
-    from src.application.structured_runner import enqueue_structured_document
-
-    enqueue_structured_document(str(doc_id))
 
 
 async def sync_structured_group(db: AsyncSession, group_id: uuid.UUID) -> None:
-    """文件组状态变化后同步向量：confirmed 入队重建，其余状态立即清掉旧向量。
+    """文件组状态变化后同步向量：confirmed 只置 pending（等用户手动触发），
+    其余状态立即清掉旧向量。
 
     未确认 / stale 的组必须**立即**退出检索，因此清理仍走同步路径（只是删除，
-    没有 Embedding）；只有已确认组的整份重建交给单消费者队列。
+    没有 Embedding）；已确认组的整份重建不再自动入队——由页面「开始向量化」按钮
+    调用 ``POST /structured/groups/{id}/revectorize`` 手动派发。
     """
     try:
         group = await db.get(StructuredGroup, group_id)
@@ -596,9 +681,6 @@ async def sync_structured_group(db: AsyncSession, group_id: uuid.UUID) -> None:
                 .values(vector_status=VECTOR_STATUS_PENDING, vector_error="")
             )
             await db.commit()
-            from src.application.structured_runner import enqueue_structured_group
-
-            enqueue_structured_group(str(group_id))
             return
         await StructuredVectorService(db).vectorize_group(group_id)
     except Exception as exc:  # noqa: BLE001

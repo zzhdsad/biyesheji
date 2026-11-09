@@ -34,7 +34,7 @@ STAGE_LABELS_STRUCTURED = ["上传", "字段识别", "数据解析", "知识记�
 STAGE_LABELS_GROUP = [
     "文件组上传",
     "字段识别",
-    "关系推测",
+    "配置关联字段",
     "用户确认",
     "数据校验",
     "关联记录生成",
@@ -384,7 +384,7 @@ def structured_processing(doc: Any, parse: Any, *, format_supported: bool = True
     )
 
 
-# ── 关联文件组：上传 → 字段识别 → 关系推测 → 用户确认 → 校验 → 生成 → 完成 ────
+# ── 关联文件组：上传 → 字段识别 → 配置关联字段 → 用户确认 → 校验 → 生成 → 完成 ──
 def group_processing(group: Any, files: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     labels = STAGE_LABELS_GROUP
     relations = [dict(r) for r in (getattr(group, "relations", None) or [])]
@@ -433,14 +433,14 @@ def group_processing(group: Any, files: Sequence[Mapping[str, Any]]) -> dict[str
     elif len(succeeded) < len(usable):
         current = 1
         status = STATUS_PROCESSING if running_members else STATUS_PENDING
-        reason = "组内还有文件未完成字段识别，关系推测需要全部解析成功"
+        reason = "组内还有文件未完成字段识别，配置关联关系需要全部解析成功"
         next_action = "reparse_members"
     else:
         completed[1] = True
         if not relations:
             current = 2
-            reason = "还没有关联关系：点「推测跨文件关系」生成候选（不会自动运行），也可以直接手动选择关联字段"
-            next_action = "suggest"
+            reason = "还没有关联关系：请在「关系配置」中手动选择两侧文件和关联字段"
+            next_action = "manual_relations"
         elif unconfirmed:
             completed[2] = True
             current = 3

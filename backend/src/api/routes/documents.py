@@ -111,6 +111,11 @@ class DocumentOut(BaseModel):
     structured_record_count: int | None = None
     structured_field_count: int | None = None
     structured_error_message: str | None = None
+    # 结构化向量化进度（仅 space=structured 的列表填充）：pending / indexing /
+    # completed / failed + 已写入条数，前端据此显示「开始向量化」按钮与进度条。
+    structured_vector_status: str | None = None
+    structured_vector_count: int | None = None
+    structured_vector_error: str | None = None
     # 统一处理状态（第五阶段）：向量侧真实状态直接来自 documents 列，
     # 这样列表里就能区分「有切片」与「向量真的进了 Milvus」，不再靠 parse_status 猜。
     index_status: str = "not_indexed"
@@ -576,6 +581,13 @@ async def list_documents(
     space: str = Query("document", description="文件空间：document / structured"),
     folder_id: uuid.UUID | None = Query(None, description="只看该文件夹内的文件"),
     root_only: bool = Query(False, description="true = 只看空间根目录（folder_id IS NULL）"),
+    related: bool | None = Query(
+        None,
+        description=(
+            "仅结构化空间生效：true = 只看已被文件组引用的文件；"
+            "false = 只看未被任何文件组引用的文件；不传 = 全部"
+        ),
+    ),
     limit: int | None = Query(None, ge=1, le=500),
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
@@ -618,6 +630,19 @@ async def list_documents(
         filters.append(Document.kb_id == kb_id)
     if parse_status is not None:
         filters.append(Document.parse_status == parse_status)
+    if related is not None and space_value == STRUCTURED_SPACE:
+        # 「关联性结构化数据」页签只看文件组引用的文件，「非关联性」页签看其余文件，
+        # 两个页签共用同一个结构化存储空间，但展示范围不再重叠。
+        grouped_doc_ids = (
+            select(StructuredGroupFile.doc_id)
+            .join(StructuredGroup, StructuredGroup.id == StructuredGroupFile.group_id)
+            .where(StructuredGroup.status != "deleted")
+        )
+        filters.append(
+            Document.id.in_(grouped_doc_ids)
+            if related
+            else Document.id.not_in(grouped_doc_ids)
+        )
 
     total = int(
         await db.scalar(select(func.count()).select_from(Document).where(*filters)) or 0
@@ -647,6 +672,9 @@ async def _attach_structured_summary(
             StructuredParse.record_count,
             func.jsonb_array_length(StructuredParse.fields),
             StructuredParse.error_message,
+            StructuredParse.vector_status,
+            StructuredParse.vector_count,
+            StructuredParse.vector_error,
         ).where(StructuredParse.doc_id.in_(doc_ids))
     )
     by_doc = {row[0]: row for row in summary_rows.all()}
@@ -658,6 +686,10 @@ async def _attach_structured_summary(
         item.structured_record_count = found[2]
         item.structured_field_count = int(found[3] or 0)
         item.structured_error_message = found[4] or None
+        # 向量化进度：前端用 vector_count / record_count 画出百分比进度条
+        item.structured_vector_status = found[5] or None
+        item.structured_vector_count = int(found[6] or 0)
+        item.structured_vector_error = found[7] or None
 
 
 @router.post("/upload", response_model=DocumentOut, status_code=201)
@@ -707,6 +739,10 @@ async def upload_document(
         space=space_value,
         folder_id=folder_id,
     )
+    # 内容重复时服务层直接复用已有文档：不重复解析、不再新增副本与向量
+    if getattr(doc, "deduplicated", False):
+        logger.info(f"重复上传已复用已有文档，跳过解析派发 doc_id={doc.id}")
+        return doc
     if is_parse_enabled(doc.space):
         _dispatch_parse(background_tasks, doc.id)
     elif _dispatch_structured_parse(background_tasks, doc):

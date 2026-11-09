@@ -41,25 +41,45 @@ def test_rrf_preserves_hit_fields():
 # ---------- 单元：BGERerank 配置与惰性加载（不下载模型） ----------
 
 
-def test_bge_rerank_lazy_loading_does_not_load_on_construction():
-    """BGERerank 构造时不立即加载模型（惰性，避免测试触发 2.3GB 下载）。"""
+def test_bge_rerank_lazy_loading_does_not_load_on_construction(monkeypatch):
+    """BGERerank 构造时不立即加载模型（惰性，避免测试触发 2.3GB 加载）。"""
     from src.infrastructure.rerank import BGERerank
 
+    # 与环境解耦：容器可能已配置 RERANK_MODEL_PATH，这里固定为未配置状态
+    monkeypatch.setattr(settings, "RERANK_MODEL_PATH", None)
     r = BGERerank()
     # 构造完成，模型未加载
     assert r._model is None
-    # 默认 model_name 取自 settings.RERANK_MODEL
+    # 未配置本地路径时，默认 model_name 取自 settings.RERANK_MODEL
     assert r._model_name == settings.RERANK_MODEL
 
 
-def test_bge_rerank_uses_local_path_when_configured(monkeypatch):
-    """RERANK_MODEL_PATH 配置后，model_name 应优先用本地路径。"""
+def test_bge_rerank_uses_local_path_when_configured(monkeypatch, tmp_path):
+    """RERANK_MODEL_PATH 配置后，model_name 应优先用本地路径（须真实存在）。"""
     from src.infrastructure.rerank import BGERerank
 
-    monkeypatch.setattr(settings, "RERANK_MODEL_PATH", "/data/models/bge-reranker")
+    local = tmp_path / "bge-reranker"
+    local.mkdir()
+    monkeypatch.setattr(settings, "RERANK_MODEL_PATH", str(local))
     r = BGERerank()
-    assert r._model_name == "/data/models/bge-reranker"
-    assert r._local_path == "/data/models/bge-reranker"
+    assert r._model_name == str(local)
+    assert r._local_path == str(local)
+
+
+def test_resolve_rerank_config_prefers_local_path_for_default_model(monkeypatch):
+    """DB 配置仍是默认模型 ID 时，应解析为本地路径（离线环境无法下载）。"""
+    from src.infrastructure import rerank as rerank_mod
+
+    monkeypatch.setattr(settings, "RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+    monkeypatch.setattr(settings, "RERANK_MODEL_PATH", "/app/models/bge-reranker-v2-m3")
+    _, model, _ = rerank_mod._resolve_rerank_config(
+        {
+            "rerank_backend": "flagreranker",
+            "rerank_model": "BAAI/bge-reranker-v2-m3",
+            "rerank_device": "cpu",
+        }
+    )
+    assert model == "/app/models/bge-reranker-v2-m3"
 
 
 def test_bge_rerank_empty_candidates_skips_model_loading():

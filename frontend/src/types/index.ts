@@ -406,6 +406,11 @@ export interface DocumentItem {
   structured_record_count?: number | null;
   structured_field_count?: number | null;
   structured_error_message?: string | null;
+  /** 结构化向量化进度（仅结构化空间列表返回）：pending / indexing / completed / failed */
+  structured_vector_status?: string | null;
+  /** 已写入 Milvus 的向量条数（配合 record_count 显示进度条） */
+  structured_vector_count?: number | null;
+  structured_vector_error?: string | null;
   /**
    * 向量索引的真实状态（统一处理状态用）：parse_status 只说明切片是否就绪，
    * 是否真的进了 Milvus 由这两列决定，列表因此能区分「切片就绪」与「已可检索」。
@@ -555,7 +560,7 @@ export interface StructuredGroup {
   vectorized_at?: string | null;
 }
 
-/** 一条关联关系：origin=suggested 是系统推测，manual 是用户自选字段。 */
+/** 一条关联关系：manual 是用户手动选字段；suggested 仅兼容历史遗留数据。 */
 export interface StructuredRelation {
   id: string;
   from_doc_id: string;
@@ -575,7 +580,7 @@ export interface StructuredRelation {
   evidence?: string[];
   warnings?: string[];
   factors?: Record<string, number>;
-  /** 本次推测是否已自动预填为关系配置（仍为未确认） */
+  /** 历史字段：是否曾被自动预填（当前不再产生预填关系） */
   prefilled?: boolean;
   reason?: string;
 }

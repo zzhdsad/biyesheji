@@ -197,8 +197,8 @@ async def test_build_citations_no_marker_returns_empty():
 
 
 @pytest.mark.asyncio
-async def test_build_citations_refusal_keeps_evidence():
-    """拒答 / 保守回答无引用标记 → 保留全部可展示证据供用户判断。"""
+async def test_build_citations_refusal_returns_empty():
+    """拒答 / 保守回答 → 不返回引用（命中的证据与问题无关，展示会误导用户）。"""
     from src.application.rag_service import REFUSAL_ANSWER
 
     db = _mock_db()
@@ -208,7 +208,7 @@ async def test_build_citations_refusal_keeps_evidence():
         _make_resource_hit(score=0.7, rtype="theory", rname="阴阳学说"),
     ]
     citations = await svc._build_citations(REFUSAL_ANSWER, hits)
-    assert len(citations) == 2
+    assert len(citations) == 0
 
 
 @pytest.mark.asyncio

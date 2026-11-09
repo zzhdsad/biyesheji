@@ -30,6 +30,7 @@ from src.api.routes.documents import (
     _require_reprocessable,
 )
 from src.application.structured_runner import (
+    cancel_structured_job,
     is_structured_vector_job_active,
     run_structured_parse_safely,
     run_structured_vectorize_safely,
@@ -367,4 +368,46 @@ async def revectorize_document(
     await db.commit()
     background_tasks.add_task(run_structured_vectorize_safely, str(doc.id))
     logger.info(f"已派发结构化重新向量化 doc_id={doc.id} file={doc.file_name}")
+    return await get_parse_result(doc_id, request, db)
+
+
+@router.post("/{doc_id}/cancel-vectorize", response_model=StructuredParseOut, status_code=202)
+async def cancel_vectorize_document(
+    doc_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> StructuredParseOut:
+    """停止该文件正在等待或执行的向量化。
+
+    排队中的任务直接移出队列并复位 pending；执行中的任务设置停止标记，服务层在
+    下一批记录之间退出，清理本次已写入的部分向量后回到 pending（可重新开始）。
+    """
+    user: User = request.state.user
+    doc = await _get_doc_with_access_check(db, user, doc_id)
+    _require_structured(doc)
+    await _require_kb_write_access(db, user, doc.kb_id)
+
+    row = await db.scalar(select(StructuredParse).where(StructuredParse.doc_id == doc.id))
+    outcome = cancel_structured_job("document", str(doc.id))
+    if outcome == "idle":
+        stale = (
+            row is not None
+            and row.vector_status == VECTOR_STATUS_INDEXING
+            and is_stale_processing(row.updated_at or row.created_at)
+        )
+        if not stale:
+            raise AppException(409, "该文件当前没有等待或正在执行的向量化任务")
+
+    if row is not None:
+        await db.execute(
+            update(StructuredParse)
+            .where(StructuredParse.doc_id == doc.id)
+            .values(
+                vector_status=VECTOR_STATUS_PENDING,
+                vector_count=0,
+                vector_error="已停止向量化",
+            )
+        )
+        await db.commit()
+    logger.info(f"已请求停止结构化向量化 doc_id={doc.id} outcome={outcome}")
     return await get_parse_result(doc_id, request, db)

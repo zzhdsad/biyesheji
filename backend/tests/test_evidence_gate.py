@@ -537,8 +537,8 @@ def test_ask_stream_keeps_event_order_and_carries_gate(client, monkeypatch):
 
 
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
-def test_insufficient_gate_refuses_but_keeps_evidence(client, monkeypatch):
-    """insufficient：拒答 + 保留证据/引用（禁止模型编造）。"""
+def test_insufficient_gate_refuses_without_citations(client, monkeypatch):
+    """insufficient：拒答 + 不展示引用（禁止模型编造，也不展示无关证据）。"""
     weak_kg = [
         {
             "id": "kg:e1", "doc_id": "kg:e1", "kb_id": None,
@@ -566,8 +566,8 @@ def test_insufficient_gate_refuses_but_keeps_evidence(client, monkeypatch):
     assert gate["original_strategy"]        # 记录了原策略
     assert gate["retry_strategy"] and gate["retry_strategy"] != gate["original_strategy"]
     assert gate["accepted_count"] == 0 and gate["weak_count"] == 1
-    # 证据/引用保留（用户仍能看到检索到的弱证据）
-    assert data["citations"] and data["evidence"] == data["citations"]
+    # 拒答不展示引用（弱证据与问题无关，展示会误导用户）
+    assert data["citations"] == [] and data["evidence"] == []
 
 
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")

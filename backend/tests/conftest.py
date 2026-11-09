@@ -120,6 +120,65 @@ def _probe_redis() -> bool:
 REDIS_AVAILABLE = _probe_redis()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _cleanup_test_knowledge_bases():
+    """测试套件结束后删除本次测试新建的知识库（文档与向量一并清理）。
+
+    为什么需要：集成测试会真实 `POST /knowledge-bases` 建库却从不删除；一旦在
+    开发库上跑测试（DB_ALLOW_DEV_TESTS=1），用户的知识库列表会被几十个
+    「解析集成测试库 / HyDE 测试库 / 评估测试KB / 混合检索测试库」塞满。
+    这里在套件开始时记录已有库 id，结束时只删新增的那些，不碰用户已有知识库。
+    """
+    if not PG_AVAILABLE:
+        yield
+        return
+
+    import asyncio
+
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    async def _kb_ids() -> set[str]:
+        engine = create_async_engine(settings.DATABASE_URL)
+        try:
+            async with engine.connect() as conn:
+                return set(
+                    (await conn.execute(text("select id::text from knowledge_bases"))).scalars()
+                )
+        finally:
+            await engine.dispose()
+
+    async def _cleanup(keep: set[str]) -> None:
+        from src.infrastructure.milvus_store import MilvusStore
+
+        store = MilvusStore() if MILVUS_AVAILABLE else None
+        engine = create_async_engine(settings.DATABASE_URL)
+        try:
+            async with engine.begin() as conn:
+                ids = list(
+                    (await conn.execute(text("select id::text from knowledge_bases"))).scalars()
+                )
+                extra = [i for i in ids if i not in keep]
+                for kb_id in extra:
+                    if store is None:
+                        continue
+                    try:
+                        await asyncio.to_thread(store.delete_by_kb, kb_id)
+                    except Exception:  # noqa: BLE001 - 向量清理失败不阻断库删除
+                        pass
+                if extra:
+                    await conn.execute(
+                        text("delete from knowledge_bases where id::text = any(:ids)"),
+                        {"ids": extra},
+                    )
+        finally:
+            await engine.dispose()
+
+    before = asyncio.run(_kb_ids())
+    yield
+    asyncio.run(_cleanup(before))
+
+
 @pytest.fixture(autouse=True)
 def _mock_embedding_backend(monkeypatch):
     monkeypatch.setattr(settings, "EMBEDDING_BACKEND", "mock")

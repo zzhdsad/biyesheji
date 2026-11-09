@@ -273,9 +273,9 @@ async def test_build_citations_resolves_index_and_fallback():
     # 编号越界 → 不把候选当引用
     cits3 = await svc._build_citations("[citation: 9, 1]", hits)
     assert len(cits3) == 0
-    # 拒答 / 保守回答保留证据
+    # 拒答 / 保守回答不返回引用（避免展示与问题无关的候选误导用户）
     cits4 = await svc._build_citations(REFUSAL_ANSWER, hits)
-    assert len(cits4) == 2
+    assert len(cits4) == 0
 
 
 # ---------- 单元：Citation / Evidence Pydantic 模型保留 relevance_score（BUG-（相关度 3%））----------

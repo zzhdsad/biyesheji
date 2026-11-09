@@ -53,8 +53,6 @@ from src.utils.structured_relation import (
     RELATION_KINDS,
     RELATION_ONE_TO_MANY,
     key_candidates_from_probe,
-    high_confidence_relations,
-    suggest_relations_from_profiles,
     validate_group,
 )
 from src.utils.structured_relation import relation_id as build_relation_id
@@ -514,53 +512,6 @@ class StructuredGroupService:
 
     # ── 关系配置 / 校验 / 确认 ───────────────────────────────────────────────
 
-    async def refresh_suggestions(self, group_id: uuid.UUID) -> list[dict[str, Any]]:
-        """重新推测关系，并把高置信度结果自动预填为「未确认」关系。
-
-        不覆盖用户已经保存的任何关系：只有「还没有关系、也还没生成正式记录」的组
-        才会预填，且预填项 confirmed=False —— 自动预填不等于自动确认。
-
-        取值分布按批累积成画像后即释放记录，组内文件再多也不会把记录整体读进内存，
-        因此不再有「只取前 20000 行」这类截断，推测依据覆盖全部数据。
-        """
-        group = await self.get(group_id)
-        schemas: list[GroupFileSchema] = []
-        profiles: dict[str, dict[str, dict[str, Any]]] = {}
-        for schema in await self.load_schema_meta(group_id):
-            names = schema.field_names()
-            probe = FieldProfileProbe(names)
-            async for batch in self._iter_record_batches(uuid.UUID(schema.doc_id)):
-                await asyncio.to_thread(probe.add, batch)
-            profiles[schema.doc_id] = {name: probe.profile(name) for name in names}
-            schemas.append(schema)
-        if len(schemas) < 2:
-            raise AppException(400, "文件组内至少需要 2 个可解析的文件")
-        not_ready = [s.file_name for s in schemas if s.record_count == 0]
-        if not_ready:
-            raise AppException(
-                400,
-                f"以下文件还没有解析结果，请先完成结构化解析：{'、'.join(not_ready)}",
-            )
-        suggestions = suggest_relations_from_profiles(profiles, schemas)
-        prefilled_ids: set[str] = set()
-        if group.record_count == 0 and not (group.relations or []):
-            auto = high_confidence_relations(suggestions)
-            if auto:
-                group.relations = auto
-                group.status = STRUCTURED_GROUP_DRAFT
-                group.error_message = ""
-                await self.db.commit()
-                await self.db.refresh(group)
-                prefilled_ids = {str(relation["id"]) for relation in auto}
-                logger.info(
-                    "结构化文件组 {} 自动预填 {} 条高置信度关系（均未确认）",
-                    group_id,
-                    len(auto),
-                )
-        for item in suggestions:
-            item["prefilled"] = str(item["id"]) in prefilled_ids
-        return suggestions
-
     def _invalidate_relation_config(self, group: StructuredGroup, reason: str) -> None:
         """关系配置一变，校验报告立即作废；已经生成过正式记录则整组转 stale，
         绝不允许「旧记录 + 新关系」混在一起（未重新确认前不得当作有效结果）。"""
@@ -646,7 +597,7 @@ class StructuredGroupService:
     async def set_relation_confirmation(
         self, group_id: uuid.UUID, target_relation_id: str, confirmed: bool
     ) -> StructuredGroup:
-        """勾选/取消勾选某条推测关系：推测的关系只有这里能被置为已确认。"""
+        """勾选/取消勾选某条关系（兼容历史遗留的未确认关系）。"""
         group = await self.get(group_id)
         relations = [dict(r) for r in (group.relations or [])]
         hit = False
@@ -666,7 +617,10 @@ class StructuredGroupService:
     async def validate(self, group_id: uuid.UUID) -> dict[str, Any]:
         group = await self.get(group_id)
         if not group.relations:
-            raise AppException(400, "还没有任何关联关系：请先接受推测结果或手动配置字段")
+            raise AppException(
+                400,
+                "还没有任何关联关系：请手动选择两侧文件和关联字段后再校验",
+            )
         relations = [dict(r) for r in group.relations]
         # 只作为关联左侧出现的文件按关联键投影读取：大表不会整份进内存，
         # 但记录条数与示例值都是全部数据的真实事实，不受行数上限影响

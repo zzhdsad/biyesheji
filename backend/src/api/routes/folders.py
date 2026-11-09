@@ -20,13 +20,19 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Query, Request
 from loguru import logger
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.exceptions import AppException, NotFoundError
-from src.core.file_spaces import FOLDER_NAME_MAX, normalize_space
-from src.domain.models import Document, FileFolder, User
+from src.core.file_spaces import FOLDER_NAME_MAX, STRUCTURED_SPACE, normalize_space
+from src.domain.models import (
+    Document,
+    FileFolder,
+    StructuredGroup,
+    StructuredGroupFile,
+    User,
+)
 from src.infrastructure.database import get_db
 
 router = APIRouter(prefix="/folders", tags=["folders"])
@@ -160,17 +166,70 @@ async def _count_children(db: AsyncSession, space: str) -> dict[uuid.UUID, int]:
     return {parent_id: int(count) for parent_id, count in rows.all()}
 
 
-async def _count_documents(db: AsyncSession, space: str) -> dict[uuid.UUID, int]:
+async def _count_documents(
+    db: AsyncSession, space: str, related: bool | None = None
+) -> dict[uuid.UUID, int]:
+    filters = [
+        Document.space == space,
+        Document.deleted_at.is_(None),
+        Document.folder_id.is_not(None),
+    ]
+    if related is not None and space == STRUCTURED_SPACE:
+        grouped_doc_ids = (
+            select(StructuredGroupFile.doc_id)
+            .join(StructuredGroup, StructuredGroup.id == StructuredGroupFile.group_id)
+            .where(StructuredGroup.status != "deleted")
+        )
+        filters.append(
+            Document.id.in_(grouped_doc_ids)
+            if related
+            else Document.id.not_in(grouped_doc_ids)
+        )
     rows = await db.execute(
         select(Document.folder_id, func.count())
-        .where(
-            Document.space == space,
-            Document.deleted_at.is_(None),
-            Document.folder_id.is_not(None),
-        )
+        .where(*filters)
         .group_by(Document.folder_id)
     )
     return {folder_id: int(count) for folder_id, count in rows.all()}
+
+
+def _filter_scope_folders(
+    folders: list[FileFolder],
+    scope_counts: dict[uuid.UUID, int],
+    total_counts: dict[uuid.UUID, int],
+) -> tuple[list[FileFolder], dict[uuid.UUID, int], set[uuid.UUID]]:
+    """按当前页签（关联 / 非关联）过滤目录树。
+
+    结构化空间的两个页签共用同一棵目录树，但文件范围互斥。若一个目录的子树里
+    只有**另一个页签**的文件，它就不该出现在当前页签——否则用户看到的是「空目录」，
+    删除时却被隐藏文件挡住（两个页签互相干扰）。
+
+    规则：
+    - 目录自身或任一后代有当前页签范围内的存活文件 → 显示（保证导航链路完整）
+    - 子树里完全没有存活文件（真正可删除的空目录）→ 两个页签都显示
+    """
+    by_id = {f.id: f for f in folders}
+
+    def with_ancestors(ids: set[uuid.UUID]) -> set[uuid.UUID]:
+        out = set(ids)
+        for fid in ids:
+            cursor = by_id.get(fid)
+            while cursor is not None and cursor.parent_id is not None:
+                parent = by_id.get(cursor.parent_id)
+                if parent is None or parent.id in out:
+                    break
+                out.add(parent.id)
+                cursor = parent
+        return out
+
+    visible = with_ancestors(set(scope_counts.keys()))
+    # 子树里没有任何存活文件的目录（含空目录、只含回收站文件的目录）
+    occupied = with_ancestors(set(total_counts.keys()))
+    visible |= {f.id for f in folders if f.id not in occupied}
+
+    kept = [f for f in folders if f.id in visible]
+    scope_counts = {k: v for k, v in scope_counts.items() if k in visible}
+    return kept, scope_counts, visible
 
 
 def _to_out(
@@ -193,6 +252,10 @@ def _to_out(
 @router.get("", response_model=list[FolderOut])
 async def list_folders(
     space: str = Query("document"),
+    related: bool | None = Query(
+        None,
+        description="仅结构化空间生效：目录里的文件计数按关联/非关联范围统计",
+    ),
     db: AsyncSession = Depends(get_db),
 ) -> list[FolderOut]:
     """返回该空间全部文件夹（扁平列表，前端按 parent_id 组树并拼面包屑）。
@@ -207,8 +270,15 @@ async def list_folders(
             .order_by(FileFolder.parent_id.asc().nulls_first(), FileFolder.name)
         )
     )
-    doc_counts = await _count_documents(db, space)
+    doc_counts = await _count_documents(db, space, related)
     child_counts = await _count_children(db, space)
+    if related is not None and space == STRUCTURED_SPACE:
+        # 两个页签共用目录树但文件互斥：只属于另一个页签的目录不在这里展示，
+        # 避免「页签里看着是空目录、删除却被隐藏文件挡住」。
+        folders, doc_counts, visible = _filter_scope_folders(
+            folders, doc_counts, await _count_documents(db, space, None)
+        )
+        child_counts = {k: v for k, v in child_counts.items() if k in visible}
     return [_to_out(f, doc_counts, child_counts) for f in folders]
 
 
@@ -406,6 +476,23 @@ async def delete_folder(
 
     name = folder.name
     space = folder.space
+    # 只剩回收站里的文件时（列表上看是空目录），先解除它们对目录的引用再删目录。
+    # 否则这些软删除文件的 folder_id 外键会阻止删除，前端只会看到一条数据库报错。
+    detached = int(
+        await db.scalar(
+            select(func.count())
+            .select_from(Document)
+            .where(Document.folder_id == folder.id)
+        )
+        or 0
+    )
+    if detached:
+        await db.execute(
+            update(Document).where(Document.folder_id == folder.id).values(folder_id=None)
+        )
+        logger.info(
+            f"文件夹内仅剩回收站文件，解除目录引用 id={folder_id} count={detached}"
+        )
     await db.delete(folder)
     await db.commit()
     logger.info(f"删除空文件夹 id={folder_id} space={space} name={name!r}")

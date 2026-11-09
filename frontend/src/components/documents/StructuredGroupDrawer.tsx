@@ -11,6 +11,7 @@ import {
   Input,
   Modal,
   Popconfirm,
+  Progress,
   Select,
   Space,
   Spin,
@@ -29,14 +30,13 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
-  ThunderboltOutlined,
+  SaveOutlined,
+  StopOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import type { RcFile, UploadFile } from 'antd/es/upload';
 import type {
-  DocumentItem,
   GroupProcessingInfo,
-  StructuredField,
   StructuredGroup,
   StructuredGroupDetail,
   StructuredGroupFile,
@@ -46,23 +46,18 @@ import type {
   StructuredRelation,
 } from '@/types';
 import {
-  addStructuredGroupFiles,
+  cancelStructuredGroupVectorize,
   confirmStructuredGroup,
   createStructuredGroup,
   deleteStructuredGroup,
-  fetchDocumentsPage,
   fetchGroupProcessing,
   fetchStructuredGroup,
   fetchStructuredGroupRecord,
   fetchStructuredGroupRecords,
   fetchStructuredGroups,
-  removeStructuredGroupFile,
   renameStructuredGroup,
   revectorizeStructuredGroup,
   saveStructuredRelations,
-  setStructuredGroupFileAlias,
-  setStructuredRelationConfirmation,
-  suggestStructuredRelations,
   uploadDocument,
   validateStructuredGroup,
 } from '@/services/api';
@@ -72,12 +67,10 @@ import {
   DEFAULT_PAGE_SIZE,
   PAGE_SIZE_OPTIONS,
   cellValueText,
-  fieldTypeLabel,
   structuredParseStatusMeta,
 } from '@/utils/structuredDisplay';
 import {
   groupRowStatus,
-  memberParseStatus,
   vectorStatusMeta,
 } from '@/utils/processingStatus';
 import {
@@ -105,28 +98,6 @@ const KIND_LABEL: Record<string, string> = {
   many_to_one: '多对一',
   many_to_many: '多对多',
 };
-const KIND_OPTIONS = Object.entries(KIND_LABEL).map(([value, label]) => ({ value, label }));
-
-/** 推测评分：0–100 规则打分（不是概率），只用于分级展示与自动预填判断。 */
-function relationScoreTag(score?: number | null, tier?: string | null) {
-  if (score == null) return <Typography.Text type="secondary">-</Typography.Text>;
-  const meta =
-    tier === 'high'
-      ? { color: 'success', label: '高' }
-      : tier === 'medium'
-        ? { color: 'warning', label: '中' }
-        : { color: 'default', label: '低' };
-  return (
-    <Space size={4}>
-      <Tag color={meta.color} style={{ marginInlineEnd: 0 }}>
-        {score} 分
-      </Tag>
-      <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-        {meta.label}
-      </Typography.Text>
-    </Space>
-  );
-}
 
 /** 后端 relation_stats 的单行结构（接口里是自由字典，这里按实际字段收窄便于展示）。 */
 interface RelationStatRow {
@@ -159,21 +130,17 @@ function groupStatusTag(group: StructuredGroup) {
   );
 }
 
-/** 组内成员文件的解析状态：与结构化列表用同一套词汇，避免三处三种叫法。 */
-function parseStatusTag(status?: string | null, recordCount?: number | null, error?: string) {
-  return (
-    <ProcessingStatusTag
-      status={memberParseStatus(status, recordCount)}
-      detail={structuredParseStatusMeta(status).label}
-      error={error}
-    />
-  );
-}
-
 /** 文件在组里的展示名：角色名优先，其次当前文件名，最后建组时快照。 */
 function fileLabel(file: StructuredGroupFile | undefined, docId?: string): string {
   if (!file || file.doc_id !== docId) return docId ?? '';
   return file.alias || file.current_file_name || file.file_name;
+}
+
+/** 关系配置里的表名：只保留纯表名，去掉文件夹路径与文件后缀（D1_TCM_terminology.csv → D1_TCM_terminology）。 */
+function tableName(file: StructuredGroupFile | undefined, docId?: string): string {
+  const base = fileLabel(file, docId).split(/[\\/]/).pop() ?? '';
+  const dot = base.lastIndexOf('.');
+  return dot > 0 ? base.slice(0, dot) : base;
 }
 
 interface Props {
@@ -181,8 +148,6 @@ interface Props {
   /** 新建文件组时上传文件落在哪个文件夹（与结构化列表当前目录一致）。 */
   folderId?: string | null;
   open: boolean;
-  /** 工具栏「上传关联数据」进入时直接打开上传弹窗。 */
-  autoCreate?: boolean;
   /** 引用来源跳转：打开时直接进入指定文件组详情。 */
   initialGroupId?: string | null;
   onClose: () => void;
@@ -194,7 +159,6 @@ export function StructuredGroupsDrawer({
   kbId,
   folderId,
   open,
-  autoCreate,
   initialGroupId,
   onClose,
   onChanged,
@@ -203,26 +167,39 @@ export function StructuredGroupsDrawer({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
+  /** 手动触发向量化后 10 分钟内持续轮询列表，让进度条从 0% 走到 100%。 */
+  const [vectorPollUntil, setVectorPollUntil] = useState(0);
+  /** 正在派发「停止向量化」的文件组 id（按钮 loading 用）。 */
+  const [stoppingGroupId, setStoppingGroupId] = useState<string | null>(null);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [renameTarget, setRenameTarget] = useState<StructuredGroup | null>(null);
   const [renameValue, setRenameValue] = useState('');
-  const autoCreateHandled = useRef(false);
 
-  const loadGroups = useCallback(async () => {
+  const loadGroups = useCallback(async (silent = false) => {
     if (!kbId) {
       setGroups([]);
       return;
     }
-    setLoading(true);
+    // 轮询刷新用 silent，避免每 4 秒给表格闪一次 loading
+    if (!silent) setLoading(true);
     try {
       setGroups(await fetchStructuredGroups(kbId));
       setError(null);
     } catch (err) {
       setError(describeApiError(err));
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [kbId]);
+
+  // 有文件组正在向量化时轮询列表：进度条要能看到百分比推进
+  useEffect(() => {
+    if (!open || detailId) return;
+    if (!groups.some((g) => g.vector_status === 'indexing') && Date.now() >= vectorPollUntil)
+      return;
+    const t = setInterval(() => void loadGroups(true), 4_000);
+    return () => clearInterval(t);
+  }, [open, detailId, groups, loadGroups, vectorPollUntil]);
 
   useEffect(() => {
     if (!open) {
@@ -230,21 +207,10 @@ export function StructuredGroupsDrawer({
       setGroups([]);
       setError(null);
       setUploadOpen(false);
-      autoCreateHandled.current = false;
       return;
     }
     void loadGroups();
   }, [open, loadGroups]);
-
-  useEffect(() => {
-    if (!autoCreate) {
-      autoCreateHandled.current = false;
-      return;
-    }
-    if (!open || !kbId || autoCreateHandled.current) return;
-    autoCreateHandled.current = true;
-    setUploadOpen(true);
-  }, [open, autoCreate, kbId]);
 
   // 引用来源跳转：带 group_id 打开时直接进入该组详情（只在打开时生效一次）
   const initialGroupHandled = useRef<string | null>(null);
@@ -262,6 +228,37 @@ export function StructuredGroupsDrawer({
       void loadGroups();
     } catch (err) {
       message.error(describeApiError(err));
+    }
+  };
+
+  /** 列表内直接开始向量化（不用进详情）：只写向量，不重新生成关联记录。 */
+  const handleGroupVectorize = async (group: StructuredGroup) => {
+    try {
+      const updated = await revectorizeStructuredGroup(group.id);
+      setVectorPollUntil(Date.now() + 10 * 60_000);
+      message.success(
+        `已开始向量化：${group.name}（${vectorStatusMeta(updated.vector_status).label}）`,
+      );
+      void loadGroups();
+    } catch (err) {
+      message.error(describeApiError(err));
+    }
+  };
+
+  /** 停止向量化：后端在下一批记录之间退出，清理本次部分向量后回到待向量化。 */
+  const handleGroupStop = async (group: StructuredGroup) => {
+    setStoppingGroupId(group.id);
+    try {
+      const updated = await cancelStructuredGroupVectorize(group.id);
+      setVectorPollUntil(Date.now() + 2 * 60_000);
+      message.success(
+        `已请求停止：${group.name}（${vectorStatusMeta(updated.vector_status).label}）`,
+      );
+      void loadGroups(true);
+    } catch (err) {
+      message.error(describeApiError(err));
+    } finally {
+      setStoppingGroupId(null);
     }
   };
 
@@ -312,7 +309,7 @@ export function StructuredGroupsDrawer({
         <Space size={4}>
           <span>{row.relation_count} 条</span>
           {row.unconfirmed_count > 0 && (
-            <Tooltip title="推测出来的关系需要你逐条确认，未确认的不参与生成">
+            <Tooltip title="历史遗留的未确认关系需要你逐条确认，未确认的不参与生成">
               <Tag color="orange">{row.unconfirmed_count} 条待确认</Tag>
             </Tooltip>
           )}
@@ -332,12 +329,26 @@ export function StructuredGroupsDrawer({
       render: (_: string, row) => {
         if (!row.record_count) return '-';
         const meta = vectorStatusMeta(row.vector_status);
+        const percent =
+          row.vector_status === 'completed'
+            ? 100
+            : Math.min(
+                100,
+                Math.round((row.vector_count / Math.max(1, row.record_count)) * 100),
+              );
         return (
-          <Tooltip title={row.vector_error || undefined}>
-            <Tag color={meta.color} style={{ margin: 0 }}>
-              {meta.label}
-              {row.vector_count > 0 ? ` · ${row.vector_count}` : ''}
-            </Tag>
+          <Tooltip
+            title={`${row.vector_error || meta.label}（${row.vector_count} / ${row.record_count} 条）`}
+          >
+            <div style={{ paddingTop: 4 }}>
+              <Tag color={meta.color} style={{ margin: 0 }}>
+                {meta.label}
+                {row.vector_count > 0 ? ` · ${row.vector_count}` : ''}
+              </Tag>
+              {row.vector_status !== 'completed' && (
+                <Progress percent={percent} size="small" style={{ margin: '4px 0 0' }} />
+              )}
+            </div>
           </Tooltip>
         );
       },
@@ -351,6 +362,38 @@ export function StructuredGroupsDrawer({
           <Button size="small" type="link" onClick={() => setDetailId(row.id)}>
             配置
           </Button>
+          {row.status === 'confirmed' && row.record_count > 0 && (
+            <Tooltip
+              title={
+                row.vector_status === 'completed'
+                  ? '按现有关联记录重建向量'
+                  : '为该文件组的每条关联记录写入向量'
+              }
+            >
+              <Button
+                size="small"
+                type="link"
+                disabled={row.vector_status === 'indexing'}
+                onClick={() => void handleGroupVectorize(row)}
+              >
+                {row.vector_status === 'completed' ? '重新向量化' : '开始向量化'}
+              </Button>
+            </Tooltip>
+          )}
+          {row.status === 'confirmed' && row.vector_status === 'indexing' && (
+            <Tooltip title="停止本次向量化（下一批记录之间退出，已写入的部分向量会被清理）">
+              <Button
+                size="small"
+                type="link"
+                danger
+                icon={<StopOutlined />}
+                loading={stoppingGroupId === row.id}
+                onClick={() => void handleGroupStop(row)}
+              >
+                停止
+              </Button>
+            </Tooltip>
+          )}
           <Button
             size="small"
             type="link"
@@ -587,24 +630,21 @@ function GroupUploadModal({
           placeholder="如「学生-课程-选课」「中药饮片-药性-饮片关联」"
         />
         <Space wrap>
-          <Upload
-            multiple
-            accept={GROUP_ACCEPT}
-            fileList={fileList}
-            beforeUpload={() => false}
-            onChange={({ fileList: fl }) => setFileList(fl)}
-          >
-            <Button icon={<PlusOutlined />}>选择文件（可多选）</Button>
-          </Upload>
-          <Upload
-            directory
-            accept={GROUP_ACCEPT}
-            fileList={fileList}
-            beforeUpload={() => false}
-            onChange={({ fileList: fl }) => setFileList(fl)}
-          >
-            <Button icon={<PlusOutlined />}>选择文件夹</Button>
-          </Upload>
+          {[
+            { key: 'files', label: '选择文件（可多选）', extraProps: { multiple: true } },
+            { key: 'folder', label: '选择文件夹', extraProps: { directory: true } },
+          ].map((item) => (
+            <Upload
+              key={item.key}
+              accept={GROUP_ACCEPT}
+              fileList={fileList}
+              beforeUpload={() => false}
+              onChange={({ fileList: fl }) => setFileList(fl)}
+              {...item.extraProps}
+            >
+              <Button icon={<PlusOutlined />}>{item.label}</Button>
+            </Upload>
+          ))}
         </Space>
         <Typography.Text type="secondary">
           已选 {fileList.length} 个文件{fileList.length < 2 ? '（至少 2 个）' : ''}
@@ -629,22 +669,8 @@ function GroupDetailPanel({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [candidates, setCandidates] = useState<StructuredRelation[]>([]);
-  const [adopted, setAdopted] = useState<Record<string, boolean>>({});
-  const [candidateKinds, setCandidateKinds] = useState<Record<string, string>>({});
-  const [manual, setManual] = useState({
-    fromDoc: '',
-    fromField: '',
-    toDoc: '',
-    toField: '',
-    kind: 'many_to_one',
-  });
+  const [relRows, setRelRows] = useState<RelRow[]>([]);
   const [report, setReport] = useState<StructuredGroupValidation | null>(null);
-  const [aliasTarget, setAliasTarget] = useState<StructuredGroupFile | null>(null);
-  const [aliasValue, setAliasValue] = useState('');
-  const [addFilesOpen, setAddFilesOpen] = useState(false);
-  const [addFilesOptions, setAddFilesOptions] = useState<DocumentItem[]>([]);
-  const [addFilesSelected, setAddFilesSelected] = useState<string[]>([]);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [anchorDocId, setAnchorDocId] = useState<string | undefined>(undefined);
   /** needForce = 需要勾选知情；force = 用户已勾选。二者分开，避免替用户默认勾选。 */
@@ -669,14 +695,12 @@ function GroupDetailPanel({
   }, [groupId]);
 
   useEffect(() => {
-    setCandidates([]);
-    setAdopted({});
     setReport(null);
     void loadDetail();
   }, [groupId, loadDetail]);
 
   /**
-   * 处理概览（第五阶段）：文件组「上传 → 字段识别 → 关系推测 → 用户确认 → 校验 → 生成 → 完成」
+   * 处理概览（第五阶段）：文件组「上传 → 字段识别 → 配置关联字段 → 用户确认 → 校验 → 生成 → 完成」
    * 的阶段、卡点与下一步全部由后端从库字段派生，前端不自行估算进度。
    * 组内还有文件在解析时后端给出「处理中」，本面板随之轮询；其余状态由用户操作驱动。
    */
@@ -700,6 +724,11 @@ function GroupDetailPanel({
   }, [detail]);
 
   const files = useMemo(() => detail?.files ?? [], [detail]);
+
+  // detail 是关系配置的唯一回执：每次重读后按「已保存的关系 + 主键配置」重建编辑行
+  useEffect(() => {
+    setRelRows(buildRelRows(files, detail?.relations ?? []));
+  }, [detail, files]);
 
   // 概览已确认没有文件在解析，但文件表仍是解析前的旧快照（“处理中”、记录数/字段数为 0）：
   // 补读一次详情即可拿到真实解析结果。这里只读状态，不重新解析、不重复派发任务。
@@ -729,165 +758,78 @@ function GroupDetailPanel({
     (docId?: string) => fileLabel(docId ? fileById.get(docId) : undefined, docId),
     [fileById],
   );
-  const relationExists = useCallback(
-    (id: string) => Boolean(detail?.relations.some((rel) => rel.id === id)),
-    [detail],
-  );
+  const patchRelRow = (key: string, patch: Partial<RelRow>) =>
+    setRelRows((rows) => rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
 
-  const afterRelationsChanged = async () => {
-    await loadDetail();
-    setCandidates([]);
-    setAdopted({});
+  /** 同一表再添加一条外键行（复合主键表典型场景：多个字段分别指向多张维表）。 */
+  const addFkRow = (row: RelRow) => {
+    setRelRows((rows) => {
+      const idx = rows.findIndex((r) => r.key === row.key);
+      const next = [...rows];
+      next.splice(idx + 1, 0, {
+        key: nextRelRowKey(),
+        docId: row.docId,
+        pk: row.pk,
+        pkType: row.pkType,
+        hasFk: true,
+        fkDocId: row.docId,
+      });
+      return next;
+    });
   };
 
-  const runSuggest = async () => {
-    setBusy('suggest');
-    try {
-      const list = await suggestStructuredRelations(groupId);
-      setCandidates(list);
-      setAdopted({});
-      setCandidateKinds(
-        Object.fromEntries(list.map((r) => [r.id, String(r.kind ?? 'one_to_many')])),
-      );
-      // 高置信度结果已由后端预填为「未确认」关系，重读详情把它们显示出来
-      await loadDetail();
-      if (!list.length) {
-        message.info('没有找到值能对上的候选关系，可以直接在下方手动选择文件和字段。');
+  const dropRelRow = (row: RelRow) =>
+    setRelRows((rows) => rows.filter((r) => r.key !== row.key));
+
+  /**
+   * 整表校验后一次性保存：有外键的行 → 一条 manual 关系（from=外键字段所在表，to=引用表）。
+   * 主键配置没有独立的后端字段，随关系 reason 的 JSON 一起保存以便回读；
+   * 无外键的行不产生关系（其主键配置不落库）。
+   */
+  const saveRelRows = async () => {
+    for (const row of relRows) {
+      const name = label(row.docId);
+      if (!row.pk.length) {
+        message.warning(`请为「${name}」选择主键字段`);
         return;
       }
-      const high = list.filter((r) => r.tier === 'high').length;
-      const medium = list.filter((r) => r.tier === 'medium').length;
-      const low = list.length - high - medium;
-      const prefilled = list.filter((r) => r.prefilled).length;
-      message.success(
-        `推测出 ${list.length} 条候选（高 ${high} / 中 ${medium} / 低 ${low}）` +
-          (prefilled ? `，已自动预填 ${prefilled} 条高置信度关系（未确认，请逐条确认）` : ''),
-      );
-    } catch (err) {
-      message.error(describeApiError(err));
-    } finally {
-      setBusy(null);
+      if (row.pkType === 'composite' && row.pk.length < 2) {
+        message.warning(`「${name}」是复合主键，请至少选择 2 个字段`);
+        return;
+      }
+      if (row.hasFk) {
+        if (!row.fkField || !row.fkDocId || !row.refField || !row.refDocId) {
+          message.warning(
+            `「${name}」声明了有外键，请补全外键字段、外键字段所在表、引用字段、引用表`,
+          );
+          return;
+        }
+        if (row.fkDocId === row.refDocId) {
+          message.warning(`「${name}」的外键字段所在表与引用表不能是同一个表`);
+          return;
+        }
+      }
     }
-  };
-
-  const adoptCandidates = async () => {
-    const chosen = candidates.filter((c) => adopted[c.id]);
-    if (!chosen.length) {
-      message.warning('请勾选确实成立的关系后再保存；仅字段名相似不构成关联依据。');
-      return;
-    }
-    setBusy('adopt');
-    try {
-      const payload = [
-        ...(detail?.relations ?? []).map(toRelationPayload),
-        ...chosen.map((c) => ({
-          from_doc_id: c.from_doc_id,
-          from_field: c.from_field,
-          to_doc_id: c.to_doc_id,
-          to_field: c.to_field,
-          kind: candidateKinds[c.id] ?? String(c.kind ?? 'one_to_many'),
-          confirmed: true,
-          origin: 'suggested',
-          confidence: c.confidence ?? null,
-          score: c.score ?? null,
-          tier: c.tier ?? null,
-          coverage: c.coverage ?? undefined,
-          row_coverage: c.row_coverage ?? undefined,
-          evidence: c.evidence ?? undefined,
-          reason: c.reason ?? '推测结果，经用户勾选确认',
-        })),
-      ];
-      await saveStructuredRelations(groupId, payload);
-      message.success(`已保存 ${chosen.length} 条你确认的关系，请重新校验`);
-      await afterRelationsChanged();
-    } catch (err) {
-      message.error(describeApiError(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const addManualRelation = async () => {
-    if (!manual.fromDoc || !manual.toDoc || !manual.fromField || !manual.toField) {
-      message.warning('请选择两侧的文件与关联字段');
-      return;
-    }
-    if (manual.fromDoc === manual.toDoc) {
-      message.warning('关联关系必须连接两个不同文件');
-      return;
-    }
-    setBusy('manual');
+    setBusy('saveRelations');
     try {
       await saveStructuredRelations(groupId, [
-        ...(detail?.relations ?? []).map(toRelationPayload),
-        {
-          from_doc_id: manual.fromDoc,
-          from_field: manual.fromField,
-          to_doc_id: manual.toDoc,
-          to_field: manual.toField,
-          kind: manual.kind,
+        ...relRows.filter((r) => r.hasFk).map((r) => ({
+          from_doc_id: r.fkDocId!,
+          from_field: r.fkField!,
+          to_doc_id: r.refDocId!,
+          to_field: r.refField!,
+          kind: 'many_to_one',
           confirmed: true,
           origin: 'manual',
           confidence: null,
-          reason: '用户手动配置',
-        },
+          reason: JSON.stringify({ pkcfg: true, pk: r.pk, pkType: r.pkType }),
+        })),
       ]);
-      message.success('已添加关系，请重新校验');
-      await afterRelationsChanged();
-    } catch (err) {
-      message.error(describeApiError(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const dropRelation = async (rel: StructuredRelation) => {
-    setBusy(`drop-${rel.id}`);
-    try {
-      await saveStructuredRelations(
-        groupId,
-        (detail?.relations ?? []).filter((r) => r.id !== rel.id).map(toRelationPayload),
-      );
-      message.success('已删除该关系');
-      await afterRelationsChanged();
-    } catch (err) {
-      message.error(describeApiError(err));
-      // 后端可能已经提交但响应失败（或关系已被其他操作删除）：重读详情，
-      // 避免继续用旧关系 ID 操作。
-      await loadDetail();
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const updateRelationKind = async (rel: StructuredRelation, kind: string) => {
-    if (kind === rel.kind) return;
-    setBusy(`kind-${rel.id}`);
-    try {
-      await saveStructuredRelations(
-        groupId,
-        (detail?.relations ?? []).map((item) =>
-          item.id === rel.id
-            ? { ...toRelationPayload(item), kind }
-            : toRelationPayload(item),
-        ),
-      );
-      message.success('已更新关联类型，请重新校验');
+      message.success('关系配置已保存，请重新校验');
       await loadDetail();
     } catch (err) {
       message.error(describeApiError(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const toggleConfirm = async (rel: StructuredRelation, confirmed: boolean) => {
-    setBusy(`confirm-${rel.id}`);
-    try {
-      await setStructuredRelationConfirmation(groupId, rel.id, confirmed);
-      await loadDetail();
-    } catch (err) {
-      message.error(describeApiError(err));
+      // 后端可能已经提交但响应失败：重读详情，避免继续用旧关系状态操作
       await loadDetail();
     } finally {
       setBusy(null);
@@ -958,69 +900,6 @@ function GroupDetailPanel({
     }
   };
 
-  const submitAlias = async () => {
-    if (!aliasTarget) return;
-    setBusy('alias');
-    try {
-      await setStructuredGroupFileAlias(groupId, aliasTarget.doc_id, aliasValue.trim());
-      message.success('角色名已更新');
-      setAliasTarget(null);
-      await loadDetail();
-    } catch (err) {
-      message.error(describeApiError(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const removeFile = async (file: StructuredGroupFile) => {
-    setBusy(`remove-${file.doc_id}`);
-    try {
-      await removeStructuredGroupFile(groupId, file.doc_id);
-      message.success(`「${fileLabel(file, file.doc_id)}」已移出文件组，引用它的关系已一并清理`);
-      await loadDetail();
-    } catch (err) {
-      message.error(describeApiError(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const openAddFiles = async () => {
-    setAddFilesSelected([]);
-    setAddFilesOpen(true);
-    try {
-      const page = await fetchDocumentsPage({
-        kbId: detail?.group.kb_id ?? undefined,
-        space: 'structured',
-        limit: 500,
-      });
-      const inGroup = new Set(files.map((f) => f.doc_id));
-      setAddFilesOptions(page.items.filter((d) => !inGroup.has(d.id)));
-    } catch (err) {
-      message.error(describeApiError(err));
-      setAddFilesOptions([]);
-    }
-  };
-
-  const submitAddFiles = async () => {
-    if (!addFilesSelected.length) {
-      message.warning('请选择要补充进来的结构化文件');
-      return;
-    }
-    setBusy('addFiles');
-    try {
-      await addStructuredGroupFiles(groupId, addFilesSelected);
-      message.success('已补充文件，关系配置需要重新校验');
-      setAddFilesOpen(false);
-      await loadDetail();
-    } catch (err) {
-      message.error(describeApiError(err));
-    } finally {
-      setBusy(null);
-    }
-  };
-
   if (loading && !detail) {
     return (
       <div style={{ textAlign: 'center', padding: 48 }}>
@@ -1044,254 +923,193 @@ function GroupDetailPanel({
   const removedFiles = files.filter((f) => f.removed);
   const usableFiles = files.filter((f) => !f.removed);
 
-  const fileColumns: ColumnsType<StructuredGroupFile> = [
-    {
-      title: '角色名',
-      dataIndex: 'alias',
-      width: 150,
-      render: (alias: string, row) => (
-        <Space size={4}>
-          <span>{alias || '-'}</span>
-          <Button
-            size="small"
-            type="link"
-            onClick={() => {
-              setAliasTarget(row);
-              setAliasValue(row.alias);
-            }}
-          >
-            编辑
-          </Button>
-        </Space>
-      ),
-    },
-    {
-      title: '文件',
-      key: 'file',
-      render: (_, row) => (
-        <Space direction="vertical" size={0}>
-          <Typography.Text>{row.current_file_name || row.file_name}</Typography.Text>
-          {row.file_name !== row.current_file_name && (
-            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-              建组时：{row.file_name}
-            </Typography.Text>
-          )}
-          {row.removed && <Tag color="error">文件已删除/在回收站</Tag>}
-        </Space>
-      ),
-    },
-    {
-      title: '格式',
-      dataIndex: 'detected_format',
-      width: 90,
-      render: (f: string) => (f ? f.toUpperCase() : '-'),
-    },
-    {
-      title: '解析状态',
-      dataIndex: 'parse_status',
-      width: 130,
-      render: (s: string, row) => parseStatusTag(s, row.record_count, row.error_message),
-    },
-    { title: '记录数', dataIndex: 'record_count', width: 90 },
-    {
-      title: '异常',
-      dataIndex: 'anomaly_count',
-      width: 80,
-      render: (n: number) => (n > 0 ? <Tag color="orange">{n}</Tag> : '0'),
-    },
-    {
-      title: '字段数',
-      key: 'fields',
-      width: 80,
-      render: (_, row) => row.fields.length,
-    },
-    {
-      title: '主键候选（仍需确认）',
-      key: 'keys',
-      width: 230,
-      render: (_, row) =>
-        row.key_candidates.length ? (
-          <Space size={4} wrap>
-            {row.key_candidates.slice(0, 4).map((c) => (
-              <Tooltip key={c.field} title={c.reason}>
-                <Tag color={c.unique ? 'green' : 'default'}>
-                  {c.field}
-                  {c.unique ? ' · 唯一' : ''}
-                </Tag>
-              </Tooltip>
-            ))}
-          </Space>
-        ) : (
-          <Typography.Text type="secondary">-</Typography.Text>
-        ),
-    },
-    {
-      title: '操作',
-      key: 'actions',
-      width: 90,
-      render: (_, row) => (
-        <Popconfirm
-          title="从文件组移出该文件？"
-          description="不删除原始文件；引用它的关联关系会一并清理，避免留下无效关系。"
-          okText="移出"
-          onConfirm={() => void removeFile(row)}
-        >
-          <Button size="small" type="link" danger icon={<DeleteOutlined />} />
-        </Popconfirm>
-      ),
-    },
-  ];
+  /** 某行的字段下拉选项（主键/外键字段/引用字段都从这里取）。 */
+  const fieldOptions = (docId?: string) =>
+    (docId ? fileById.get(docId)?.fields ?? [] : []).map((f) => ({ value: f, label: f }));
+  const tableOptions = usableFiles.map((f) => ({
+    value: f.doc_id,
+    label: tableName(f, f.doc_id),
+  }));
+  const NO_FK_CELL = <Typography.Text type="secondary">-</Typography.Text>;
 
-  const relationColumns: ColumnsType<StructuredRelation> = [
+  const relConfigColumns: ColumnsType<RelRow> = [
     {
-      title: '关联关系',
-      key: 'rel',
+      title: '表名',
+      key: 'doc',
+      width: 180,
       render: (_, row) => (
-        <Typography.Text>
-          {label(row.from_doc_id)}.<b>{row.from_field}</b> → {label(row.to_doc_id)}.
-          <b>{row.to_field}</b>
-        </Typography.Text>
+        <Typography.Text>{tableName(fileById.get(row.docId), row.docId)}</Typography.Text>
       ),
+      onCell: (row) => {
+        // 同一表的多条外键共用一个表名单元格：首行纵向合并展开，其余行隐藏，名称居中
+        const sameTable = relRows.filter((r) => r.docId === row.docId);
+        return {
+          rowSpan: sameTable[0]?.key === row.key ? sameTable.length : 0,
+          style: { textAlign: 'center', verticalAlign: 'middle' },
+        };
+      },
     },
     {
-      title: '关联类型',
-      dataIndex: 'kind',
-      width: 130,
-      render: (kind: string, row) => (
+      title: '主键',
+      key: 'pk',
+      width: 230,
+      render: (_, row) => (
         <Select
           size="small"
-          style={{ width: 110 }}
-          value={kind}
-          options={KIND_OPTIONS}
-          disabled={busy === `kind-${row.id}`}
-          onChange={(v) => void updateRelationKind(row, v)}
+          showSearch
+          optionFilterProp="label"
+          style={{ width: 210 }}
+          mode={row.pkType === 'composite' ? 'multiple' : undefined}
+          placeholder={row.pkType === 'composite' ? '选择 2 个及以上字段' : '选择主键字段'}
+          value={row.pkType === 'composite' ? row.pk : row.pk[0]}
+          options={fieldOptions(row.docId)}
+          onChange={(v: string | string[]) =>
+            patchRelRow(row.key, { pk: Array.isArray(v) ? v : v ? [v] : [] })
+          }
         />
       ),
     },
     {
-      title: '来源',
-      dataIndex: 'origin',
-      width: 130,
-      render: (origin: string, row) => (
-        <Tooltip title={row.reason || undefined}>
-          <Tag color={origin === 'suggested' ? (row.confirmed ? 'blue' : 'gold') : 'purple'}>
-            {origin === 'suggested'
-              ? row.confirmed
-                ? '系统推测'
-                : '系统预填·待确认'
-              : '用户配置'}
-          </Tag>
-        </Tooltip>
+      title: '主键类型',
+      key: 'pkType',
+      width: 120,
+      render: (_, row) => (
+        <Select
+          size="small"
+          style={{ width: 110 }}
+          value={row.pkType}
+          options={[
+            { value: 'single', label: '单字段主键' },
+            { value: 'composite', label: '复合主键' },
+          ]}
+          onChange={(v: RelRow['pkType']) =>
+            // 切回单字段时只保留第一个字段，避免残留多选值
+            patchRelRow(row.key, { pkType: v, pk: v === 'single' ? row.pk.slice(0, 1) : row.pk })
+          }
+        />
       ),
     },
     {
-      title: '评分',
-      key: 'score',
-      width: 150,
+      title: '有无外键',
+      key: 'hasFk',
+      width: 100,
       render: (_, row) => (
-        <Tooltip title={(row.evidence ?? []).join('；') || row.reason || undefined}>
-          <span>
-            {relationScoreTag(row.score, row.tier)}
-            {row.coverage != null && (
-              <Typography.Text type="secondary" style={{ fontSize: 12, marginInlineStart: 6 }}>
-                覆盖 {Math.round(row.coverage * 100)}%
-              </Typography.Text>
-            )}
-          </span>
-        </Tooltip>
+        <Select
+          size="small"
+          style={{ width: 80 }}
+          value={row.hasFk ? 'yes' : 'no'}
+          options={[
+            { value: 'yes', label: '有' },
+            { value: 'no', label: '无' },
+          ]}
+          onChange={(v) =>
+            patchRelRow(
+              row.key,
+              v === 'yes'
+                ? { hasFk: true, fkDocId: row.docId }
+                : // 无外键 → 后四列不允许填写，直接清空
+                  { hasFk: false, fkField: undefined, fkDocId: undefined, refField: undefined, refDocId: undefined },
+            )
+          }
+        />
       ),
     },
     {
-      title: '确认',
-      key: 'confirmed',
-      width: 110,
-      render: (_, row) => (
-        <Checkbox
-          checked={row.confirmed}
-          disabled={busy === `confirm-${row.id}`}
-          onChange={(e) => void toggleConfirm(row, e.target.checked)}
-        >
-          {row.confirmed ? '已确认' : '未确认'}
-        </Checkbox>
-      ),
+      title: '外键字段',
+      key: 'fkField',
+      width: 180,
+      render: (_, row) =>
+        !row.hasFk ? NO_FK_CELL : (
+          <Select
+            size="small"
+            showSearch
+            optionFilterProp="label"
+            style={{ width: 160 }}
+            placeholder="选择外键字段"
+            value={row.fkField}
+            options={fieldOptions(row.fkDocId ?? row.docId)}
+            onChange={(v) => patchRelRow(row.key, { fkField: v })}
+          />
+        ),
+    },
+    {
+      title: '外键字段所在表',
+      key: 'fkDoc',
+      width: 180,
+      render: (_, row) =>
+        !row.hasFk ? NO_FK_CELL : (
+          <Select
+            size="small"
+            style={{ width: 160 }}
+            value={row.fkDocId ?? row.docId}
+            options={tableOptions}
+            onChange={(v) =>
+              // 换表后原字段未必存在，清空外键字段让用户重选
+              patchRelRow(row.key, { fkDocId: v, fkField: undefined })
+            }
+          />
+        ),
+    },
+    {
+      title: '引用字段',
+      key: 'refField',
+      width: 180,
+      render: (_, row) =>
+        !row.hasFk ? NO_FK_CELL : (
+          <Select
+            size="small"
+            showSearch
+            optionFilterProp="label"
+            style={{ width: 160 }}
+            placeholder="选择引用字段"
+            value={row.refField}
+            options={fieldOptions(row.refDocId)}
+            onChange={(v) => patchRelRow(row.key, { refField: v })}
+          />
+        ),
+    },
+    {
+      title: '引用表',
+      key: 'refDoc',
+      width: 180,
+      render: (_, row) =>
+        !row.hasFk ? NO_FK_CELL : (
+          <Select
+            size="small"
+            showSearch
+            optionFilterProp="label"
+            style={{ width: 160 }}
+            placeholder="选择引用表"
+            value={row.refDocId}
+            options={tableOptions}
+            onChange={(v) =>
+              // 换引用表后原引用字段未必存在，清空让用户重选
+              patchRelRow(row.key, { refDocId: v, refField: undefined })
+            }
+          />
+        ),
     },
     {
       title: '操作',
       key: 'ops',
-      width: 80,
+      width: 140,
+      fixed: 'right',
       render: (_, row) => (
-        <Button
-          size="small"
-          type="link"
-          danger
-          loading={busy === `drop-${row.id}`}
-          onClick={() => void dropRelation(row)}
-        >
-          删除
-        </Button>
+        <Space size={0}>
+          <Button size="small" type="link" onClick={() => addFkRow(row)}>
+            添加外键
+          </Button>
+          <Button
+            size="small"
+            type="link"
+            danger
+            disabled={relRows.filter((r) => r.docId === row.docId).length <= 1}
+            onClick={() => dropRelRow(row)}
+          >
+            删除
+          </Button>
+        </Space>
       ),
-    },
-  ];
-
-  const candidateColumns: ColumnsType<StructuredRelation> = [
-    {
-      title: '候选关系',
-      key: 'rel',
-      render: (_, row) => (
-        <Typography.Text>
-          {label(row.from_doc_id)}.<b>{row.from_field}</b> → {label(row.to_doc_id)}.
-          <b>{row.to_field}</b>
-        </Typography.Text>
-      ),
-    },
-    {
-      title: '推测类型',
-      key: 'kind',
-      width: 130,
-      render: (_, row) => (
-        <Select
-          size="small"
-          style={{ width: 110 }}
-          value={candidateKinds[row.id] ?? String(row.kind)}
-          options={KIND_OPTIONS}
-          disabled={row.prefilled || relationExists(row.id)}
-          onChange={(v) => setCandidateKinds((prev) => ({ ...prev, [row.id]: v }))}
-        />
-      ),
-    },
-    {
-      title: '评分',
-      key: 'score',
-      width: 110,
-      render: (_, row) => (
-        <Tooltip title={(row.warnings ?? []).join('；') || undefined}>
-          {relationScoreTag(row.score, row.tier)}
-        </Tooltip>
-      ),
-    },
-    {
-      title: '依据',
-      dataIndex: 'reason',
-      render: (reason: string | undefined, row) => (
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          {(row.evidence?.length ? row.evidence.join('；') : reason) || '-'}
-          {row.warnings?.length ? `（${row.warnings.join('；')}）` : ''}
-        </Typography.Text>
-      ),
-    },
-    {
-      title: '采纳',
-      key: 'adopt',
-      width: 90,
-      render: (_, row) =>
-        row.prefilled || relationExists(row.id) ? (
-          <Tag color="gold">已预填</Tag>
-        ) : (
-          <Checkbox
-            checked={Boolean(adopted[row.id])}
-            onChange={(e) => setAdopted((prev) => ({ ...prev, [row.id]: e.target.checked }))}
-          />
-        ),
     },
   ];
 
@@ -1395,7 +1213,7 @@ function GroupDetailPanel({
             <>
               缺失文件：{removedFiles.map((f) => fileLabel(f, f.doc_id)).join('、')}。
               {usableFiles.length < 2
-                ? '请到文档回收站恢复文件，或通过「补充文件」加入其他结构化文件；恢复后点击「刷新结构」并重新校验。'
+                ? '请到文档回收站恢复文件；恢复后点击「刷新结构」并重新校验。'
                 : '恢复文件或调整关系后，请点击「刷新结构」并重新校验；校验通过前不能确认生成。'}
             </>
           }
@@ -1408,47 +1226,33 @@ function GroupDetailPanel({
         error={processing.error}
         title="处理概览（文件组）"
         extra={
-          processing.view?.next_action === 'suggest' ? (
-            <Space>
-              <Button
-                size="small"
-                type="primary"
-                icon={<ThunderboltOutlined />}
-                loading={busy === 'suggest'}
-                disabled={files.length < 2}
-                onClick={() => void runSuggest()}
-              >
-                推测跨文件关系
-              </Button>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                不会自动运行；结果为空时仍可在「关系配置」手动选择字段
-              </Typography.Text>
-            </Space>
+          processing.view?.next_action === 'manual_relations' ? (
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              请在「关系配置」中手动选择两侧文件和关联字段
+            </Typography.Text>
           ) : null
         }
       />
 
       <Tabs
-        defaultActiveKey="files"
+        defaultActiveKey="relations"
         items={[
           {
-            key: 'files',
-            label: '文件与结构',
+            key: 'relations',
+            label: '关系配置',
             children: (
               <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                <Space wrap>
-                  <Button icon={<PlusOutlined />} onClick={() => void openAddFiles()}>
-                    补充文件
-                  </Button>
-                  <Button icon={<ReloadOutlined />} onClick={() => void loadDetail()}>
-                    刷新结构
-                  </Button>
-                </Space>
+                <Alert
+                  type="info"
+                  showIcon
+                  message="按表配置主键与外键关系"
+                  description="每个表默认一行；一个表有多个外键时，点该行「添加外键」再配置一条。有无外键 = 有 时必须补全后面的外键字段、外键字段所在表、引用字段、引用表；= 无 时这四列不需要填。保存后请重新校验，至少 1 条外键关系才能生成关联记录。"
+                />
                 {pendingParse.length > 0 && (
                   <Alert
-                    type="info"
+                    type="warning"
                     showIcon
-                    message="以下文件还没有解析结果，推测关系前需要全部解析成功"
+                    message="以下文件还没有解析结果，字段列表为空，需全部解析成功后再配置"
                     description={pendingParse
                       .map(
                         (f) =>
@@ -1457,143 +1261,30 @@ function GroupDetailPanel({
                       .join('、')}
                   />
                 )}
-                <Table
-                  rowKey="doc_id"
-                  size="small"
-                  columns={fileColumns}
-                  dataSource={files}
-                  pagination={false}
-                  expandable={{
-                    expandedRowRender: (row) => (
-                      <Table
-                        rowKey={(f) => `${f.sheet ?? ''}::${f.name}`}
-                        size="small"
-                        pagination={false}
-                        dataSource={row.field_specs}
-                        columns={fieldSpecColumns}
-                      />
-                    ),
-                  }}
-                />
-                <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  字段类型与主键候选是系统按数据推断的结果，仅用于帮你定位关系，
-                  不构成已确认的关联；原始数据不会被本功能修改。
-                </Typography.Text>
-              </Space>
-            ),
-          },
-          {
-            key: 'relations',
-            label: `关系配置${group.unconfirmed_count ? `（${group.unconfirmed_count} 待确认）` : ''}`,
-            children: (
-              <Space direction="vertical" size={12} style={{ width: '100%' }}>
                 <Space wrap>
-                  <Button
-                    icon={<ThunderboltOutlined />}
-                    loading={busy === 'suggest'}
-                    disabled={files.length < 2}
-                    onClick={() => void runSuggest()}
-                  >
-                    推测跨文件关系
-                  </Button>
                   <Button
                     type="primary"
-                    disabled={!candidates.some((c) => adopted[c.id])}
-                    loading={busy === 'adopt'}
-                    onClick={() => void adoptCandidates()}
+                    icon={<SaveOutlined />}
+                    loading={busy === 'saveRelations'}
+                    onClick={() => void saveRelRows()}
                   >
-                    保存勾选的关系（{candidates.filter((c) => adopted[c.id]).length}）
+                    保存关系配置
+                  </Button>
+                  <Button icon={<ReloadOutlined />} onClick={() => void loadDetail()}>
+                    刷新结构
                   </Button>
                 </Space>
-
-                {candidates.length > 0 && (
-                  <>
-                    <Alert
-                      type="info"
-                      showIcon
-                      message="评分 ≥90 自动预填，仍需逐条确认"
-                      description="评分是「值匹配 + 字段名 + 类型 + 唯一性」的 0–100 规则打分，不是概率。≥90 会自动预填到下方关系表（未确认）；70–89 请自行勾选采纳；<70 仅供参考。仅字段名相似不代表真的有关联，未确认的关系不参与生成。"
-                    />
-                    <Table
-                      rowKey="id"
-                      size="small"
-                      columns={candidateColumns}
-                      dataSource={candidates}
-                      pagination={false}
-                    />
-                  </>
-                )}
-
                 <Table
-                  rowKey="id"
+                  rowKey="key"
                   size="small"
-                  columns={relationColumns}
-                  dataSource={detail.relations}
+                  columns={relConfigColumns}
+                  dataSource={relRows}
                   pagination={false}
-                  locale={{ emptyText: <Empty description="还没有关联关系" /> }}
+                  scroll={{ x: 1350 }}
                 />
-
-                <Typography.Text strong>手动配置一条关系（字段不确定时自己选）</Typography.Text>
-                <Space wrap>
-                  <Select
-                    style={{ width: 180 }}
-                    placeholder="起点文件（外键/「多」侧）"
-                    value={manual.fromDoc || undefined}
-                    options={files.map((f) => ({ value: f.doc_id, label: fileLabel(f, f.doc_id) }))}
-                    onChange={(v) =>
-                      setManual((m) => ({ ...m, fromDoc: v, fromField: '', toDoc: m.toDoc === v ? '' : m.toDoc }))
-                    }
-                  />
-                  <Select
-                    style={{ width: 160 }}
-                    placeholder="关联字段"
-                    showSearch
-                    value={manual.fromField || undefined}
-                    options={(fileById.get(manual.fromDoc)?.fields ?? []).map((f) => ({
-                      value: f,
-                      label: f,
-                    }))}
-                    onChange={(v) => setManual((m) => ({ ...m, fromField: v }))}
-                  />
-                  <Typography.Text type="secondary">→</Typography.Text>
-                  <Select
-                    style={{ width: 180 }}
-                    placeholder="目标文件（主键/「一」侧）"
-                    value={manual.toDoc || undefined}
-                    options={files.map((f) => ({ value: f.doc_id, label: fileLabel(f, f.doc_id) }))}
-                    onChange={(v) =>
-                      setManual((m) => ({ ...m, toDoc: v, toField: '', fromDoc: m.fromDoc === v ? '' : m.fromDoc }))
-                    }
-                  />
-                  <Select
-                    style={{ width: 160 }}
-                    placeholder="关联字段"
-                    showSearch
-                    value={manual.toField || undefined}
-                    options={(fileById.get(manual.toDoc)?.fields ?? []).map((f) => ({
-                      value: f,
-                      label: f,
-                    }))}
-                    onChange={(v) => setManual((m) => ({ ...m, toField: v }))}
-                  />
-                  <Select
-                    style={{ width: 110 }}
-                    value={manual.kind}
-                    options={KIND_OPTIONS}
-                    onChange={(v) => setManual((m) => ({ ...m, kind: v }))}
-                  />
-                  <Button
-                    icon={<PlusOutlined />}
-                    loading={busy === 'manual'}
-                    onClick={() => void addManualRelation()}
-                  >
-                    添加关系
-                  </Button>
-                </Space>
                 <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                  起点 = 外键所在的「多」侧文件，目标 = 主键所在的「一」侧文件：用起点的字段值去
-                  目标文件里查找对应记录（典型如选课表 → 学生表）。方向反了就交换两侧。
-                  任何配置改动都会作废校验报告，需要重新校验并确认。
+                  外键关系方向：外键字段（所在表）→ 引用字段（引用表），即用外键字段的值去引用表里查主键记录。
+                  任何配置改动都会作废校验报告，保存后需要重新校验并确认。
                 </Typography.Text>
               </Space>
             ),
@@ -1726,103 +1417,86 @@ function GroupDetailPanel({
           {confirmError && <Alert type="error" showIcon message={confirmError} />}
         </Space>
       </Modal>
-
-      <Modal
-        title="文件角色名"
-        open={aliasTarget !== null}
-        onCancel={() => setAliasTarget(null)}
-        onOk={() => void submitAlias()}
-        okButtonProps={{ loading: busy === 'alias' }}
-        okText="保存"
-      >
-        <Input
-          value={aliasValue}
-          maxLength={40}
-          placeholder="如「学生表」「选课表」「药性属性表」"
-          onChange={(e) => setAliasValue(e.target.value)}
-        />
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          只影响关联知识文本的可读性与来源标注，不改文件名。
-        </Typography.Text>
-      </Modal>
-
-      <Modal
-        title="补充文件到该组"
-        open={addFilesOpen}
-        onCancel={() => setAddFilesOpen(false)}
-        onOk={() => void submitAddFiles()}
-        okButtonProps={{ loading: busy === 'addFiles' }}
-        okText="添加"
-        width={640}
-      >
-        <Select
-          mode="multiple"
-          style={{ width: '100%' }}
-          placeholder="选择本知识库结构化数据空间里的文件"
-          showSearch
-          optionFilterProp="label"
-          value={addFilesSelected}
-          options={addFilesOptions.map((d) => ({
-            value: d.id,
-            label: `${d.file_name}（${(d.structured_status ?? '-') + ' / ' + d.file_type}）`,
-          }))}
-          onChange={(v) => setAddFilesSelected(v)}
-        />
-        <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-          组构成变化后原有校验立即作废，需要重新校验并确认。
-        </Typography.Text>
-      </Modal>
     </Space>
   );
 }
 
-const fieldSpecColumns: ColumnsType<StructuredField> = [
-  {
-    title: '字段',
-    dataIndex: 'name',
-    width: 180,
-    render: (name: string) => <span style={{ fontWeight: 500 }}>{name}</span>,
-  },
-  {
-    title: '推断类型',
-    dataIndex: 'type',
-    width: 100,
-    render: (type: string) => <Tag>{fieldTypeLabel(type)}</Tag>,
-  },
-  { title: '出现次数', dataIndex: 'count', width: 90 },
-  {
-    title: '空值数',
-    dataIndex: 'null_count',
-    width: 80,
-    render: (n: number) => (n > 0 ? <Tag color="orange">{n}</Tag> : '0'),
-  },
-  {
-    title: '工作表',
-    dataIndex: 'sheet',
-    width: 110,
-    render: (sheet?: string | null) => sheet || '-',
-  },
-  { title: '说明', dataIndex: 'note', render: (note?: string | null) => note || '-' },
-];
+// ─────────────────────────── 关系配置表（文件组详情「关系配置」页签） ──────────
 
-/** 去掉 id 后才能进入 PUT /relations（后端按字段重新编号），评分/依据随关系保留。 */
-function toRelationPayload(rel: StructuredRelation) {
-  return {
-    from_doc_id: rel.from_doc_id,
-    from_field: rel.from_field,
-    to_doc_id: rel.to_doc_id,
-    to_field: rel.to_field,
-    kind: rel.kind,
-    confirmed: rel.confirmed,
-    origin: rel.origin,
-    confidence: rel.confidence ?? null,
-    score: rel.score ?? null,
-    tier: rel.tier ?? null,
-    coverage: rel.coverage ?? undefined,
-    row_coverage: rel.row_coverage ?? undefined,
-    evidence: rel.evidence ?? undefined,
-    reason: rel.reason ?? '',
-  };
+/**
+ * 关系配置行：一个表（文件）至少一行；某表有多个外键时多行（每行配一条外键）。
+ * 有外键的行保存为一条 manual 关系（from=外键字段所在表，to=引用表）。
+ */
+interface RelRow {
+  key: string;
+  /** 表名（组内文件 doc_id） */
+  docId: string;
+  /** 主键字段；单字段主键 1 个，复合主键 ≥2 个 */
+  pk: string[];
+  pkType: 'single' | 'composite';
+  hasFk: boolean;
+  fkField?: string;
+  fkDocId?: string;
+  refField?: string;
+  refDocId?: string;
+}
+
+let relRowSeq = 0;
+const nextRelRowKey = () => `rel-row-${++relRowSeq}`;
+
+/** 主键配置没有独立的后端字段：随关系保存在 reason 的 JSON 里（pkcfg 标记），回读时还原。 */
+function parsePkCfg(reason?: string): { pk: string[]; pkType: RelRow['pkType'] } | null {
+  if (!reason) return null;
+  try {
+    const obj = JSON.parse(reason);
+    if (obj && obj.pkcfg === true && Array.isArray(obj.pk)) {
+      return { pk: obj.pk as string[], pkType: obj.pkType === 'composite' ? 'composite' : 'single' };
+    }
+  } catch {
+    // 旧数据 reason 是纯文本，忽略
+  }
+  return null;
+}
+
+/**
+ * 由文件组详情重建编辑行：每个未移出文件一行；
+ * 以该文件为外键侧的关系逐条展开为独立行（多外键 = 多行），并回读主键配置。
+ */
+function buildRelRows(
+  files: StructuredGroupFile[],
+  relations: StructuredRelation[],
+): RelRow[] {
+  const rows: RelRow[] = [];
+  for (const f of files.filter((item) => !item.removed)) {
+    // 预填主键：优先系统识别出的唯一主键候选，用户仍可修改
+    const pkGuess = f.key_candidates.find((c) => c.unique)?.field ?? f.key_candidates[0]?.field ?? '';
+    const fkRels = relations.filter((r) => r.from_doc_id === f.doc_id);
+    if (!fkRels.length) {
+      rows.push({
+        key: nextRelRowKey(),
+        docId: f.doc_id,
+        pk: pkGuess ? [pkGuess] : [],
+        pkType: 'single',
+        hasFk: false,
+      });
+      continue;
+    }
+    fkRels.forEach((r, i) => {
+      const cfg = parsePkCfg(r.reason);
+      rows.push({
+        key: nextRelRowKey(),
+        docId: f.doc_id,
+        pk: cfg?.pk ?? (i === 0 && pkGuess ? [pkGuess] : []),
+        pkType: cfg?.pkType ?? 'single',
+        hasFk: true,
+        fkField: r.from_field,
+        fkDocId: r.from_doc_id,
+        refField: r.to_field,
+        refDocId: r.to_doc_id,
+      });
+    });
+  }
+  return rows;
 }
 
 /** 关联记录页：确认后才有内容；分页浏览 + 单条追溯详情。 */
