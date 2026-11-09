@@ -42,6 +42,9 @@ target-version = "py310"
 [tool.pytest.ini_options]
 pythonpath = ["."]
 asyncio_mode = "auto"
+# 显式固定异步 fixture 的事件循环作用域：pytest-asyncio 1.x 未设置时会告警，
+# 且未来版本会把默认值从 fixture 级改为 function 级，届时不写就会静默变行为。
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 filterwarnings = [
     # asyncpg 连接在事件循环关闭/连接取消路径上的已知噪音（协程对象被 GC），非业务缺陷

@@ -4,3 +4,12 @@
 # 构建前请确保核心依赖（requirements.txt）已安装
 FlagEmbedding>=1.2
 sentence-transformers>=3.0
+# PyTorch 固定为 CPU 版（无 NVIDIA GPU 的运行环境）：
+# FlagEmbedding / sentence-transformers 会传递引入 torch，此前依靠 PEP 440 的
+# 局部版本号排序（2.15.0+cpu > 2.15.0）才「碰巧」选中 CPU wheel；一旦
+# download.pytorch.org 索引不可达或 PyPI 先放出更高版本号，就会落到体积数 GB
+# 的默认 CUDA wheel。显式钉死后安装结果可预测。
+# 注意：该版本仅存在于 https://download.pytorch.org/whl/cpu 索引，
+# 安装时必须带 --extra-index-url https://download.pytorch.org/whl/cpu
+# （Dockerfile 已带此参数）。
+torch==2.15.0+cpu

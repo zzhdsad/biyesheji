@@ -1,36 +1,37 @@
-"""已确认关联能被 RAG 实际利用，且来源可追溯（真实 PostgreSQL）。
+"""知识图谱事实可被 RAG 检索，并能回溯到原始业务资源（真实 PostgreSQL）。
 
-这不是"任务状态成功"就算数，而是走**真实检索链路** KgRetriever（RAG 组装
-Prompt 前取图谱事实的同一条路径）验证：
-1. 未确认 → 检索不出任何图谱事实（不会参与问答）
-2. 确认后 → 能检索到事实，且事实可回溯到：原始表 → 原始文件 → 原始行
-3. 拒绝后 → 事实从检索结果中消失（图谱边已同步撤销）
+当前 KG 是资源配置表的派生物（``KgService.build``，见 kg_service 模块注释）：
+- ``contains`` 边来自 ``prescription_ingredients``（方剂组成，业务事实）；
+- 可见性由 ``knowledge_base_resources`` 挂载决定，与向量检索口径一致。
+
+因此本测试不再依赖已下线的通用导入链路（EntityImportService / 关系发现），
+改为验证当前真实链路：资源写入 → 全量构建 → ``KgRetriever`` 检索 → 溯源回业务表。
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import uuid
+from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from src.application.entity_import_service import EntityImportService
 from src.application.kg_retrieval import KgRetriever
+from src.application.kg_service import KgService
 from src.application.query_analyzer import QueryAnalysis
-from src.application.relation_discovery import discover_relations
-from src.application.schema_analyzer import analyze_rows
 from src.core.config import settings
 from src.domain.models import (
-    KG_STATUS_CONFIRMED,
-    GenericEntity,
-    GenericRelation,
-    ImportFile,
-    ImportJob,
-    ImportRecord,
+    KG_PROVENANCE_INGREDIENT,
+    KG_RELATION_CONTAINS,
+    Herb,
     KnowledgeBase,
+    KnowledgeBaseResource,
+    KgEdge,
+    KgNode,
+    Prescription,
+    PrescriptionIngredient,
     User,
 )
 
@@ -59,32 +60,9 @@ def _new_session():
     return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
-D1_TERMS = [
-    {"术语id": "T1", "术语名称": "脾胃虚弱"},
-    {"术语id": "T2", "术语名称": "肝郁气滞"},
-]
-D2_MEDICINES = [
-    {"中成药id": "M1", "名称": "四君子汤"},
-    {"中成药id": "M2", "名称": "逍遥散"},
-]
-# 必须让两端都不唯一，才能被判定为多对多关联表：
-# 只有两行时「术语id」恰好互不相同，会被当成实体表而非关联表。
-D3_LINKS = [
-    {"中成药id": "M1", "术语id": "T1"},
-    {"中成药id": "M1", "术语id": "T2"},
-    {"中成药id": "M2", "术语id": "T1"},
-]
-
-
-def _rows(payloads: list[dict]):
-    from src.application.tabular_parser import ParsedRow
-
-    return [ParsedRow(row_no=i + 2, data=dict(p)) for i, p in enumerate(payloads)]
-
-
 def _analysis(text: str) -> QueryAnalysis:
     return QueryAnalysis(
-        query=f"{text} 相关中成药有哪些？",
+        query=f"{text} 相关方剂有哪些？",
         question_type="relation",
         question_type_label="关系查询",
         resource_types=[],
@@ -93,128 +71,154 @@ def _analysis(text: str) -> QueryAnalysis:
     )
 
 
-async def _seed(session, tag: str):
-    user = User(
-        email=f"{tag}@biyesheji.dev",
-        username=tag[:40],
-        hashed_password="not-a-real-hash",
-        role="admin",
-        name="测试管理员",
-        department="测试部",
-        must_change_password=False,
-    )
-    session.add(user)
-    await session.flush()
-    kb = KnowledgeBase(name=f"KB-{tag}", owner_id=user.id, visibility="private")
-    session.add(kb)
-    await session.flush()
-    job = ImportJob(
-        batch_id=tag, dataset_id=tag, dataset_name=tag, target_type="generic",
-        status="pending", kb_id=kb.id, created_by=user.id,
-    )
-    session.add(job)
-    await session.flush()
-    return user, kb, job
+async def _cleanup(factory, *, herb_id, presc_id, kb_ids, user_id) -> None:
+    """删除本测试自己创建的数据。
+
+    KG 节点/边是全局派生数据（``build`` 会同步全库资源），这里只清理本次
+    测试两味资源对应的节点与边，不触碰其他测试/业务产生的图数据。
+    """
+    async with factory() as session:
+        node_ids = (
+            await session.scalars(
+                select(KgNode.id).where(KgNode.resource_id.in_([herb_id, presc_id]))
+            )
+        ).all()
+        if node_ids:
+            await session.execute(
+                delete(KgEdge).where(
+                    or_(
+                        KgEdge.source_node_id.in_(node_ids),
+                        KgEdge.target_node_id.in_(node_ids),
+                    )
+                )
+            )
+            await session.execute(delete(KgNode).where(KgNode.id.in_(node_ids)))
+        await session.execute(
+            delete(KnowledgeBaseResource).where(
+                KnowledgeBaseResource.resource_id.in_([herb_id, presc_id])
+            )
+        )
+        await session.execute(
+            delete(PrescriptionIngredient).where(
+                PrescriptionIngredient.prescription_id == presc_id
+            )
+        )
+        await session.execute(delete(Prescription).where(Prescription.id == presc_id))
+        await session.execute(delete(Herb).where(Herb.id == herb_id))
+        await session.execute(delete(KnowledgeBase).where(KnowledgeBase.id.in_(kb_ids)))
+        await session.execute(delete(User).where(User.id == user_id))
+        await session.commit()
 
 
 @pytest.mark.anyio
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
-async def test_confirmed_relation_is_retrievable_and_traceable():
+async def test_kg_fact_is_retrievable_and_traceable():
     engine, factory = _new_session()
-    async with factory() as session:
-        user, kb, job = await _seed(session, f"kgrag-{uuid.uuid4().hex[:8]}")
-        svc = EntityImportService(session)
-
-        tables = {"D1": D1_TERMS, "D2": D2_MEDICINES, "D3": D3_LINKS}
-        rows_by_table = {name: _rows(rows) for name, rows in tables.items()}
-        files_by_table = {}
-        for name, rows in rows_by_table.items():
-            import_file = ImportFile(
-                job_id=job.id,
-                relative_path=f"{name}.csv",
-                file_name=f"{name}.csv",
-                file_ext=".csv",
-                size_bytes=512,
-                file_hash=hashlib.sha256(name.encode("utf-8")).hexdigest(),
-                encoding="utf-8",
-                detected_format="csv",
-                row_count=len(rows),
+    tag = f"kgrag-{uuid.uuid4().hex[:8]}"
+    herb_id = presc_id = user_id = None
+    kb_ids: list[uuid.UUID] = []
+    try:
+        async with factory() as session:
+            user = User(
+                email=f"{tag}@biyesheji.dev",
+                username=tag[:40],
+                hashed_password="not-a-real-hash",
+                role="admin",
+                name="测试管理员",
+                department="测试部",
+                must_change_password=False,
             )
-            session.add(import_file)
+            session.add(user)
             await session.flush()
-            files_by_table[name] = import_file
-        await session.commit()
 
-        profiles = [analyze_rows(r, table_name=n) for n, r in rows_by_table.items()]
-        plan = discover_relations(profiles)
-        try:
-            # ① 不自动确认 → 关系为 pending
-            await svc.import_relational(
-                kb_id=kb.id, user=user, job_id=job.id,
-                rows_by_table=rows_by_table, files_by_table=files_by_table,
-                primary_keys={t: plan.primary_keys[t][0] for t in plan.primary_keys},
-                foreign_keys=[], junctions=plan.junctions,
-                batch_id="rag-batch", auto_confirm=False,
+            kb = KnowledgeBase(
+                name=f"KB-{tag}", owner_id=user.id, visibility="private"
+            )
+            other_kb = KnowledgeBase(
+                name=f"KB-other-{tag}", owner_id=user.id, visibility="private"
+            )
+            session.add_all([kb, other_kb])
+            await session.flush()
+
+            herb = Herb(
+                name=f"测试中药-{tag}",
+                aliases=[f"别名-{tag}"],
+                properties="甘，平",
+                source=f"测试出处-{tag}",
+            )
+            prescription = Prescription(name=f"测试方剂-{tag}", aliases=[], source="")
+            session.add_all([herb, prescription])
+            await session.flush()
+
+            session.add(
+                PrescriptionIngredient(
+                    prescription_id=prescription.id,
+                    herb_id=herb.id,
+                    amount=Decimal("9"),
+                    unit="克",
+                    role="君",
+                )
+            )
+            # KG 可见性口径：资源必须挂载到 KB 才会进入该库的检索结果
+            session.add_all(
+                [
+                    KnowledgeBaseResource(
+                        knowledge_base_id=kb.id,
+                        resource_type="herb",
+                        resource_id=herb.id,
+                    ),
+                    KnowledgeBaseResource(
+                        knowledge_base_id=kb.id,
+                        resource_type="prescription",
+                        resource_id=prescription.id,
+                    ),
+                ]
             )
             await session.commit()
 
-            pending = (await session.execute(
-                select(GenericRelation).where(GenericRelation.kb_id == kb.id)
-            )).scalars().all()
-            assert len(pending) == 3
-            assert all(r.status == "pending" for r in pending)
+            herb_id, presc_id, user_id = herb.id, prescription.id, user.id
+            kb_ids = [kb.id, other_kb.id]
 
-            # ② 未确认时，RAG 检索链路取不到任何图谱事实
+            # ① 真实全量构建（与生产同一入口）
+            result = await KgService(session).build()
+            assert result.node_count >= 2, result.to_dict()
+            assert result.edge_count >= 1, result.to_dict()
+
             retriever = KgRetriever(session)
-            facts, _ = await retriever.facts([kb.id], _analysis("脾胃虚弱"))
-            assert facts == [], f"未确认关系不应参与问答，却检索到 {facts}"
 
-            # ③ 确认后，RAG 能检索到事实
-            ids = [r.id for r in pending]
-            await svc.bulk_set_status(
-                kb_id=kb.id, relation_ids=ids, status=KG_STATUS_CONFIRMED, user=user
-            )
-            await session.commit()
-            await svc.sync_confirmed_to_kg(kb.id)
-            await session.commit()
+            # ② 未挂载该资源的 KB 检索不到任何事实（可见性隔离）
+            other_facts, _ = await retriever.facts([other_kb.id], _analysis(herb.name))
+            assert other_facts == [], "未挂载的资源不得进入其他知识库的检索结果"
 
-            facts, nodes = await retriever.facts([kb.id], _analysis("脾胃虚弱"))
-            assert facts, "已确认关系必须能被 RAG 检索到"
-            target_names = {nodes[f.target_node_id].name for f in facts} | {
-                nodes[f.source_node_id].name for f in facts
-            }
-            assert "脾胃虚弱" in target_names, target_names
+            # ③ 已挂载的 KB 能检索到 contains 事实
+            facts, nodes = await retriever.facts([kb.id], _analysis(herb.name))
+            assert facts, "已挂载资源的组成关系必须可被 KG 检索到"
+            fact = next(f for f in facts if f.relation == KG_RELATION_CONTAINS)
+            assert fact.provenance == KG_PROVENANCE_INGREDIENT, fact.provenance
+            assert fact.description == "9克；君", fact.description
 
-            # ④ 事实可回溯：kg_edge provenance → 关联表 → 实体 → 原始记录 → 原始文件
-            fact = facts[0]
-            assert "junction:D3" in fact.provenance, fact.provenance
-            entity = await session.scalar(
-                select(GenericEntity).where(
-                    GenericEntity.kb_id == kb.id, GenericEntity.name == "脾胃虚弱"
-                )
+            # ④ 溯源：边两端节点回指资源配置表记录
+            src = nodes[fact.source_node_id]
+            tgt = nodes[fact.target_node_id]
+            assert (src.resource_type, src.resource_id) == (
+                "prescription",
+                prescription.id,
             )
-            assert entity is not None
-            assert entity.entity_type == "D1"
-            record = await session.scalar(
-                select(ImportRecord).where(
-                    ImportRecord.kb_id == kb.id,
-                    ImportRecord.record_key == entity.record_key,
-                )
-            )
-            assert record is not None, "实体必须能回指到原始记录"
-            assert record.payload["术语id"] == "T1"
-            source_file = await session.get(ImportFile, record.file_id)
-            assert source_file is not None and source_file.file_name == "D1.csv"
-            assert record.row_no == 2, record.row_no  # 表头占第 1 行
+            assert (tgt.resource_type, tgt.resource_id) == ("herb", herb.id)
 
-            # ⑤ 拒绝后，事实从检索结果中消失
-            await svc.bulk_set_status(
-                kb_id=kb.id, relation_ids=ids, status="rejected", user=user
+            src_record = await session.get(Prescription, src.resource_id)
+            tgt_record = await session.get(Herb, tgt.resource_id)
+            assert src_record is not None and src_record.name == prescription.name
+            assert tgt_record is not None and tgt_record.name == herb.name
+            assert tgt_record.properties == "甘，平"
+            assert tgt_record.source == f"测试出处-{tag}"
+    finally:
+        if herb_id is not None and presc_id is not None and user_id is not None:
+            await _cleanup(
+                factory,
+                herb_id=herb_id,
+                presc_id=presc_id,
+                kb_ids=kb_ids,
+                user_id=user_id,
             )
-            await session.commit()
-            facts_after, _ = await retriever.facts([kb.id], _analysis("脾胃虚弱"))
-            assert facts_after == [], "拒绝后不应再被检索到"
-        finally:
-            await session.delete(kb)
-            await session.commit()
-    await engine.dispose()
+        await engine.dispose()

@@ -16,10 +16,33 @@ services:
       - ./backend/alembic:/app/alembic
       # 测试代码也要热更新，否则容器里跑的是镜像内的旧测试
       - ./backend/tests:/app/tests
+      # pytest 配置随宿主文件即时生效，改 pyproject.toml 不必重建 10GB 镜像。
+      # 只读挂载：跑测试不应反向改动仓库中的配置文件。
+      - ./backend/pyproject.toml:/app/pyproject.toml:ro
       # 开发/测试的上传文件必须与正式环境分离：正式环境挂载 docker-data/uploads，
       # 开发环境只允许写入 docker-data/uploads_dev，避免清理/覆盖影响正式文件。
       - ${HOST_DATA_DIR:-./docker-data}/uploads_dev:/app/uploads
-    restart: "no"
+    # Docker Desktop / VM 重启后自动恢复；仅"手动 stop"才不再拉起（dev-stop.bat 的语义）。
+    # 不能用 always：那会让 dev-stop.bat 停掉的容器被反复拉起。
+    restart: unless-stopped
+    # 停机时可能正在做 Embedding 推理（同步 CPU 密集），默认 10s 宽限期不够，
+    # 会被 SIGKILL 变成 Exit 137；给足时间让 uvicorn 优雅退出。
+    stop_grace_period: 60s
+    healthcheck:
+      # 只探测进程存活不够：端口起来但依赖未就绪时也应显示不健康，
+      # 便于一眼区分"真的可用"和"反复崩溃但 restart 一直在拉起"。
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      # 首次启动要加载模型/预热配置，给足冷启动时间，避免误判为不健康
+      start_period: 90s
     environment:
       PYTHONUNBUFFERED: "1"
       # 开发环境连接**隔离库** kp_legacy_6f6fa7f，绝不指向主库 knowledge_platform。
@@ -53,4 +76,18 @@ services:
       - ./frontend/tsconfig.json:/app/tsconfig.json
       - ./frontend/postcss.config.mjs:/app/postcss.config.mjs
       - ./frontend/tailwind.config.ts:/app/tailwind.config.ts
-    restart: "no"
+    # 与 backend 保持一致：VM 重启后自动恢复，手动 stop 后不再拉起
+    restart: unless-stopped
+    healthcheck:
+      # next dev 首屏需要现编译，start_period 放宽；用 Node 自带 fetch 探测
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 180s

@@ -83,6 +83,11 @@ COPY src ./src
 # 迁移文件进入镜像，容器内可执行 alembic upgrade head
 COPY alembic.ini ./
 COPY alembic ./alembic
+# pytest 配置（asyncio_mode / 事件循环作用域 / testpaths）写在 pyproject.toml 的
+# [tool.pytest.ini_options] 中；不 COPY 进镜像时，容器内 pytest 以默认 strict 模式
+# 运行，未加标记的 async 测试会报 "async def functions are not natively supported"。
+# 放在模型层之后，改这一行不会让 4.3GB 模型层缓存失效。
+COPY pyproject.toml ./
 
 RUN mkdir -p uploads logs
 

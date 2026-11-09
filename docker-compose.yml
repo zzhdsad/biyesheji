@@ -92,6 +92,22 @@ services:
     build: ./backend
     container_name: kp-backend
     restart: always
+    # 停机时可能正在做 Embedding 推理（同步 CPU 密集），默认 10s 宽限期不够，
+    # 会被 SIGKILL 变成 Exit 137；给足时间让 uvicorn 优雅退出。
+    stop_grace_period: 60s
+    healthcheck:
+      # 端口可达但依赖未就绪时也应显示不健康，便于区分"可用"与"反复崩溃被拉起"
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
     env_file: .env
     environment:
       # 与 postgres 服务共用同一组 POSTGRES_*：密码含 @ : / ? # % 等保留字符时
@@ -126,6 +142,19 @@ services:
         BACKEND_URL: http://backend:8000
     container_name: kp-frontend
     restart: always
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
     environment:
       BACKEND_URL: http://backend:8000
     ports:
