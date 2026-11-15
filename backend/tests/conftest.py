@@ -24,6 +24,18 @@ from src.infrastructure.db_safety import assert_safe_database, assert_test_datab
 from src.main import app  # noqa: E402
 from tests.test_upload import PG_AVAILABLE, _init_db_standalone  # noqa: E402
 
+# ── 测试环境隔离（P4）─────────────────────────────────────────────────────────
+# 只设置测试库 URL 还不够：本机 .env 的 MILVUS_COLLECTION / UPLOAD_DIR 仍指向
+# 正式集合和正式上传目录。测试命中真实 Milvus 或写正式 uploads，都会在“测试通过”
+# 的同时污染生产数据。这里在测试进程启动时统一改到 *_test，不触碰 .env。
+if settings.ENV in ("test", "testing"):
+    if not settings.UPLOAD_DIR.endswith("_test"):
+        settings.UPLOAD_DIR = "uploads_test"
+    if not settings.MILVUS_COLLECTION.endswith("_test"):
+        settings.MILVUS_COLLECTION = f"{settings.MILVUS_COLLECTION}_test"
+    if not settings.MINIO_BUCKET.endswith("_test"):
+        settings.MINIO_BUCKET = f"{settings.MINIO_BUCKET}_test"
+
 
 # ── 测试套件级保险：禁止在未显式放行时连接主库 ──────────────────────────────
 # 集成测试会真实建知识库 / 上传文档 / 写导入记录，过去直接连 settings.DATABASE_URL，
@@ -56,20 +68,48 @@ def _ensure_test_user() -> None:
             async with async_sessionmaker(engine)() as session:
                 existing = await session.scalar(select(User).where(User.id == TEST_USER.id))
                 if existing is not None:
+                    # 历史 test seed 可能只写了空/占位密码；修复后 auth_client 才能登录。
+                    if not existing.hashed_password or existing.hashed_password in {
+                        "not-set-yet",
+                        "",
+                    }:
+                        from src.core.security import hash_password
+
+                        existing.hashed_password = hash_password(
+                            settings.DEFAULT_ADMIN_PASSWORD
+                        )
+                        existing.must_change_password = False
+                        existing.is_active = True
+                        await session.commit()
                     return
                 same_name = await session.scalar(
                     select(User).where(User.username == TEST_USER.username)
                 )
                 if same_name is not None:
-                    # 库里已有同名管理员（init_db seed）：对齐 id，避免重复插入
+                    # 库里已有同名管理员（历史 test seed）：对齐 id，并修复占位密码，
+                    # 否则真实 JWT 登录测试（auth_client）会用 admin/admin123456 失败。
                     TEST_USER.id = same_name.id
+                    if not same_name.hashed_password or same_name.hashed_password in {
+                        "not-set-yet",
+                        "",
+                    }:
+                        from src.core.security import hash_password
+
+                        same_name.hashed_password = hash_password(
+                            settings.DEFAULT_ADMIN_PASSWORD
+                        )
+                        same_name.must_change_password = False
+                        same_name.is_active = True
+                        await session.commit()
                     return
+                from src.core.security import hash_password
+
                 session.add(
                     User(
                         id=TEST_USER.id,
                         email=TEST_USER.email,
                         username=TEST_USER.username,
-                        hashed_password="",
+                        hashed_password=hash_password(settings.DEFAULT_ADMIN_PASSWORD),
                         role="admin",
                         name="测试管理员",
                         department="测试部",
@@ -149,6 +189,9 @@ def _cleanup_test_knowledge_bases():
             await engine.dispose()
 
     async def _cleanup(keep: set[str]) -> None:
+        from pathlib import Path
+        import shutil
+
         from src.infrastructure.milvus_store import MilvusStore
 
         store = MilvusStore() if MILVUS_AVAILABLE else None
@@ -173,6 +216,12 @@ def _cleanup_test_knowledge_bases():
                     )
         finally:
             await engine.dispose()
+
+        # 测试上传文件随本次测试库一起清理；仅允许删除显式 *_test 目录，
+        # 防止配置错误时误删正式 uploads。
+        upload_dir = Path(settings.UPLOAD_DIR).resolve()
+        if upload_dir.name.endswith("_test") and upload_dir.exists():
+            shutil.rmtree(upload_dir, ignore_errors=True)
 
     before = asyncio.run(_kb_ids())
     yield
@@ -235,6 +284,11 @@ def _force_mock_model_config(monkeypatch):
     monkeypatch.setattr(mcs, "get_effective_config_cached", _mock_cached)
     import src.application.rag_service as rag_mod
     monkeypatch.setattr(rag_mod, "get_effective_config_cached", _mock_cached)
+    # revectorize 的后台线程在独立事件循环中执行，且模块级绑定了 config 函数；
+    # 不 patch 会在测试里加载真实 BGE-M3（外网 429/数分钟阻塞），也会污染向量集合。
+    import src.application.revectorize_service as revec_mod
+
+    monkeypatch.setattr(revec_mod, "get_effective_config_cached", _mock_cached)
     # indexing_service 同样是 `from ... import` 绑定：不 patch 的话向量化会走真实
     # BGE-M3（下载/加载 2.3GB），既拖慢测试又依赖外网。
     import src.application.indexing_service as index_mod

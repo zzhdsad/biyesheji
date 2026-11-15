@@ -1,6 +1,7 @@
 """HyDE 查询改写测试：MockHyDE 行为、开关、改写对检索查询生效。"""
 
 import time
+import uuid
 
 import src.application.rag_service as rag_module
 from src.core.config import settings
@@ -101,7 +102,8 @@ def test_qwen_hyde_import_error_raises_hyde_error(monkeypatch):
 
 
 def _make_kb(client) -> str:
-    return client.post("/api/v1/kb", json={"name": "HyDE 测试库"}).json()["id"]
+    name = f"HyDE 测试库-{uuid.uuid4().hex[:8]}"
+    return client.post("/api/v1/kb", json={"name": name}).json()["id"]
 
 
 def _upload(client, kb_id, name, text):

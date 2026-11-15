@@ -1,4 +1,4 @@
-﻿"""知识库管理路由：创建、列表、编辑、删除（回收站）、成员管理、转移所有权。
+"""知识库管理路由：创建、列表、编辑、删除（回收站）、成员管理、转移所有权。
 
 BUSINESS_RULES §3 知识库：
 - 创建者自动为 Owner
@@ -964,7 +964,7 @@ async def list_kb_resources(
     kb_id: uuid.UUID,
     request: Request,
     resource_type: str | None = None,
-    # BUG-033：分页参数加边界约束（与 herbs/prescriptions 等列表端点一致），
+    # BUG-033：分页参数加边界约束（与文档/知识库列表端点一致），
     # 避免 limit=0/负数/超大值导致的空列表或全表拉取
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),

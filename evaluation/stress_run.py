@@ -46,8 +46,6 @@ from src.domain.models import (
     ImportFile,
     ImportJob,
     ImportRecord,
-    KgEdge,
-    KgNode,
     KnowledgeBase,
     User,
 )
@@ -267,8 +265,6 @@ async def run(scale_name: str) -> dict:
         report["db_entities"] = await count(GenericEntity, GenericEntity.kb_id == kb.id)
         report["db_records"] = await count(ImportRecord, ImportRecord.kb_id == kb.id)
         report["db_relations"] = await count(GenericRelation, GenericRelation.kb_id == kb.id)
-        report["db_kg_nodes"] = await count(KgNode, KgNode.kb_id == kb.id)
-        report["db_kg_edges"] = await count(KgEdge, KgEdge.kb_id == kb.id)
 
         # ── 索引一致性校验耗时（同知识库规模下的可观测成本）────────────
         t0 = time.perf_counter()

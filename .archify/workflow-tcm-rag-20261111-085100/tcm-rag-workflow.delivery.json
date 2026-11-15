@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "3f3f1717-0803-4b28-a674-ffa7d8e86cf6",
+  "status": "current",
+  "command": "deliver",
+  "type": "workflow",
+  "input": "C:\\biyesheji-3.0.0\\.archify\\workflow-tcm-rag-20261111-085100\\candidate.json",
+  "output": "C:\\biyesheji-3.0.0\\.archify\\workflow-tcm-rag-20261111-085100\\tcm-rag-workflow.html",
+  "specification": {
+    "sha256": "c841ce7e9a1f03358e8537c2b5d6ca4be370e02cac9364adc0496352862fe153",
+    "bytes": 6908
+  },
+  "artifact": {
+    "sha256": "c3ccb2e09ddc6a41957fcbd3a7d784627d6dcede7d863f4883161bf9474301d5",
+    "bytes": 864247
+  }
+}

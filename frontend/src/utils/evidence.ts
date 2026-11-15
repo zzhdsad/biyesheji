@@ -21,11 +21,10 @@ import type {
 export const EVIDENCE_HIGH_THRESHOLD = 0.7;
 export const EVIDENCE_MEDIUM_THRESHOLD = 0.3;
 
-/** 来源类别 → 中文标签（阶段十三：kg 与后端 SOURCE_KIND_LABELS 对齐）。 */
+/** 来源类别 → 中文标签（与后端 SOURCE_KIND_LABELS 对齐）。 */
 export const SOURCE_KIND_LABEL: Record<string, string> = {
   document: '文档',
   resource: '资源',
-  kg: '知识图谱',
   structured: '结构化数据',
   structured_group: '关联数据',
 };
@@ -120,9 +119,6 @@ export function evidenceLevel(score: number): EvidenceLevel {
  */
 export function normalizeEvidence(citation: Citation): Citation {
   const score = citation.score ?? 0;
-  // 阶段十三：KG 证据后端同时带 source_kind='kg' 与 resource_type，必须与 resource
-  // 区分开（后端 group_evidence 把 KG 单独成组 kg:<type>，标签为「知识图谱·中药」）。
-  const isKg = citation.source_kind === 'kg';
   // 第六阶段：结构化 / 关联数据是独立来源类别，不能落进 document / resource 分支
   const structuredKind =
     citation.source_kind === 'structured' || citation.source_kind === 'structured_group'
@@ -130,13 +126,13 @@ export function normalizeEvidence(citation: Citation): Citation {
       : null;
   const isStructured = structuredKind !== null;
   const isResource =
-    !isKg && !isStructured && (citation.source_kind === 'resource' || Boolean(citation.resource_type));
-  const resourceType = isKg || isResource ? citation.resource_type ?? null : null;
+    !isStructured && (citation.source_kind === 'resource' || Boolean(citation.resource_type));
+  const resourceType = isResource ? citation.resource_type ?? null : null;
 
   const sourceId = isStructured
     ? // 同一文件 / 同一文件组的多条记录聚合为一张来源卡片；记录 ID 仍在每条证据上
       citation.source_doc_id ?? citation.group_id ?? citation.source_id ?? citation.doc_id
-    : isKg || isResource
+    : isResource
       ? citation.resource_id ?? citation.source_id ?? citation.doc_id
       : citation.source_id ?? citation.doc_id;
   // 阶段十六：名称取值用 ||（而非 ??），空字符串按缺失处理，
@@ -146,22 +142,20 @@ export function normalizeEvidence(citation: Citation): Citation {
       citation.group_name ||
       citation.doc_name ||
       SOURCE_KIND_LABEL[structuredKind]
-    : isKg || isResource
+    : isResource
       ? citation.resource_name || citation.source_name || citation.doc_name || '资源'
       : citation.source_name || citation.doc_name || '未知文档';
-  // 优先沿用后端下发的 source_label（后端对 KG 已标注「图谱·中药」），缺失时本地推导
+  // 优先沿用后端下发的 source_label（后端对 Resource 已标注资源类型），缺失时本地推导
   const fallbackLabel = isStructured
     ? SOURCE_KIND_LABEL[structuredKind]
-    : isKg
-      ? `${SOURCE_KIND_LABEL.kg}·${resourceType ? RESOURCE_TYPE_LABEL[resourceType] ?? resourceType : SOURCE_KIND_LABEL.kg}`
-      : isResource
-        ? (resourceType ? RESOURCE_TYPE_LABEL[resourceType] ?? resourceType : SOURCE_KIND_LABEL.resource)
-        : SOURCE_KIND_LABEL.document;
+    : isResource
+      ? (resourceType ? RESOURCE_TYPE_LABEL[resourceType] ?? resourceType : SOURCE_KIND_LABEL.resource)
+      : SOURCE_KIND_LABEL.document;
 
   return {
     ...citation,
     score,
-    source_kind: isKg ? 'kg' : isStructured ? structuredKind : isResource ? 'resource' : 'document',
+    source_kind: isStructured ? structuredKind : isResource ? 'resource' : 'document',
     resource_type: resourceType,
     // 等级与后端 hit_to_evidence 同量纲：优先 relevance_score（dense），
     // 缺失时回退 score（reranker）；避免同一证据 level 与分组/相关度矛盾
@@ -175,16 +169,6 @@ export function normalizeEvidence(citation: Citation): Citation {
 }
 
 function groupKeyOf(evidence: Citation): { groupKey: string; label: string; subtype: string | null } {
-  // 阶段十三：KG 证据独立成组 kg:<type>（与后端 group_evidence 口径一致），
-  // 避免 Knowledge Graph 关系证据被混进同名 Resource 组。
-  if (evidence.source_kind === 'kg') {
-    const subtype = evidence.resource_type ?? 'kg';
-    return {
-      groupKey: `kg:${subtype}`,
-      label: `${SOURCE_KIND_LABEL.kg}·${RESOURCE_TYPE_LABEL[subtype] ?? subtype}`,
-      subtype,
-    };
-  }
   if (evidence.source_kind === 'resource') {
     const subtype = evidence.resource_type ?? 'resource';
     return {

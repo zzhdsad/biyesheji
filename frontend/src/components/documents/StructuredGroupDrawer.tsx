@@ -58,6 +58,8 @@ import {
   renameStructuredGroup,
   revectorizeStructuredGroup,
   saveStructuredRelations,
+  setStructuredRelationConfirmation,
+  suggestStructuredRelations,
   uploadDocument,
   validateStructuredGroup,
 } from '@/services/api';
@@ -376,12 +378,16 @@ export function StructuredGroupsDrawer({
                 disabled={row.vector_status === 'indexing'}
                 onClick={() => void handleGroupVectorize(row)}
               >
-                {row.vector_status === 'completed' ? '重新向量化' : '开始向量化'}
+                {row.vector_status === 'completed'
+                  ? '重新向量化'
+                  : row.vector_count > 0
+                    ? '继续向量化'
+                    : '开始向量化'}
               </Button>
             </Tooltip>
           )}
           {row.status === 'confirmed' && row.vector_status === 'indexing' && (
-            <Tooltip title="停止本次向量化（下一批记录之间退出，已写入的部分向量会被清理）">
+            <Tooltip title="停止本次向量化（下一批记录之间退出，已写入的部分保留，下次继续）">
               <Button
                 size="small"
                 type="link"
@@ -836,6 +842,65 @@ function GroupDetailPanel({
     }
   };
 
+  const runSuggest = async () => {
+    setBusy('suggest');
+    try {
+      const result = await suggestStructuredRelations(groupId);
+      message.success(
+        result.relation_count
+          ? `已生成关系建议，共 ${result.relation_count} 条，请逐条确认`
+          : '没有找到高置信度关系建议，请手动配置',
+      );
+      await loadDetail();
+    } catch (err) {
+      message.error(describeApiError(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const confirmSuggested = async (relation: StructuredRelation) => {
+    setBusy('confirmRelation');
+    try {
+      await setStructuredRelationConfirmation(groupId, relation.id, true);
+      message.success('关系已确认');
+      await loadDetail();
+    } catch (err) {
+      message.error(describeApiError(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const ignoreSuggested = async (relation: StructuredRelation) => {
+    if (!detail) return;
+    setBusy('ignoreRelation');
+    try {
+      const remaining = detail.relations
+        .filter((r) => r.id !== relation.id)
+        .map((r) => ({
+          from_doc_id: r.from_doc_id,
+          from_field: r.from_field,
+          to_doc_id: r.to_doc_id,
+          to_field: r.to_field,
+          kind: r.kind,
+          confirmed: r.confirmed,
+          origin: r.origin,
+          confidence: r.confidence ?? null,
+          score: r.score ?? null,
+          tier: r.tier ?? null,
+          reason: r.reason,
+        }));
+      await saveStructuredRelations(groupId, remaining);
+      message.success('已忽略该建议');
+      await loadDetail();
+    } catch (err) {
+      message.error(describeApiError(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const runValidate = async () => {
     setBusy('validate');
     try {
@@ -922,6 +987,7 @@ function GroupDetailPanel({
   const pendingParse = files.filter((f) => !f.removed && f.parse_status !== 'success');
   const removedFiles = files.filter((f) => f.removed);
   const usableFiles = files.filter((f) => !f.removed);
+  const suggestedRelations = detail.relations.filter((r) => r.origin === 'suggested');
 
   /** 某行的字段下拉选项（主键/外键字段/引用字段都从这里取）。 */
   const fieldOptions = (docId?: string) =>
@@ -1248,6 +1314,83 @@ function GroupDetailPanel({
                   message="按表配置主键与外键关系"
                   description="每个表默认一行；一个表有多个外键时，点该行「添加外键」再配置一条。有无外键 = 有 时必须补全后面的外键字段、外键字段所在表、引用字段、引用表；= 无 时这四列不需要填。保存后请重新校验，至少 1 条外键关系才能生成关联记录。"
                 />
+                {suggestedRelations.length > 0 && (
+                  <div>
+                    <Typography.Text strong>系统推荐关系</Typography.Text>
+                    <Typography.Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                      置信度仅为启发式评分，必须核对后逐条确认；未确认关系不能生成。
+                    </Typography.Text>
+                    <Table
+                      rowKey="id"
+                      size="small"
+                      pagination={false}
+                      style={{ marginTop: 6 }}
+                      dataSource={suggestedRelations}
+                      columns={[
+                        {
+                          title: '外键侧',
+                          key: 'from',
+                          render: (_, r) => (
+                            <span>
+                              {label(r.from_doc_id)} · {r.from_field}
+                            </span>
+                          ),
+                        },
+                        {
+                          title: '引用侧',
+                          key: 'to',
+                          render: (_, r) => (
+                            <span>
+                              {label(r.to_doc_id)} · {r.to_field}
+                            </span>
+                          ),
+                        },
+                        {
+                          title: '置信度',
+                          key: 'confidence',
+                          width: 110,
+                          render: (_, r) => {
+                            const pct = Math.round((r.confidence ?? 0) * 100);
+                            return (
+                              <Tag color={pct >= 90 ? 'green' : pct >= 70 ? 'blue' : 'orange'}>
+                                {pct}% {pct >= 90 ? '高' : pct >= 70 ? '中' : '低'}
+                              </Tag>
+                            );
+                          },
+                        },
+                        {
+                          title: '操作',
+                          key: 'action',
+                          width: 120,
+                          render: (_, r) =>
+                            r.confirmed ? (
+                              <Tag color="success">已确认</Tag>
+                            ) : (
+                              <Space size={0}>
+                                <Button
+                                  type="link"
+                                  size="small"
+                                  loading={busy === 'confirmRelation'}
+                                  onClick={() => void confirmSuggested(r)}
+                                >
+                                  确认
+                                </Button>
+                                <Button
+                                  type="link"
+                                  danger
+                                  size="small"
+                                  loading={busy === 'ignoreRelation'}
+                                  onClick={() => void ignoreSuggested(r)}
+                                >
+                                  忽略
+                                </Button>
+                              </Space>
+                            ),
+                        },
+                      ]}
+                    />
+                  </div>
+                )}
                 {pendingParse.length > 0 && (
                   <Alert
                     type="warning"
@@ -1269,6 +1412,13 @@ function GroupDetailPanel({
                     onClick={() => void saveRelRows()}
                   >
                     保存关系配置
+                  </Button>
+                  <Button
+                    icon={<PlusOutlined />}
+                    loading={busy === 'suggest'}
+                    onClick={() => void runSuggest()}
+                  >
+                    自动推荐关系
                   </Button>
                   <Button icon={<ReloadOutlined />} onClick={() => void loadDetail()}>
                     刷新结构

@@ -353,9 +353,7 @@ def apply_entity_resolution(
         if rtype not in RESOURCE_TYPES or rtype not in QUESTION_TYPES:
             return _annotate(analysis, result, "not_applied_unknown_type", applied=False)
 
-        # 只校正类型，不额外注入 entities：Dynamic Router 的 kg_enhanced 分支由
-        # 实体个数触发，注入实体会把"某方剂的功效"这类单实体属性查询误判为
-        # 关系型查询，从而覆盖掉本应生效的聚焦策略（Router 规则保持原样不变）。
+        # 只校正类型，不额外注入 entities（原 kg_enhanced 分支已随知识图谱功能下线移除）。
         corrected = replace(
             analysis,
             question_type=rtype,

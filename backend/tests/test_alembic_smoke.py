@@ -25,8 +25,6 @@ EXPECTED_TABLES = {
     "chunks",
     "conversations",
     "messages",
-    "test_cases",
-    "evaluation_results",
     "feedbacks",
     "model_configs",
     "audit_logs",
@@ -49,11 +47,6 @@ EXPECTED_TABLES = {
     "literature_tags",
     # TASK-008
     "knowledge_base_resources",
-    # TASK-009
-    "evaluation_runs",
-    # TASK-013
-    "kg_nodes",
-    "kg_edges",
     # BGE-M3 切换体验优化：批量重新向量化任务表
     "revectorize_jobs",
     # 真实中医知识数据导入中心
@@ -64,7 +57,25 @@ EXPECTED_TABLES = {
     "generic_entities",
     "generic_relations",
     "import_mapping_templates",
+    # 文档统一管理入口 / 结构化数据全链路
+    "file_folders",
+    "structured_parses",
+    "structured_records",
+    "structured_groups",
+    "structured_group_files",
+    "structured_group_records",
 }
+
+# 评估模块已下线（ORM 模型已删除），但历史 Alembic 迁移仍会创建这三张表，
+# 数据库保留它们属当前既定设计，故仅计入迁移链产物集合。
+LEGACY_MIGRATION_ONLY_TABLES = {
+    "test_cases",
+    "evaluation_runs",
+    "evaluation_results",
+}
+
+# alembic upgrade head 后数据库应存在的全部业务表
+EXPECTED_MIGRATION_TABLES = EXPECTED_TABLES | LEGACY_MIGRATION_ONLY_TABLES
 
 SMOKE_DB_NAME = "knowledge_platform_alembic_smoke"
 
@@ -236,10 +247,10 @@ def test_upgrade_downgrade_roundtrip(monkeypatch) -> None:
     head_id = ScriptDirectory.from_config(cfg).get_heads()[0]
 
     try:
-        # upgrade head → 35 业务表 + alembic_version
+        # upgrade head → 全部业务表 + alembic_version
         command.upgrade(cfg, "head")
         tables = _list_public_tables(smoke_url)
-        assert tables == EXPECTED_TABLES | {"alembic_version"}
+        assert tables == EXPECTED_MIGRATION_TABLES | {"alembic_version"}
 
         # BUG-067：全新库必须由迁移补齐"漂移列"（旧情况：只有开发库 create_all 才有）
         assert (
@@ -272,7 +283,7 @@ def test_upgrade_downgrade_roundtrip(monkeypatch) -> None:
         # 再次 upgrade 验证可重复执行
         command.upgrade(cfg, "head")
         tables = _list_public_tables(smoke_url)
-        assert tables == EXPECTED_TABLES | {"alembic_version"}
+        assert tables == EXPECTED_MIGRATION_TABLES | {"alembic_version"}
         # BUG-067：重复 upgrade 仍应幂等地保持两列（不重复创建、不报错）
         assert _list_drift_columns(smoke_url) == LEGACY_DRIFT_COLUMNS
     finally:

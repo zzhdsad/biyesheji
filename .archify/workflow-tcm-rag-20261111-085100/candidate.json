@@ -1,0 +1,99 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "中医药知识库：统一入库与 RAG 问答工作流",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": ".archify/workflow-tcm-rag-20261111-085100/tcm-rag-workflow.html"
+  },
+  "lanes": [
+    { "id": "user", "label": "用户与界面" },
+    { "id": "ingest", "label": "普通文档入库" },
+    { "id": "structured", "label": "结构化数据入库" },
+    { "id": "rag", "label": "RAG 问答编排" },
+    { "id": "guard", "label": "证据与异常边界", "variant": "exception" },
+    { "id": "model", "label": "外部模型服务" }
+  ],
+  "phases": [
+    { "id": "entry_phase", "label": "统一入口", "fromCol": 0, "toCol": 1 },
+    { "id": "qa_phase", "label": "检索与生成", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "guard_phase", "label": "证据与输出", "fromCol": 4, "toCol": 5, "variant": "dashed" }
+  ],
+  "groups": [
+    { "id": "doc_group", "label": "文档处理流水线", "lane": "ingest", "fromCol": 1, "toCol": 3 },
+    { "id": "structured_group", "label": "结构化记录流水线", "lane": "structured", "fromCol": 1, "toCol": 3 },
+    { "id": "rag_group", "label": "RAG 主链路", "lane": "rag", "fromCol": 2, "toCol": 5, "variant": "emphasis" },
+    { "id": "guard_group", "label": "拒答 / 降级", "lane": "guard", "fromCol": 4, "toCol": 5, "variant": "security" }
+  ],
+  "mainPath": ["user", "entry", "chat", "analyze", "retrieve", "gate", "llm", "sse", "answer"],
+  "nodes": [
+    { "id": "user", "lane": "user", "col": 0, "type": "external", "label": "用户", "sublabel": "学习 · 查询 · 管理" },
+    { "id": "entry", "lane": "user", "col": 1, "type": "frontend", "label": "统一入口", "sublabel": "登录 · 选知识库", "tag": "JWT + KB 权限" },
+    { "id": "answer", "lane": "user", "col": 5, "type": "frontend", "label": "答案与引用", "sublabel": "来源可定位" },
+
+    { "id": "documents", "lane": "ingest", "col": 1, "type": "frontend", "label": "文档管理", "sublabel": "普通文档 / 结构化数据", "tag": "统一入库" },
+    { "id": "parse", "lane": "ingest", "col": 2, "type": "backend", "label": "解析与切片", "sublabel": "PDF / DOCX / TXT / MD", "tag": "parse_status" },
+    { "id": "chunk", "lane": "ingest", "col": 3, "type": "backend", "label": "BGE-M3 向量化", "sublabel": "chunk → dense + sparse", "tag": "写 Chunk + 向量" },
+
+    { "id": "fields", "lane": "structured", "col": 2, "type": "backend", "label": "字段识别与记录", "sublabel": "表格 / 记录 / 字段", "tag": "structured_records" },
+    { "id": "structured_vec", "lane": "structured", "col": 3, "type": "backend", "label": "记录向量化", "sublabel": "生成统一知识文本", "tag": "写记录 + 向量" },
+
+    { "id": "chat", "lane": "rag", "col": 1, "type": "frontend", "label": "智能问答", "sublabel": "多轮 · 流式 · 引用", "tag": "SSE" },
+    { "id": "analyze", "lane": "rag", "col": 2, "type": "backend", "label": "问题分析", "sublabel": "实体 · 意图 · 路由", "tag": "Query Analyzer" },
+    { "id": "retrieve", "lane": "rag", "col": 3, "type": "backend", "label": "混合检索", "sublabel": "Dense + Sparse → RRF → Rerank", "tag": "读写 PG / Milvus" },
+    { "id": "sse", "lane": "rag", "col": 5, "type": "backend", "label": "SSE 流式回答", "sublabel": "start → citations → delta → done", "tag": "done 为权威" },
+
+    { "id": "gate", "lane": "guard", "col": 4, "type": "security", "label": "证据门控", "sublabel": "充分 / 不足 / 重试", "tag": "Evidence Gate" },
+    { "id": "fallback", "lane": "guard", "col": 5, "type": "security", "label": "拒答 / 降级", "sublabel": "不编造 · 保留错误", "tag": "安全边界" },
+
+    { "id": "llm", "lane": "model", "col": 4, "type": "cloud", "label": "外部大模型", "sublabel": "只基于给定证据生成", "tag": "OpenAI 兼容" }
+  ],
+  "edges": [
+    { "id": "user-entry", "from": "user", "to": "entry", "label": "打开系统", "variant": "default", "role": "main" },
+    { "id": "entry-chat", "from": "entry", "to": "chat", "label": "提问", "variant": "emphasis", "role": "main" },
+    { "id": "entry-documents", "from": "entry", "to": "documents", "label": "上传 / 导入", "variant": "default", "role": "branch" },
+
+    { "id": "documents-parse", "from": "documents", "to": "parse", "label": "普通文档", "variant": "default" },
+    { "id": "documents-fields", "from": "documents", "to": "fields", "label": "结构化数据", "variant": "default" },
+    { "id": "parse-chunk", "from": "parse", "to": "chunk", "label": "切分", "variant": "default" },
+    { "id": "fields-vector", "from": "fields", "to": "structured_vec", "label": "整理记录", "variant": "default" },
+
+    { "id": "chat-analyze", "from": "chat", "to": "analyze", "label": "自然语言问题", "variant": "emphasis", "role": "main" },
+    { "id": "analyze-retrieve", "from": "analyze", "to": "retrieve", "label": "检索计划", "variant": "emphasis", "role": "main" },
+    { "id": "retrieve-gate", "from": "retrieve", "to": "gate", "label": "候选证据", "variant": "emphasis", "role": "main" },
+
+    { "id": "gate-llm", "from": "gate", "to": "llm", "label": "证据充分", "variant": "emphasis", "role": "main" },
+    { "id": "gate-fallback", "from": "gate", "to": "fallback", "label": "不足 / 重试耗尽", "variant": "security", "role": "error" },
+    { "id": "llm-fallback", "from": "llm", "to": "fallback", "label": "模型异常", "variant": "security", "role": "error" },
+    { "id": "llm-sse", "from": "llm", "to": "sse", "label": "生成 token", "variant": "emphasis", "role": "main" },
+    { "id": "fallback-sse", "from": "fallback", "to": "sse", "label": "拒答 / 错误事件", "variant": "dashed" },
+    { "id": "sse-answer", "from": "sse", "to": "answer", "label": "done + 最终引用", "variant": "emphasis", "role": "main" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "统一入口",
+      "items": [
+        "文档管理同时承接普通文档与结构化数据；space 区分，最终都进入同一套 RAG。",
+        "上传先落库并排队解析，解析完成才允许向量化与检索。"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "安全边界",
+      "items": [
+        "证据不足不调用模型补答：Gate 拒答或换策略重试。",
+        "引用只保留正文实际使用的来源，候选证据不等于引用。"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "存储与代码入口",
+      "items": [
+        "PostgreSQL 存文档/切片/权限/会话；Milvus 存 dense + sparse 向量。",
+        "文档：documents.py / parse_service.py / indexing_service.py；结构化：structured_parse_service.py / structured_vector_service.py；问答：chat.py + rag_service.py。"
+      ]
+    }
+  ]
+}

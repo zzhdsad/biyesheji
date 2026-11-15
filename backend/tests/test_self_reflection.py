@@ -8,7 +8,6 @@
 5   retry 最多一次
 6   Gate insufficient 与 Reflection 的组合
 7   Gate retry + Reflection retry 不形成无限循环
-8   related_to 不得被当成强医学证据
 9   多源问题覆盖检查
 10  citation 完整性（缺失 / 越界）
 11  unsupported claim（含 LLM findings）
@@ -19,8 +18,10 @@
 16  /chat/ask-stream
 17  Evaluation ON/OFF
 18  阶段十二策略不变
-19  阶段十三 KG 不变
 20  阶段十四 Gate 不变
+
+注：原 8（related_to 弱关系）与 19（kg_enhanced 策略）用例随知识图谱
+功能下线一并移除。
 
 说明：
 - 单元测试不依赖任何外部中间件（Milvus / LLM / Redis）；
@@ -69,12 +70,6 @@ from src.application.self_reflection import (
     reflection_config,
     select_retry_strategy,
 )
-from src.domain.models import (
-    KG_PROVENANCE_INGREDIENT,
-    KG_PROVENANCE_SHARED_TAG,
-    KG_RELATION_CONTAINS,
-    KG_RELATION_RELATED_TO,
-)
 from src.infrastructure.llm import LLMError
 from tests.test_dynamic_router import (  # 复用既有 SSE 解析与固定命中
     _CiteLLM,
@@ -82,13 +77,13 @@ from tests.test_dynamic_router import (  # 复用既有 SSE 解析与固定命�
     _parse_sse,
     _patch_retrieve,
 )
-from tests.test_evaluation_experiment import _case, _session, eval_kb  # noqa: F401
 from tests.test_parse import _make_kb
 from tests.test_upload import PG_AVAILABLE
 
 MULTI_Q = "金银花在《本草纲目》中有什么记载？"
 HERB_Q = "金银花有什么功效？"
 GENERAL_Q = "公司实行什么工时制度？"
+UNANSWERABLE_Q = "明天上海的股票涨跌如何？"
 
 
 # ── 检索命中构造（走真实 _retrieve 后的 hit 结构）───────────────────────────
@@ -113,17 +108,6 @@ def _res_hit(content: str, score: float = 0.8, rtype: str = "herb",
     }
 
 
-def _kg_hit(content: str, score: float = 0.9, relation: str = KG_RELATION_CONTAINS,
-            hop: int = 1, rtype: str = "herb", name: str = "金银花",
-            provenance: str = KG_PROVENANCE_INGREDIENT, edge: int = 1) -> dict:
-    return {
-        "id": f"kg:e{edge}", "doc_id": f"kg:e{edge}", "content": content,
-        "page_num": None, "title_path": f"银翘散 → {relation} → {name}",
-        "score": score, "dense_score": score, "source_kind": "kg",
-        "resource_type": rtype, "resource_id": str(uuid.uuid4()),
-        "resource_name": name, "doc_name": name, "kg_relation": relation,
-        "kg_hop": hop, "kg_provenance": provenance,
-    }
 
 
 def _reflector() -> SelfReflection:
@@ -220,32 +204,7 @@ def test_revise_when_answer_not_supported():
     assert d.retry_strategy is None  # revise 不换检索策略
 
 
-def test_medical_claim_from_weak_kg_relation_is_revised():
-    """related_to（共享标签）不得被当成强医学证据——答案包含医学结论即 revise。"""
-    hits = [_kg_hit("金银花相关：辛凉解表（共同标签：清热）", score=0.95,
-                    relation=KG_RELATION_RELATED_TO,
-                    provenance=KG_PROVENANCE_SHARED_TAG)]
-    answer = "金银花主治风热感冒，建议每日服用。[citation: 1, 0]"
-    d = _reflect(answer, hits)
-
-    assert d.decision == DECISION_REVISE
-    assert "medical_claim_from_weak_relation" in d.issues
-    assert d.details["cited_kg_relations"] == ["related_to"]
-
-
-def test_weak_kg_relation_without_medical_claim_retries():
-    """同一弱关系但答案没下医学结论 → 需要更好的证据（retry，不是 revise）。"""
-    hits = [_kg_hit("金银花相关：辛凉解表（共同标签：清热）", score=0.95,
-                    relation=KG_RELATION_RELATED_TO,
-                    provenance=KG_PROVENANCE_SHARED_TAG)]
-    answer = "资料中提到金银花与辛凉解表同属一个标签。[citation: 1, 0]"
-    d = _reflect(answer, hits)
-
-    assert d.decision == DECISION_RETRY
-    assert "kg_weak_relation_only" in d.issues
-    assert d.retry_strategy == "multi_source"
-    assert d.retried is True
-
+# 原 8 节（KG 弱关系 revise / retry 两个用例）随知识图谱功能下线移除。
 
 # ── 3. revise 只执行一次 ────────────────────────────────────────────────────
 
@@ -289,9 +248,9 @@ def test_cited_evidence_weak_retries():
 
 
 def test_retry_target_is_registered_and_differs_from_current():
-    d = _reflect("金银花主治感冒。", [], strategy="kg_enhanced")
+    d = _reflect("金银花主治感冒。", [], strategy="multi_source")
     assert d.retry_strategy in STRATEGIES
-    assert d.retry_strategy != "kg_enhanced"
+    assert d.retry_strategy != "multi_source"
     assert d.decision == DECISION_RETRY
 
 
@@ -633,42 +592,33 @@ def test_reflection_decisions_vocabulary():
 
 
 def test_stage12_strategies_unchanged():
-    """阶段十二策略参数未因阶段十五改变。"""
+    """阶段十二策略参数未因阶段十五改变（kg_enhanced 已随 KG 下线移除）。"""
     assert set(STRATEGIES) >= {
         "baseline_hybrid", "herb_focused", "prescription_focused",
-        "theory_focused", "literature_focused", "multi_source", "kg_enhanced",
+        "theory_focused", "literature_focused", "multi_source",
     }
-    assert ROUTER_VERSION == "rule-v2"
+    assert ROUTER_VERSION == "rule-v3"
     baseline = resolve_retrieval_config(STRATEGIES[BASELINE_STRATEGY])
-    assert baseline["resource_types"] == [] and baseline["kg_enabled"] is False
-
-
-def test_stage13_kg_strategy_unchanged():
-    """阶段十三 KG 策略参数未变。"""
-    kg = resolve_retrieval_config(STRATEGIES["kg_enhanced"])
-    assert kg["kg_enabled"] is True and kg["kg_max_hops"] == 2 and kg["kg_top_k"] == 5
+    assert baseline["resource_types"] == []
 
 
 def test_stage14_gate_rules_unchanged():
-    """阶段十四 Gate 规则未变（空证据 → insufficient；相关_to 不被接受）。"""
+    """阶段十四 Gate 规则未变（空证据 → insufficient；高分文档 → accept）。"""
     from src.application.evidence import build_evidence
 
     gate = EvidenceGate(enabled=True)
     assert gate.evaluate([], None).decision == GATE_INSUFFICIENT
 
     weak = build_evidence([
-        _kg_hit("金银花相关：辛凉解表", relation=KG_RELATION_RELATED_TO,
-                provenance=KG_PROVENANCE_SHARED_TAG, score=1.0),
-        _kg_hit("连翘相关：辛凉解表", relation=KG_RELATION_RELATED_TO,
-                provenance=KG_PROVENANCE_SHARED_TAG, score=1.0, edge=2),
+        _doc_hit("无关文档内容", score=0.1),
     ])
     d = gate.evaluate(weak, None)
     assert d.decision in (GATE_RETRY, GATE_INSUFFICIENT)
     assert d.accepted_count == 0
 
     strong = build_evidence([
-        _kg_hit("银翘散组成金银花", relation=KG_RELATION_CONTAINS, edge=1),
-        _kg_hit("银翘散组成连翘", relation=KG_RELATION_CONTAINS, edge=2),
+        _doc_hit("考勤制度规定：员工迟到需提前向主管报备。", score=0.85),
+        _doc_hit("考勤制度规定：加班需审批。", score=0.8, doc_id="doc-2"),
     ])
     assert gate.evaluate(strong, None).decision == GATE_ACCEPT
 
@@ -678,27 +628,28 @@ def test_stage14_gate_rules_unchanged():
 
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 def test_gate_retry_then_refusal_stops(client, monkeypatch):
-    """Gate retry 已用掉一次仍未改善 → 拒答，不进入生成（无 Reflection）。"""
+    """Gate retry 已用掉一次仍未改善 → 拒答，不进入生成（无 Reflection）。
+
+    原 KG 弱证据场景随 KG 下线移除；改为 unanswerable 问题 + 每次检索
+    均只有单来源文档证据（independent_sources < 2），机制验证不变。
+    """
     import src.application.rag_service as rag_mod
 
     calls = {"n": 0}
-    weak_kg = [
-        _kg_hit("金银花相关：辛凉解表", score=0.95, relation=KG_RELATION_RELATED_TO,
-                provenance=KG_PROVENANCE_SHARED_TAG)
-    ]
+    thin_doc = [_doc_hit("文档证据文本", doc_id="doc-thin", name="单薄文档")]
 
-    async def _always_weak(self, kb_ids, question, strategy=None,
+    async def _always_thin(self, kb_ids, question, strategy=None,
                            resource_types=None, analysis=None):
         await RagService._ensure_components(self)
         calls["n"] += 1
-        return [dict(h) for h in weak_kg]
+        return [dict(h) for h in thin_doc]
 
-    monkeypatch.setattr(RagService, "_retrieve", _always_weak)
+    monkeypatch.setattr(RagService, "_retrieve", _always_thin)
     monkeypatch.setattr(rag_mod, "get_llm", lambda config: _StubLLM())
 
     kb_id = _make_kb(client)
     data = client.post(
-        "/api/v1/chat/ask", json={"question": HERB_Q, "kb_ids": [kb_id]}
+        "/api/v1/chat/ask", json={"question": UNANSWERABLE_Q, "kb_ids": [kb_id]}
     ).json()
 
     assert calls["n"] == 2, f"Gate retry 应恰好一次，实际检索 {calls['n']} 次"
@@ -715,11 +666,10 @@ def test_reflection_retry_executes_exactly_once(client, monkeypatch):
     import src.application.rag_service as rag_mod
 
     calls = {"n": 0}
-    # 第 1 次检索：文档证据（Gate accept） + 一条弱 KG 证据（答案引用它 → 证据不足）
+    # 第 1 次检索：multi_source 问题只有文档证据（resource_type=None），
+    # 答案正文提到 herb 实体"金银花" → multi_source_partial_coverage → Reflection retry
     first_hits = [
         _doc_hit("金银花资料：性寒味甘，清热解毒。", doc_id="d1", name="药材文档"),
-        _kg_hit("金银花相关：辛凉解表", score=0.95, relation=KG_RELATION_RELATED_TO,
-                provenance=KG_PROVENANCE_SHARED_TAG),
     ]
     good_hits = [_res_hit("金银花清热解毒，疏散风热，常用于风热感冒。", name="金银花")]
 
@@ -733,13 +683,13 @@ def test_reflection_retry_executes_exactly_once(client, monkeypatch):
     monkeypatch.setattr(RagService, "_retrieve", _first_weak_then_good)
     monkeypatch.setattr(
         rag_mod, "get_llm",
-        # 答案引用了弱 KG 证据（related_to）但不下医学结论 → 触发 Reflection retry
-        lambda config: _StubLLM(answer="资料提到金银花与辛凉解表存在关联。[citation: 2, 0]"),
+        # 答案引用文档证据，正文提到 herb 实体但无 herb 证据参与 → coverage 不足
+        lambda config: _StubLLM(answer="资料提到金银花与辛凉解表存在关联。[citation: 1, 0]"),
     )
 
     kb_id = _make_kb(client)
     data = client.post(
-        "/api/v1/chat/ask", json={"question": HERB_Q, "kb_ids": [kb_id]}
+        "/api/v1/chat/ask", json={"question": MULTI_Q, "kb_ids": [kb_id]}
     ).json()
 
     assert calls["n"] == 2, f"Reflection retry 应恰好一次，实际检索 {calls['n']} 次"
@@ -749,9 +699,9 @@ def test_reflection_retry_executes_exactly_once(client, monkeypatch):
     assert reflection["reflection_retry_count"] == 1
     assert reflection["gate_retry_count"] == 0
     assert reflection["total_retry_count"] == 1
-    # HERB_Q 路由到 herb_focused → Reflection retry 目标策略由同一张映射表决定
-    assert reflection["retry_strategy"] == select_retry_strategy("herb_focused")
-    assert reflection["original_strategy"] == "herb_focused"
+    # MULTI_Q 路由到 multi_source → Reflection retry 目标策略由同一张映射表决定
+    assert reflection["retry_strategy"] == select_retry_strategy("multi_source")
+    assert reflection["original_strategy"] == "multi_source"
     # Gate retry 未被额外触发（两类 retry 分别计数）
     assert data["evidence_gate"]["retried"] is False
 
@@ -763,28 +713,27 @@ def test_reflection_retry_does_not_loop(client, monkeypatch):
 
     calls = {"n": 0}
     first_hits = [_doc_hit("金银花资料：性寒味甘。", doc_id="d1")]
-    weak_kg = [
-        _kg_hit("金银花相关：辛凉解表", score=0.95, relation=KG_RELATION_RELATED_TO,
-                provenance=KG_PROVENANCE_SHARED_TAG)
-    ]
+    # retry 后只有低分文档（低于展示阈值）→ Gate 判证据不足 → 保守回答
+    thin_doc = [_doc_hit("文档证据文本", doc_id="doc-thin", name="单薄文档", score=0.1)]
 
     async def _degrade(self, kb_ids, question, strategy=None,
                        resource_types=None, analysis=None):
         await RagService._ensure_components(self)
         calls["n"] += 1
         if calls["n"] == 1:
-            return [dict(h) for h in first_hits + weak_kg]
-        return [dict(h) for h in weak_kg]  # retry 后仍只有弱证据
+            return [dict(h) for h in first_hits]
+        return [dict(h) for h in thin_doc]  # retry 后证据不足以支撑答案
 
     monkeypatch.setattr(RagService, "_retrieve", _degrade)
     monkeypatch.setattr(
         rag_mod, "get_llm",
-        lambda config: _StubLLM(answer="资料提到金银花与辛凉解表存在关联。[citation: 2, 0]"),
+        # 答案提到 herb 实体但第 1 次检索无 herb 证据 → coverage 不足 → retry
+        lambda config: _StubLLM(answer="资料提到金银花与辛凉解表存在关联。[citation: 1, 0]"),
     )
 
     kb_id = _make_kb(client)
     data = client.post(
-        "/api/v1/chat/ask", json={"question": HERB_Q, "kb_ids": [kb_id]}
+        "/api/v1/chat/ask", json={"question": MULTI_Q, "kb_ids": [kb_id]}
     ).json()
 
     assert calls["n"] == 2, f"总检索次数应有界，实际 {calls['n']} 次"
@@ -957,7 +906,7 @@ def test_ask_returns_reflection_field(client, monkeypatch):
     # 旧字段全部保留
     for key in ("answer", "citations", "evidence", "evidence_groups",
                 "evidence_summary", "query_analysis", "router_decision",
-                "kg_evidence", "evidence_gate", "reflection"):
+                "evidence_gate", "reflection"):
         assert key in data, f"缺失字段 {key}"
 
     reflection = data["reflection"]
@@ -997,20 +946,26 @@ def test_ask_stream_keeps_event_order_and_carries_reflection(client, monkeypatch
 
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 def test_ask_stream_insufficient_keeps_contract(client, monkeypatch):
-    """Gate insufficient：SSE 仍为 citations → delta → done（citations 为空，不展示无关证据）。"""
-    weak_kg = [
-        _kg_hit("金银花相关：辛凉解表", score=0.9, relation=KG_RELATION_RELATED_TO,
-                provenance=KG_PROVENANCE_SHARED_TAG)
-    ]
-    _patch_retrieve(monkeypatch, weak_kg)
+    """Gate insufficient：SSE 仍为 citations → delta → done（citations 为空，不展示无关证据）。
+
+    原 KG 弱证据场景随 KG 下线移除；改为 unanswerable 问题 + 单来源文档证据
+    （independent_sources < 2，Gate retry 一次后仍不足）触发拒答。
+    """
+    thin_doc = [_doc_hit("文档证据文本", doc_id="doc-thin", name="单薄文档")]
+    _patch_retrieve(monkeypatch, thin_doc)
 
     kb_id = _make_kb(client)
     resp = client.post(
-        "/api/v1/chat/ask-stream", json={"question": HERB_Q, "kb_ids": [kb_id]}
+        "/api/v1/chat/ask-stream", json={"question": UNANSWERABLE_Q, "kb_ids": [kb_id]}
     )
     events = _parse_sse(resp.text)
     names = [e for e, _ in events]
     assert names[0] == "start" and names[1] == "citations" and names[-1] == "done"
+
+    # Gate 决策随 citations 事件下发：retry 一次后仍不足
+    citations_payload = dict(events[1][1])
+    assert citations_payload["evidence_gate"]["decision"] == "insufficient"
+    assert citations_payload["evidence_gate"]["retried"] is True
 
     done = dict(events[-1][1])
     assert GATE_REFUSAL_ANSWER == done["answer"]
@@ -1018,107 +973,6 @@ def test_ask_stream_insufficient_keeps_contract(client, monkeypatch):
     assert done["reflection"] is None
 
 
-# ── 17. Evaluation ON/OFF ───────────────────────────────────────────────────
-
-
-@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
-async def test_evaluation_records_reflection_on(client, eval_kb, monkeypatch):
-    """Reflection ON：逐条归档决策 + 配置快照 + 落库。"""
-    from sqlalchemy import select
-
-    from src.application.evaluation_service import EvaluationService
-    from src.domain.models import EvaluationResult
-
-    import src.application.rag_service as rag_mod
-
-    _patch_retrieve(monkeypatch, _mixed_hits())
-    monkeypatch.setattr(rag_mod, "get_llm", lambda config: _CiteLLM())
-
-    async with _session() as db:
-        svc = EvaluationService(db)
-        await svc.save_test_set(
-            eval_kb,
-            [_case(f"金银花-{uuid.uuid4().hex[:6]}", question_type="herb")],
-            dataset_version="tcm-v1",
-        )
-        run, results = await svc.run(eval_kb, retrieval_strategy=BASELINE_STRATEGY)
-
-        assert results[0].reflection_decision == DECISION_ACCEPT
-        assert results[0].reflection_version == REFLECTION_VERSION
-        snapshot = run.config_snapshot
-        assert snapshot["self_reflection"]["enabled"] is True
-        assert snapshot["self_reflection"]["reflection_version"] == REFLECTION_VERSION
-        assert snapshot["self_reflection"]["decision_counts"] == {DECISION_ACCEPT: 1}
-
-        rows = (
-            await db.scalars(
-                select(EvaluationResult).where(
-                    EvaluationResult.run_id == str(run.id)
-                )
-            )
-        ).all()
-        assert rows and rows[0].reflection_decision == DECISION_ACCEPT
-        assert rows[0].reflection_version == REFLECTION_VERSION
-
-
-@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
-async def test_evaluation_records_reflection_off(client, eval_kb, monkeypatch):
-    """Reflection OFF：不记录反思决策，快照标记关闭（对照实验组）。"""
-    from src.application.evaluation_service import EvaluationService
-
-    import src.application.rag_service as rag_mod
-
-    _patch_retrieve(monkeypatch, _mixed_hits())
-    monkeypatch.setattr(rag_mod, "get_llm", lambda config: _CiteLLM())
-
-    async with _session() as db:
-        svc = EvaluationService(db)
-        await svc.save_test_set(
-            eval_kb,
-            [_case(f"连翘-{uuid.uuid4().hex[:6]}", question_type="herb")],
-            dataset_version="tcm-v1",
-        )
-        run, results = await svc.run(
-            eval_kb,
-            retrieval_strategy=BASELINE_STRATEGY,
-            use_self_reflection=False,
-        )
-        assert results[0].reflection_decision is None
-        assert results[0].reflection_version is None
-        assert run.config_snapshot["self_reflection"]["enabled"] is False
-        assert run.config_snapshot["self_reflection"]["decision_counts"] == {}
-
-
-@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
-async def test_evaluation_api_run_accepts_reflection_switch(client, eval_kb, monkeypatch):
-    """POST /evaluation/run 支持 use_self_reflection，结果回传 Reflection 字段。"""
-    from src.application.evaluation_service import EvaluationService
-
-    import src.application.rag_service as rag_mod
-
-    _patch_retrieve(monkeypatch, _mixed_hits())
-    monkeypatch.setattr(rag_mod, "get_llm", lambda config: _CiteLLM())
-    async with _session() as db:
-        await EvaluationService(db).save_test_set(
-            eval_kb,
-            [_case(f"桂枝汤-{uuid.uuid4().hex[:6]}", question_type="prescription")],
-            dataset_version="tcm-v1",
-        )
-
-    resp = client.post(
-        "/api/v1/evaluation/run",
-        json={
-            "kb_id": str(eval_kb),
-            "retrieval_strategy": BASELINE_STRATEGY,
-            "experiment_name": "reflection_probe",
-            "use_self_reflection": True,
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["results"]
-    for r in body["results"]:
-        for key in ("reflection_decision", "reflection_version",
-                    "reflection_retry_strategy", "reflection_reason"):
-            assert key in r, f"缺失字段 {key}"
-    assert body["results"][0]["reflection_decision"] == DECISION_ACCEPT
+# 原「17. Evaluation ON/OFF」2 个 EvaluationService 直连用例
+# （test_evaluation_records_reflection_on / test_evaluation_records_reflection_off）
+# 随评估模块彻底删除下线；Self Reflection 机制用例保留于上文各节。

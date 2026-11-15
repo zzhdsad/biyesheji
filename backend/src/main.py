@@ -45,6 +45,30 @@ async def lifespan(app: FastAPI):
             name="structured-vector-recover",
             daemon=True,
         ).start()
+
+        # 后台预热 RAG 模型：BGE/Reranker 首次加载 + int8 量化约 20–30 秒，
+        # 不应让第一个提问承担这段固定成本。失败不影响服务启动。
+        def _warm_rag_models() -> None:
+            try:
+                from src.infrastructure.embedding import get_embedding
+                from src.infrastructure.rerank import get_rerank
+
+                get_embedding()
+                reranker = get_rerank()
+                # get_rerank() 只构造实例，Cross-Encoder 仍在首次打分时懒加载；
+                # 预热必须显式触发，否则第一个提问仍承担模型加载 + int8 量化时间。
+                getter = getattr(reranker, "_get_model", None)
+                if callable(getter):
+                    getter()
+                logger.info("RAG 模型预热完成")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"RAG 模型预热失败：{exc}")
+
+        threading.Thread(
+            target=_warm_rag_models,
+            name="rag-model-warmup",
+            daemon=True,
+        ).start()
     except Exception as exc:  # noqa: BLE001 - 恢复失败不能影响服务启动
         logger.warning(f"结构化向量遗留状态修复未启动：{exc}")
     logger.info(f"{settings.APP_NAME} v{settings.VERSION} 启动完成（环境：{settings.ENV}）")

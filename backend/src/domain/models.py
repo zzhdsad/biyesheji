@@ -638,125 +638,6 @@ class Message(Base, TimestampMixin):
     citations: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
 
-class TestCase(Base, TimestampMixin):
-    """评估测试集用例（TASK-009 扩展：问题分类 + 数据集版本 + 人工确认标记）。
-
-    TASK-009 约束（AGENTS.md / PRD）：
-    - 不凭空编造中医事实作为标准答案：golden_answer 为空或未经人工确认时，
-      评估只计算 context_relevancy，answer_correctness 记为 NULL（不参与均值），
-      避免把「未标注」误算成 0 分而污染实验结论。
-    """
-
-    __tablename__ = "test_cases"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
-    kb_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
-    )
-    question: Mapped[str] = mapped_column(Text)
-    golden_answer: Mapped[str] = mapped_column(Text)
-    golden_contexts: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    # 问题分类（受控词表见 application.evaluation_service.QUESTION_TYPES）：
-    # herb/prescription/theory/literature/multi_source/unanswerable/general
-    # 供 TASK-011 Query Analyzer / Dynamic Router 按问题类型对比检索策略效果。
-    question_type: Mapped[str] = mapped_column(String(32), default="general", index=True)
-    # 测试集版本（如 tcm-v1），实验对比时用于确认两次运行使用同一测试集
-    dataset_version: Mapped[str] = mapped_column(String(64), default="v1", index=True)
-    # 标准答案是否仍需人工确认：True → 不计算 answer_correctness
-    needs_review: Mapped[bool] = mapped_column(default=True)
-    # 人工标注依据提示（应依据哪条资源/文献核对），仅作标注指引，不参与打分
-    source_reference: Mapped[str] = mapped_column(Text, default="")
-
-
-class EvaluationRun(Base, TimestampMixin):
-    """一次评估运行（实验）的归档记录。
-
-    TASK-009：Baseline 实验能力。一次 run 固定「实验名 + 检索策略 + 测试集版本」，
-    保存聚合指标与配置快照，使后续 Dynamic Router / 不同 Retrieval Strategy
-    可以与 Baseline 在同一测试集下按指标和 question_type 进行对比。
-    """
-
-    __tablename__ = "evaluation_runs"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
-    kb_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), index=True
-    )
-    experiment_name: Mapped[str] = mapped_column(String(128), default="baseline", index=True)
-    # 检索策略标识（Baseline：hybrid_rrf_rerank_hyde）
-    retrieval_strategy: Mapped[str] = mapped_column(String(64), default="baseline_hybrid")
-    dataset_version: Mapped[str] = mapped_column(String(64), default="v1")
-    case_count: Mapped[int] = mapped_column(Integer, default=0)
-    # 有已确认标准答案、实际计算 answer_correctness 的用例数
-    evaluated_count: Mapped[int] = mapped_column(Integer, default=0)
-    # 标准答案缺失/待人工确认、跳过 answer_correctness 的用例数
-    skipped_count: Mapped[int] = mapped_column(Integer, default=0)
-    # BUG-011：因基础设施故障（检索/生成抛异常）而未产出结果的用例数。
-    # 这些用例不参与 context_relevancy / answer_correctness 均值，
-    # 否则「Milvus 宕机」会被记成「检索质量 0 分」而污染实验结论。
-    failed_count: Mapped[int] = mapped_column(Integer, default=0)
-    # BUG-023：幂等键（调用方提供，如同一实验的重复/并发提交使用同一 key）。
-    # NULL 表示未启用幂等保护；唯一索引保证同一 key 只会产生一条 run。
-    idempotency_key: Mapped[str | None] = mapped_column(
-        String(128), nullable=True, index=True, unique=True
-    )
-    context_relevancy: Mapped[float] = mapped_column(Float, default=0.0)
-    # 无已评估用例时为 NULL（区别于「全部答错=0」）
-    answer_correctness: Mapped[float | None] = mapped_column(Float, nullable=True)
-    passed: Mapped[bool] = mapped_column(default=False)
-    threshold: Mapped[float] = mapped_column(Float, default=0.75)
-    # 配置快照（模型/检索参数），保证实验可复现
-    config_snapshot: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    # 按 question_type 分组的指标明细（[{question_type, case_count, evaluated_count,
-    # context_relevancy, answer_correctness}]），支持按问题类型分析
-    by_question_type: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-
-
-class EvaluationResult(Base, TimestampMixin):
-    """单条用例的评估结果。
-
-    TASK-009：补充 run_id / 实验维度冗余字段（experiment_name、retrieval_strategy、
-    dataset_version、question_type）与生成答案、错误信息，便于按实验/按问题类型
-    直接查询，无需回表 join。
-    """
-
-    __tablename__ = "evaluation_results"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
-    test_case_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("test_cases.id", ondelete="CASCADE"), index=True
-    )
-    retrieved_contexts: Mapped[list | None] = mapped_column(JSONB, nullable=True)
-    context_relevancy: Mapped[float] = mapped_column(Float, default=0.0)
-    # NULL 表示未评估（标准答案缺失或待人工确认），与 0 分（已评估但不正确）区分
-    answer_correctness: Mapped[float | None] = mapped_column(Float, nullable=True)
-    # 历史迁移遗留列（c185a0406aa3）：当前指标计算不使用，保留以对齐 DB / Alembic
-    faithfulness: Mapped[float] = mapped_column(Float, default=0.0)
-    # 归属运行（evaluation_runs.id 的字符串形式，冗余存储便于分组查询）
-    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    experiment_name: Mapped[str] = mapped_column(String(128), default="baseline")
-    retrieval_strategy: Mapped[str] = mapped_column(String(64), default="baseline_hybrid")
-    dataset_version: Mapped[str] = mapped_column(String(64), default="v1")
-    question_type: Mapped[str] = mapped_column(String(32), default="general")
-    answer: Mapped[str] = mapped_column(Text, default="")
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # 阶段十四：Evidence Gate 归档（最小迁移，全部可空；Gate 关闭时为 None）
-    # gate_decision ∈ {accept, insufficient, retry}
-    gate_decision: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    gate_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # Gate 判定 retry 时实际重试使用的策略（未重试为 None）
-    retry_strategy: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    # 阶段十五：Self Reflection 归档（最小迁移，全部可空；Reflection 关闭时为 None）
-    # reflection_decision ∈ {accept, revise, retry}
-    reflection_decision: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    reflection_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # Reflection 判定 retry 时实际使用的策略（未重试为 None）
-    reflection_retry_strategy: Mapped[str | None] = mapped_column(
-        String(64), nullable=True
-    )
-    # Reflection 给出的原因/问题清单（受控词表，+ 连接），供后续按原因归类分析
-    reflection_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
-
 
 class Feedback(Base, TimestampMixin):
     """反馈（点赞/踩 + 纠错意见）。
@@ -1219,143 +1100,11 @@ class Literature(Base, TimestampMixin):
     category: Mapped[Category | None] = relationship(lazy="selectin")
 
 
-# ── 阶段十三：知识图谱（KG）───────────────────────────────────────────────────
-# 定位：KG 是「现有资源 → 图谱节点/关系」的派生物，不是第二套中医知识库。
-# 节点只保存定位与匹配所需的最小信息（类型 / 资源 ID / 名称 / 别名），
-# 不复制资源正文；关系只保存能由现有业务数据可靠推导的那几种，
-# 每条边记录 provenance（由哪张业务表/哪条规则生成），禁止凭空生成医学关系。
-
-# 节点类型：目前只有资源节点（Herb/Prescription/Theory/Literature）
-KG_NODE_TYPE_RESOURCE = "resource"
-KG_NODE_TYPES: tuple[str, ...] = (KG_NODE_TYPE_RESOURCE,)
-
-# 关系类型受控词表（第一版只实现有实际用途、且能可靠推导的关系）
-KG_RELATION_CONTAINS = "contains"      # 方剂 → 组成 → 中药（prescription_ingredients）
-KG_RELATION_RECORDS = "records"        # 文献 → 记载 → 资源（资源 source 命中文献名/别名）
-KG_RELATION_RELATED_TO = "related_to"  # 跨类型资源共享标签（*_tags 关联表）
-
-KG_RELATIONS: tuple[str, ...] = (
-    KG_RELATION_CONTAINS,
-    KG_RELATION_RECORDS,
-    KG_RELATION_RELATED_TO,
-)
-
-KG_RELATION_LABELS: dict[str, str] = {
-    KG_RELATION_CONTAINS: "组成",
-    KG_RELATION_RECORDS: "记载",
-    KG_RELATION_RELATED_TO: "相关",
-}
-
-# 关系来源（provenance）：记录边由哪张业务表 / 哪条规则生成，便于审计与实验
-KG_PROVENANCE_INGREDIENT = "prescription_ingredients"
-KG_PROVENANCE_SOURCE = "resource_source"
-KG_PROVENANCE_SHARED_TAG = "shared_tag"
-
-
-# ── 知识图谱：节点类型与关系/实体的确认状态 ────────────────────────────────────
-KG_NODE_TYPE_ENTITY = "entity"
-KG_STATUS_CONFIRMED = "confirmed"
-KG_STATUS_PENDING = "pending"  # 候选、未经人工确认：不参与检索与推理
-KG_STATUS_REJECTED = "rejected"
-
-
-class KgNode(Base, TimestampMixin):
-    """知识图谱节点：一个资源 = 一个节点；通用导入后一个实体 = 一个节点。
-
-    - node_type：'resource'（业务资源） / 'entity'（通用导入实体）
-    - resource_type + resource_id：指回 Herb / Prescription / Theory / Literature
-      本体（多态，不建 FK，与 KnowledgeBaseResource 同风格）；实体节点下为 NULL
-    - entity_id：指向 generic_entities；资源节点下为 NULL
-    - kb_id：**必须隔离**。图谱遍历 / 检索一律按 kb_id 过滤，防止跨知识库关联泄漏
-    - status：confirmed / pending / rejected。候选实体默认 pending，未确认不入检索
-    - name / aliases：仅用于图检索的实体匹配，不复制资源正文
-    - 唯一性改用**部分索引**：资源节点按 (resource_type, resource_id)，
-      实体节点按 (entity_id)，两类节点共存且各自不重复
-    """
-
-    __tablename__ = "kg_nodes"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
-    node_type: Mapped[str] = mapped_column(String(16), default=KG_NODE_TYPE_RESOURCE, index=True)
-    kb_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=True, index=True
-    )
-    resource_type: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
-    resource_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    # 通用导入实体（node_type='entity' 时非空）
-    entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
-    name: Mapped[str] = mapped_column(String(128), index=True)
-    aliases: Mapped[list[str]] = mapped_column(ARRAY(String(128)), default=list)
-    # 确认状态与候选置信度：低置信度候选默认 pending，确认后才 confirmed
-    status: Mapped[str] = mapped_column(String(16), default=KG_STATUS_CONFIRMED, index=True)
-    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-    deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)
-
-    __table_args__ = (
-        # 资源节点唯一（与原约束等价，改为部分索引以允许实体节点共存）
-        Index(
-            "uq_kg_nodes_resource",
-            "resource_type",
-            "resource_id",
-            unique=True,
-            postgresql_where=text("resource_type IS NOT NULL"),
-        ),
-        Index(
-            "uq_kg_nodes_entity",
-            "entity_id",
-            unique=True,
-            postgresql_where=text("entity_id IS NOT NULL"),
-        ),
-        Index("ix_kg_nodes_aliases_gin", "aliases", postgresql_using="gin"),
-        # 按类型查节点（构建/统计路径）
-        Index("ix_kg_nodes_type_resource_type", "node_type", "resource_type"),
-        # 权限隔离 + 未确认不参与遍历
-        Index("ix_kg_nodes_kb_status", "kb_id", "status"),
-    )
-
-
-class KgEdge(Base, TimestampMixin):
-    """知识图谱边（TASK-013）：两个节点之间的一条可靠关系。
-
-    - 关系以「规范方向」存储（如 方剂 → contains → 中药），检索时按无向遍历，
-      不重复存储反向边
-    - 唯一约束 (source_node_id, target_node_id, relation_type)：重复构建不产生重复边
-    - provenance：边的生成依据（业务表 / 规则），description：可读说明（如用量、出处）
-    - 节点删除时边级联删除，保证重建与资源清理不留孤儿边
-    """
-
-    __tablename__ = "kg_edges"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=_new_uuid)
-    source_node_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("kg_nodes.id", ondelete="CASCADE"), index=True
-    )
-    target_node_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("kg_nodes.id", ondelete="CASCADE"), index=True
-    )
-    relation_type: Mapped[str] = mapped_column(String(32), index=True)
-    provenance: Mapped[str] = mapped_column(String(64), default="")
-    description: Mapped[str] = mapped_column(String(255), default="")
-    # 知识库隔离：图谱遍历必须按 kb_id 过滤，防止跨知识库关系泄漏
-    kb_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=True, index=True
-    )
-    # 确认状态：候选边默认 pending，未经人工确认不参与检索与推理
-    status: Mapped[str] = mapped_column(String(16), default=KG_STATUS_CONFIRMED, index=True)
-    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
-
-    __table_args__ = (
-        UniqueConstraint(
-            "source_node_id",
-            "target_node_id",
-            "relation_type",
-            name="uq_kg_edges_source_target_relation",
-        ),
-        Index(
-            "ix_kg_edges_relation_source", "relation_type", "source_node_id"
-        ),
-        Index("ix_kg_edges_kb_status", "kb_id", "status"),
-    )
+# 实体/关系的确认状态词表：通用导入（GenericRelation 等）复用，
+# 原知识图谱（KG）专用状态常量随 KG 功能下线仅保留此组仍在使用者
+STATUS_CONFIRMED = "confirmed"
+STATUS_PENDING = "pending"  # 候选、未经人工确认：不参与推理
+STATUS_REJECTED = "rejected"
 
 
 # ============================================================================
@@ -1505,10 +1254,10 @@ class GenericRelation(Base, TimestampMixin):
     relation_type: Mapped[str] = mapped_column(String(64), index=True)
     # 关系载荷（如用量、角色、来源字段值）
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
-    # 候选置信度 0~1：低于阈值的候选保持 pending，未经人工确认不进入 KG
+    # 候选置信度 0~1：低于阈值的候选保持 pending，未经人工确认不参与推理
     confidence: Mapped[float] = mapped_column(Float, default=1.0)
     # pending / confirmed / rejected
-    status: Mapped[str] = mapped_column(String(16), default=KG_STATUS_PENDING, index=True)
+    status: Mapped[str] = mapped_column(String(16), default=STATUS_PENDING, index=True)
     # 关系来源：发现规则 + 文件 + 字段，供审计与回溯
     provenance: Mapped[str] = mapped_column(String(255), default="")
     import_batch_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)

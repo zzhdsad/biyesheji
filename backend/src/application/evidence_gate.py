@@ -39,19 +39,15 @@ from src.application.evidence import (
     EVIDENCE_LEVEL_MEDIUM,
     EVIDENCE_MEDIUM_THRESHOLD,
     SOURCE_KIND_DOCUMENT,
-    SOURCE_KIND_KG,
     SOURCE_KIND_RESOURCE,
     evidence_level,
 )
 from src.core.config import settings
-from src.domain.models import (
-    KG_RELATION_CONTAINS,
-    KG_RELATION_RECORDS,
-)
 
 # ── 门控规则版本（写入 GateDecision / config_snapshot，实验可追溯）────────────
 # gate-v1：阶段十四初始规则（来源分类 + KG 关系/跳数 + 聚合条件 + 单次 retry）
-GATE_VERSION = "gate-v1"
+# gate-v2：知识图谱（KG）功能下线，移除 KG 关系/跳数规则，聚合条件与单次 retry 不变
+GATE_VERSION = "gate-v2"
 
 # ── 三种判定结果 ────────────────────────────────────────────────────────────
 DECISION_ACCEPT = "accept"
@@ -64,22 +60,9 @@ GATE_DECISIONS: tuple[str, ...] = (
     DECISION_RETRY,
 )
 
-# ── KG 关系可信度（需求 §3：业务事实 > 共享标签；跳数越多越弱）────────────────
-# contains / records 来自 prescription_ingredients 与资源 source 字段，是业务事实
-KG_STRONG_RELATIONS = frozenset({KG_RELATION_CONTAINS, KG_RELATION_RECORDS})
-# related_to 只表示"共享人工标签"，是弱关系，不得因分数高被当成强证据
-KG_WEAK_RELATIONS = frozenset({"related_to"})
-# 强关系 1 跳 = 直接业务事实；2 跳 = 间接（降为 medium）；≥3 跳 = 弱证据
-KG_STRONG_HOP = 1
-KG_MEDIUM_HOP = 2
-# KG 强关系在该分数以上视为 high（分数只作辅助，不是向量相似度）
-KG_HIGH_SCORE = EVIDENCE_HIGH_THRESHOLD
-
 # ── 聚合阈值（需求 §4：判断"整体证据"，不是单条）───────────────────────────
 # 只有 medium 证据时至少需要几条才算互补（单条中等证据不足以支撑结论）
 GATE_MIN_MEDIUM_EVIDENCE = 2
-# 纯 KG（无 document/resource 证据）时至少需要几条强关系业务事实
-GATE_MIN_KG_STRONG_ONLY = 2
 # unanswerable candidate（可能超出知识库范围）需要更硬的证据
 GATE_UNANSWERABLE_MIN_HIGH = 1
 GATE_UNANSWERABLE_MIN_SOURCES = 2
@@ -93,8 +76,7 @@ RETRY_STRATEGY_BY_CURRENT: dict[str, str] = {
     "prescription_focused": "baseline_hybrid",
     "theory_focused": "baseline_hybrid",
     "literature_focused": "baseline_hybrid",
-    "multi_source": "kg_enhanced",           # 已经是宽召回 → 补 KG 关系证据
-    "kg_enhanced": "multi_source",           # KG 不足 → 放大向量召回
+    "multi_source": "baseline_hybrid",       # 已是最宽 → 回到 Baseline 全局配置
 }
 
 
@@ -120,29 +102,16 @@ def _evidence_score(evidence: dict) -> float:
 def classify_evidence(evidence: dict) -> tuple[str, bool]:
     """单条证据 → (strength, accepted)。
 
-    - document / resource：沿用既有 evidence_level（high ≥ 0.7 / medium ≥ 0.3）
-    - kg：**先看关系与跳数，score 只作辅助**
-        * contains / records + 1 跳 → strong（high/medium 由分数定）
-        * contains / records + 2 跳 → medium（跳数衰减）
-        * related_to（共享标签）或 ≥3 跳 → weak，**不接受**（只能作补充，
-          不得单独支撑结论，更不得据此生成医疗结论）
+    document / resource / structured：沿用既有 evidence_level（high ≥ 0.7 /
+    medium ≥ 0.3），与 Citation 分级完全一致。
     """
-    kind = evidence.get("source_kind") or SOURCE_KIND_DOCUMENT
     score = _evidence_score(evidence)
-
-    if kind == SOURCE_KIND_KG:
-        relation = str(evidence.get("kg_relation") or "")
-        hop = _as_int(evidence.get("kg_hop"), 1)
-        if relation in KG_STRONG_RELATIONS and hop <= KG_STRONG_HOP:
-            return (
-                EVIDENCE_LEVEL_HIGH if score >= KG_HIGH_SCORE else EVIDENCE_LEVEL_MEDIUM
-            ), True
-        if relation in KG_STRONG_RELATIONS and hop <= KG_MEDIUM_HOP:
-            return EVIDENCE_LEVEL_MEDIUM, True
-        # related_to / 未知关系 / 多跳：弱证据
-        return EVIDENCE_LEVEL_INSUFFICIENT, False
-
-    # document / resource：与既有 Citation 分级完全一致
+    level = evidence.get("evidence_level") or evidence_level(score)
+    if level == EVIDENCE_LEVEL_HIGH:
+        return EVIDENCE_LEVEL_HIGH, True
+    if level == EVIDENCE_LEVEL_MEDIUM:
+        return EVIDENCE_LEVEL_MEDIUM, True
+    return EVIDENCE_LEVEL_INSUFFICIENT, False
     level = evidence.get("evidence_level") or evidence_level(score)
     if level == EVIDENCE_LEVEL_HIGH:
         return EVIDENCE_LEVEL_HIGH, True
@@ -189,7 +158,7 @@ def fallback_gate_decision(reason: str, evidence_count: int = 0) -> "GateDecisio
 
 
 def gate_config(enabled: bool | None = None) -> dict:
-    """Gate 配置快照（写入 EvaluationRun.config_snapshot，保证实验可复现）。"""
+    """Gate 配置快照（写入问答响应的 evidence_gate，保证决策可复现）。"""
     if enabled is None:
         enabled = bool(getattr(settings, "EVIDENCE_GATE_ENABLED", True))
     return {
@@ -199,16 +168,8 @@ def gate_config(enabled: bool | None = None) -> dict:
             "evidence_high": EVIDENCE_HIGH_THRESHOLD,
             "evidence_medium": EVIDENCE_MEDIUM_THRESHOLD,
             "min_medium_evidence": GATE_MIN_MEDIUM_EVIDENCE,
-            "min_kg_strong_only": GATE_MIN_KG_STRONG_ONLY,
             "unanswerable_min_high": GATE_UNANSWERABLE_MIN_HIGH,
             "unanswerable_min_sources": GATE_UNANSWERABLE_MIN_SOURCES,
-            "kg_high_score": KG_HIGH_SCORE,
-            "kg_strong_hop": KG_STRONG_HOP,
-            "kg_medium_hop": KG_MEDIUM_HOP,
-        },
-        "kg_relations": {
-            "strong": sorted(KG_STRONG_RELATIONS),
-            "weak": sorted(KG_WEAK_RELATIONS),
         },
         "retry_strategy_by_current": dict(RETRY_STRATEGY_BY_CURRENT),
     }
@@ -277,10 +238,6 @@ class _EvidenceStats:
     kind_counts_total: dict = field(default_factory=dict)
     kind_counts_accepted: dict = field(default_factory=dict)
     vector_accepted: int = 0
-    kg_accepted: int = 0
-    kg_strong: int = 0
-    kg_weak: int = 0
-    kg_relations: dict = field(default_factory=dict)
     sources: set = field(default_factory=set)
     matched_accepted: int = 0
     resource_typed_accepted: int = 0
@@ -300,14 +257,9 @@ def _aggregate(evidence: list[dict], expected_types: list[str]) -> _EvidenceStat
         stats.kind_counts_total[kind] = stats.kind_counts_total.get(kind, 0) + 1
 
         strength, accepted = classify_evidence(ev)
-        if kind == SOURCE_KIND_KG:
-            relation = str(ev.get("kg_relation") or "unknown")
-            stats.kg_relations[relation] = stats.kg_relations.get(relation, 0) + 1
 
         if not accepted:
             stats.weak += 1
-            if kind == SOURCE_KIND_KG:
-                stats.kg_weak += 1
             continue
 
         stats.accepted += 1
@@ -317,16 +269,9 @@ def _aggregate(evidence: list[dict], expected_types: list[str]) -> _EvidenceStat
         else:
             stats.medium += 1
 
-        if kind == SOURCE_KIND_KG:
-            stats.kg_accepted += 1
-            relation = str(ev.get("kg_relation") or "")
-            hop = _as_int(ev.get("kg_hop"), 1)
-            if relation in KG_STRONG_RELATIONS and hop <= KG_STRONG_HOP:
-                stats.kg_strong += 1
-        else:
-            stats.vector_accepted += 1
+        stats.vector_accepted += 1
 
-        # 独立来源（文档 / 资源 / 图谱节点）
+        # 独立来源（文档 / 资源 / 结构化记录）
         sid = ev.get("source_id") or ev.get("resource_id") or ev.get("doc_id")
         stats.sources.add((kind, str(sid) if sid is not None else ev.get("source_name")))
 
@@ -410,10 +355,6 @@ class EvidenceGate:
         stats = _aggregate(evidence, expected_types)
         details = {
             "vector_accepted": stats.vector_accepted,
-            "kg_accepted": stats.kg_accepted,
-            "kg_strong": stats.kg_strong,
-            "kg_weak": stats.kg_weak,
-            "kg_relation_counts": dict(stats.kg_relations),
             "source_kind_counts_total": dict(stats.kind_counts_total),
             "independent_sources": len(stats.sources),
             "matched_accepted": stats.matched_accepted,
@@ -424,8 +365,6 @@ class EvidenceGate:
                 and stats.resource_typed_accepted > 0
                 and stats.matched_accepted == 0
             ),
-            "kg_only": stats.accepted > 0 and stats.vector_accepted == 0,
-            "kg_complement": stats.vector_accepted > 0 and stats.kg_accepted > 0,
             "weak_count": stats.weak,
         }
 
@@ -436,7 +375,7 @@ class EvidenceGate:
                 allow_retry=False, current_strategy=current_strategy,
             )
 
-        # 2) 全部为弱证据（低于阈值 / related_to / 多跳 KG）→ 可尝试换策略
+        # 2) 全部为弱证据（低于阈值）→ 可尝试换策略
         if stats.accepted == 0:
             return self._make(
                 DECISION_RETRY, "no_accepted_evidence", stats, details,
@@ -462,20 +401,7 @@ class EvidenceGate:
                 allow_retry=allow_retry, current_strategy=current_strategy,
             )
 
-        # 5) 纯 KG 证据：弱关系（related_to / 多跳）不得单独支撑结论，
-        #    强关系业务事实（组成/出处）也要求 ≥2 条，避免凭单一关系下结论
-        if details["kg_only"]:
-            if stats.kg_strong < GATE_MIN_KG_STRONG_ONLY:
-                return self._make(
-                    DECISION_RETRY, "kg_only_insufficient_strong", stats, details,
-                    allow_retry=allow_retry, current_strategy=current_strategy,
-                )
-            return self._make(
-                DECISION_ACCEPT, "kg_only_strong_facts", stats, details,
-                allow_retry=False, current_strategy=current_strategy,
-            )
-
-        # 6) unanswerable candidate：需要更硬的证据（强证据 + 多个独立来源）
+        # 5) unanswerable candidate：需要更硬的证据（强证据 + 多个独立来源）
         if unanswerable and (
             stats.high < GATE_UNANSWERABLE_MIN_HIGH
             or len(stats.sources) < GATE_UNANSWERABLE_MIN_SOURCES
@@ -493,8 +419,6 @@ class EvidenceGate:
             reason = "has_high_evidence"
         elif stats.medium >= GATE_MIN_MEDIUM_EVIDENCE:
             reason = "multiple_medium_evidence"
-        elif details["kg_complement"]:
-            reason = "medium_with_kg_complement"
         else:
             reason = "single_medium_evidence"
         return self._make(

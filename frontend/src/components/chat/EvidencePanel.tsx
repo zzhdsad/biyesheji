@@ -368,11 +368,9 @@ export function EvidencePanel({
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginLeft: 4 }}>
             <Tag
               color={
-                group.source_kind === 'kg'
-                  ? 'purple'
-                  : group.source_kind === 'resource'
-                    ? 'geekblue'
-                    : 'blue'
+                group.source_kind === 'resource'
+                  ? 'geekblue'
+                  : 'blue'
               }
               style={{ margin: 0, fontWeight: 500 }}
             >

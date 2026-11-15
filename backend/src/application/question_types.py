@@ -1,14 +1,7 @@
-"""问题类型受控词表（阶段九建立，阶段十一复用）。
+"""问题类型受控词表（Query Analyzer / Dynamic Router 共用）。
 
-阶段九（评测体系）已定义 question_type 词表并写入 test_cases /
-evaluation_runs / evaluation_results。阶段十一的 Query Analyzer 必须复用同一
-词表，而不是另建一套字符串（AGENTS.md §22：不重复定义 question_type）。
-
-历史位置：src/application/evaluation_service.py（词表原在那里定义）。
-为避免 evaluation_service → rag_service → query_analyzer → evaluation_service
-的循环导入，将词表下沉到本模块，evaluation_service 从此处导入并对外重导出，
-旧 import 路径 `from src.application.evaluation_service import QUESTION_TYPES`
-保持可用。
+词表只服务于当前查询分析与路由，不依赖已下线的 evaluation 模块。
+不要为问题类型另建一套字符串（AGENTS.md：不重复定义 question_type）。
 
 - herb         中药知识（性味归经、功效主治、用法用量、配伍禁忌等）
 - prescription 方剂知识（组成、功用、主治、用法、加减等）

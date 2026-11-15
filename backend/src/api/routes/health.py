@@ -59,11 +59,13 @@ async def health() -> dict:
     # Milvus（向量检索不可用时仍允许进程存活，但 status=degraded）
     try:
         store = get_vector_store()
-        await asyncio.wait_for(asyncio.to_thread(store.health), timeout=1.0)
+        # 首次 gRPC 建连/探测可能超过 1s；1s 会把正常 Milvus 误报为 unavailable。
+        # 3s 仍远小于 compose healthcheck 的 5s timeout。
+        await asyncio.wait_for(asyncio.to_thread(store.health), timeout=3.0)
         components["milvus"] = "ok"
     except Exception as exc:
         components["milvus"] = "unavailable"
-        logger.warning(f"健康检查：Milvus 不可用（{exc}）")
+        logger.warning(f"健康检查：Milvus 不可用（{exc!r}）")
 
     all_ok = bool(components) and all(v == "ok" for v in components.values())
     return {

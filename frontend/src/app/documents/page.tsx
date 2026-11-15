@@ -939,9 +939,6 @@ export default function DocumentsPage() {
       width: 360,
       render: (_, row) => {
         const busy = isParsing(row.parse_status);
-        const canReindex =
-          (row.parse_status === 'success' || row.parse_status === 'completed') &&
-          row.chunk_count > 0;
         return (
           <Space size={4} wrap>
             <Tooltip
@@ -977,6 +974,40 @@ export default function DocumentsPage() {
                 下载
               </Button>
             </Tooltip>
+            {!isStructured && (
+              <Tooltip
+                title={
+                  isParsing(row.parse_status)
+                    ? '解析进行中，完成后可向量化'
+                    : row.parse_status === 'failed'
+                      ? '解析失败，请先重新解析'
+                      : row.index_status === 'indexed'
+                        ? '按当前切片重建向量（先清旧向量再重写）'
+                        : '开始向量化，把已切片内容写入 Milvus 供问答检索'
+                }
+              >
+                <Button
+                  size="small"
+                  type={row.index_status === 'indexed' ? 'default' : 'primary'}
+                  ghost
+                  icon={<ThunderboltOutlined />}
+                  disabled={
+                    isParsing(row.parse_status) ||
+                    row.parse_status === 'failed' ||
+                    (row.chunk_count ?? 0) === 0
+                  }
+                  onClick={() => void reindex(row.id)}
+                >
+                  {isParsing(row.parse_status)
+                    ? '解析中'
+                    : row.parse_status === 'failed'
+                      ? '解析失败'
+                      : row.index_status === 'indexed'
+                        ? '重新向量化'
+                        : '开始向量化'}
+                </Button>
+              </Tooltip>
+            )}
             {isStructured && isStructuredFormat(row.file_type) && (
               <Tooltip title="查看识别到的字段、分页浏览知识记录并追溯来源">
                 <Button
@@ -988,38 +1019,60 @@ export default function DocumentsPage() {
                 </Button>
               </Tooltip>
             )}
-            {isStructured &&
-              isStructuredFormat(row.file_type) &&
-              row.structured_status === 'success' &&
-              (row.structured_record_count ?? 0) > 0 && (
-                <Tooltip
-                  title={
-                    row.structured_vector_status === 'completed'
-                      ? '按当前知识记录重建向量（不重新解析、不产生重复向量）'
-                      : '开始为该文件的每条知识记录写入向量（供问答检索）'
+            {isStructured && isStructuredFormat(row.file_type) && (
+              <Tooltip
+                title={
+                  row.structured_status === 'parsing' || row.structured_status === 'pending'
+                    ? '解析完成后可向量化'
+                    : row.structured_status === 'failed'
+                      ? '解析失败，请先重新解析'
+                      : (row.structured_record_count ?? 0) === 0
+                        ? '暂无记录，请先重新解析生成记录'
+                        : row.structured_vector_status === 'completed'
+                          ? '按当前知识记录重建向量（不重新解析、不产生重复向量）'
+                          : '开始为该文件的每条知识记录写入向量（供问答检索）'
+                }
+              >
+                <Button
+                  size="small"
+                  type={
+                    row.structured_vector_status === 'pending' ||
+                    (row.structured_vector_status == null &&
+                      row.structured_status === 'success' &&
+                      (row.structured_record_count ?? 0) > 0)
+                      ? 'primary'
+                      : 'default'
                   }
+                  ghost
+                  icon={<ThunderboltOutlined />}
+                  loading={vectorizingId === row.id}
+                  disabled={
+                    row.structured_vector_status === 'indexing' ||
+                    row.structured_status === 'parsing' ||
+                    row.structured_status === 'pending' ||
+                    row.structured_status === 'failed' ||
+                    (row.structured_record_count ?? 0) === 0
+                  }
+                  onClick={() => void handleStructuredVectorize(row)}
                 >
-                  <Button
-                    size="small"
-                    type={
-                      row.structured_vector_status === 'pending' ? 'primary' : 'default'
-                    }
-                    ghost
-                    icon={<ThunderboltOutlined />}
-                    loading={vectorizingId === row.id}
-                    disabled={row.structured_vector_status === 'indexing'}
-                    onClick={() => void handleStructuredVectorize(row)}
-                  >
-                    {row.structured_vector_status === 'indexing'
-                      ? '向量化中'
-                      : row.structured_vector_status === 'completed'
-                        ? '重新向量化'
-                        : '开始向量化'}
-                  </Button>
-                </Tooltip>
-              )}
+                  {row.structured_vector_status === 'indexing'
+                    ? '向量化中'
+                    : row.structured_status === 'parsing' || row.structured_status === 'pending'
+                      ? '待解析'
+                      : row.structured_status === 'failed'
+                        ? '解析失败'
+                        : (row.structured_record_count ?? 0) === 0
+                          ? '无记录'
+                          : row.structured_vector_status === 'completed'
+                            ? '重新向量化'
+                            : (row.structured_vector_count ?? 0) > 0
+                              ? '继续向量化'
+                              : '开始向量化'}
+                </Button>
+              </Tooltip>
+            )}
             {isStructured && row.structured_vector_status === 'indexing' && (
-              <Tooltip title="停止本次向量化（后端在下一批记录之间退出，已写入的部分向量会被清理）">
+              <Tooltip title="停止本次向量化（后端在下一批记录之间退出，已写入的部分保留，下次继续）">
                 <Button
                   size="small"
                   danger
@@ -1101,13 +1154,6 @@ export default function DocumentsPage() {
                           label: busy ? '解析进行中' : '重新解析',
                           disabled: busy,
                           onClick: () => void reparse(row.id),
-                        },
-                        {
-                          key: 'reindex',
-                          icon: <ThunderboltOutlined />,
-                          label: canReindex ? '重新向量化' : '重新向量化（需先完成解析）',
-                          disabled: !canReindex,
-                          onClick: () => void reindex(row.id),
                         },
                       ]),
                 ],

@@ -122,8 +122,8 @@ services:
       HF_ENDPOINT: https://hf-mirror.com
       EMBEDDING_MODEL_PATH: /app/models/bge-m3
       RERANK_MODEL_PATH: /app/models/bge-reranker-v2-m3
-      OMP_NUM_THREADS: "2"
-      MKL_NUM_THREADS: "2"
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
       HOST_DATA_DIR: ${HOST_DATA_DIR:-./docker-data}
     ports:
       - "8000:8000"
@@ -132,6 +132,12 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # backend 启动时就可能触发结构化向量恢复/KG 已下线，但仍需先拉起
+      # Milvus/MinIO，避免容器先起后长时间 health=degraded。
+      milvus:
+        condition: service_started
+      minio:
+        condition: service_started
     volumes:
       - ${HOST_DATA_DIR:-./docker-data}/uploads:/app/uploads
 

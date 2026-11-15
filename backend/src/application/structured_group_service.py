@@ -52,7 +52,9 @@ from src.utils.structured_relation import (
     LinkBuilder,
     RELATION_KINDS,
     RELATION_ONE_TO_MANY,
+    key_candidates,
     key_candidates_from_probe,
+    match_key,
     validate_group,
 )
 from src.utils.structured_relation import relation_id as build_relation_id
@@ -592,6 +594,119 @@ class StructuredGroupService:
         await self.db.commit()
         await self.db.refresh(group)
         await self._sync_vectors(group.id)
+        return group
+
+    async def suggest_relations(
+        self, group_id: uuid.UUID, *, min_score: float = 0.35, limit: int = 12
+    ) -> StructuredGroup:
+        """基于字段名、主键候选与样本值重叠生成关系建议（建议不等于确认）。
+
+        这是通用启发式，不绑定任何固定数据集/字段名：
+        - 字段名相同/一方以 id 结尾、另一方是唯一键候选 → 基础分；
+        - 样本值规范化后存在重叠 → 覆盖率加分；
+        - 低分建议也保留（origin=suggested、confirmed=False），交由用户逐条确认。
+        已存在的关系不会被覆盖或自动确认。
+        """
+        group = await self.get(group_id)
+        schemas = await self.load_schemas(group_id)
+        if len(schemas) < 2:
+            return group
+
+        existing = [dict(r) for r in (group.relations or [])]
+        seen = {str(r.get("id") or "") for r in existing}
+        suggestions: list[dict[str, Any]] = []
+
+        def _norm(name: str) -> str:
+            return "".join(ch for ch in name.casefold() if ch.isalnum())
+
+        for left in schemas:
+            for right in schemas:
+                if left.doc_id == right.doc_id:
+                    continue
+                right_keys = key_candidates(right, limit=6)
+                if not right_keys:
+                    right_keys = [
+                        {"field": n, "unique": False, "score": 0.0, "type": ""}
+                        for n in right.field_names()
+                        if "id" in n.casefold() or "编号" in n or "代码" in n
+                    ]
+                for left_field in left.field_names():
+                    left_values = {
+                        match_key(rec.get("payload", {}).get(left_field))
+                        for rec in left.records[:200]
+                    }
+                    left_values.discard("")
+                    left_norm = _norm(left_field)
+                    for key in right_keys:
+                        right_field = str(key.get("field") or "")
+                        if not right_field:
+                            continue
+                        right_norm = _norm(right_field)
+                        score = 0.0
+                        reasons: list[str] = []
+                        if left_norm == right_norm:
+                            score += 0.5
+                            reasons.append("字段名一致")
+                        elif left_norm.endswith("id") and right_norm == "id":
+                            score += 0.28
+                            reasons.append("外键字段指向唯一主键")
+                        elif left_norm.endswith("id") and right_norm.endswith("id"):
+                            score += 0.16
+                            reasons.append("双方都是标识字段")
+                        elif left_norm in right_norm or right_norm in left_norm:
+                            score += 0.1
+                            reasons.append("字段名存在包含关系")
+                        if left.field_type(left_field) == right.field_type(right_field):
+                            score += 0.08
+                            reasons.append("字段类型一致")
+                        if key.get("unique"):
+                            score += 0.12
+                            reasons.append("目标字段值唯一")
+                        if left_values:
+                            right_values = {
+                                match_key(rec.get("payload", {}).get(right_field))
+                                for rec in right.records[:200]
+                            }
+                            right_values.discard("")
+                            overlap = len(left_values & right_values) / max(1, len(left_values))
+                            score += min(0.3, overlap * 0.3)
+                            if overlap > 0:
+                                reasons.append(f"样本值重叠 {overlap:.0%}")
+                        if score < min_score:
+                            continue
+                        rid = build_relation_id(
+                            left.doc_id, left_field, right.doc_id, right_field
+                        )
+                        if rid in seen:
+                            continue
+                        seen.add(rid)
+                        confidence = round(min(0.98, score), 3)
+                        suggestions.append(
+                            {
+                                "from_doc_id": left.doc_id,
+                                "from_field": left_field,
+                                "to_doc_id": right.doc_id,
+                                "to_field": right_field,
+                                "kind": RELATION_ONE_TO_MANY,
+                                "origin": "suggested",
+                                "confirmed": False,
+                                "confidence": confidence,
+                                "score": int(round(confidence * 100)),
+                                "tier": (
+                                    "high"
+                                    if confidence >= 0.9
+                                    else "medium"
+                                    if confidence >= 0.7
+                                    else "low"
+                                ),
+                                "reason": "；".join(reasons) or "字段/值特征匹配",
+                            }
+                        )
+
+        suggestions.sort(key=lambda item: (-item["score"], item["from_doc_id"], item["from_field"]))
+        if suggestions:
+            await self.save_relations(group_id, existing + suggestions[:limit])
+            return await self.get(group_id)
         return group
 
     async def set_relation_confirmation(

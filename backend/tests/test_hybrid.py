@@ -1,5 +1,7 @@
 """混合检索与重排序测试：RRF 融合、MockRerank、稀疏召回、端到端集成。"""
 
+import uuid
+
 from src.core.config import settings
 from src.infrastructure.rerank import MockRerank
 from src.utils.retrieval import rrf_fusion
@@ -153,7 +155,8 @@ def test_mock_rerank_empty_candidates():
 
 
 def _make_kb(client) -> str:
-    r = client.post("/api/v1/kb", json={"name": "混合检索测试库"}).json()
+    name = f"混合检索测试库-{uuid.uuid4().hex[:8]}"
+    r = client.post("/api/v1/kb", json={"name": name}).json()
     return r["id"]
 
 

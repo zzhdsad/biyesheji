@@ -7,6 +7,9 @@ venv/
 .ruff_cache/
 logs/
 uploads/
+# 测试上传目录（conftest 自动把 UPLOAD_DIR 改为 uploads_test 并清理）
+backend/uploads_test/
+uploads_test/
 # 本地数据库转储与备份（仅离线保留，禁止入库）
 /backups/
 *.dump

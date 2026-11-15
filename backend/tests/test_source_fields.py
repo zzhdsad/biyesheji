@@ -90,7 +90,11 @@ def test_inmemory_store_unlabeled_fields_are_none():
 
 
 def _upload_txt(client, kb_id, name, form=None):
-    text = "# 伤寒论\n\n" + "\n\n".join(f"第{i}条，" + "太阳病" * 100 for i in range(3))
+    text = (
+        "# 伤寒论\n\n"
+        + "\n\n".join(f"第{i}条，" + "太阳病" * 100 for i in range(3))
+        + f"\n\n来源文件：{name}"
+    )
     resp = client.post(
         "/api/v1/documents/upload",
         data=form or {"kb_id": kb_id},

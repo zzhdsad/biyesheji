@@ -31,7 +31,6 @@
 【实验能力】
 26  EvaluationRun.retrieval_strategy 复用：固定策略真正驱动检索参数
 27  use_dynamic_router 逐条记录策略 + config_snapshot 记录 router_version
-28  GET /evaluation/strategies 返回策略清单
 
 说明：
 - 单元测试不依赖任何外部中间件（Milvus / PostgreSQL / LLM）
@@ -46,15 +45,10 @@ from dataclasses import replace
 import pytest
 
 from src.application.dynamic_router import (
-    DYNAMIC_ROUTER_STRATEGY,
     ROUTER_VERSION,
     DynamicRouter,
     RouterDecision,
     fallback_decision,
-)
-from src.application.evaluation_service import (
-    BASELINE_RETRIEVAL_STRATEGY,
-    EvaluationService,
 )
 from src.application.query_analyzer import QueryAnalyzer, analyze_query
 from src.application.rag_service import RagService
@@ -71,11 +65,6 @@ from src.application.retrieval_strategies import (
 from src.core.config import settings
 from src.infrastructure.milvus_store import InMemoryVectorStore, VectorRow
 from tests.test_chat import _upload_doc
-from tests.test_evaluation_experiment import (  # noqa: F401  复用既有评测夹具/工具
-    _case,
-    _session,
-    eval_kb,
-)
 from tests.test_parse import _make_kb
 from tests.test_upload import PG_AVAILABLE
 
@@ -378,7 +367,7 @@ def test_unknown_strategy_returns_none():
     assert get_strategy(None) is None
     assert get_strategy("") is None
     # 阶段九历史标签不在注册表中 → 按 Baseline 行为执行
-    assert get_strategy(BASELINE_RETRIEVAL_STRATEGY) is None
+    assert get_strategy("hybrid_rrf_rerank_hyde") is None
 
 
 # ── 18. 确定性 ──────────────────────────────────────────────────────────────
@@ -660,108 +649,10 @@ def test_router_exception_falls_back_to_baseline(client, monkeypatch):
 # ── 集成：EvaluationRun.retrieval_strategy 复用 ─────────────────────────────
 
 
-@pytest.fixture
-def _recorded_rag(monkeypatch):
-    """记录检索调用收到的策略参数（验证策略真正驱动检索）。"""
-    calls: list[dict] = []
-
-    async def _rec(self, kb_ids, question, history=None, strategy=None,
-                   resource_types=None, analysis=None, router_decision=None):
-        calls.append({
-            "strategy": strategy.name if strategy else None,
-            "resource_types": resource_types or [],
-        })
-        return f"模拟答案：{question}", [
-            {"content": f"模拟上下文：{question}", "score": 0.9}
-        ]
-
-    monkeypatch.setattr(RagService, "retrieve_and_answer", _rec)
-    return calls
+# 评估模块已彻底删除：原 `_recorded_rag` fixture 与 3 个 EvaluationService
+# 直连用例（fixed_strategy_drives_retrieval / legacy_strategy_label_keeps_baseline_
+# behavior / dynamic_router_run_records_per_case_strategy）随之下线。
 
 
-@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
-async def test_fixed_strategy_drives_retrieval(client, eval_kb, _recorded_rag):
-    """固定策略运行：策略真正传给检索层，并归档到 evaluation_runs。"""
-    async with _session() as db:
-        svc = EvaluationService(db)
-        await svc.save_test_set(
-            eval_kb, [_case(f"黄芪-{uuid.uuid4().hex[:8]}", question_type="herb")],
-            dataset_version="tcm-v1",
-        )
-        run, results = await svc.run(
-            eval_kb, experiment_name="strategy_probe",
-            retrieval_strategy="herb_focused",
-        )
-
-        assert run.retrieval_strategy == "herb_focused"
-        assert results[0].retrieval_strategy == "herb_focused"
-        assert _recorded_rag[0]["strategy"] == "herb_focused"
-        # 固定策略的资源过滤来自策略静态配置
-        assert run.config_snapshot["strategy"]["strategy_name"] == "herb_focused"
-        assert run.config_snapshot["router"]["router_version"] == ROUTER_VERSION
-
-
-@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
-async def test_legacy_strategy_label_keeps_baseline_behavior(
-    client, eval_kb, _recorded_rag,
-):
-    """阶段九历史策略标签不在注册表 → 按 Baseline 行为执行，标签照原样归档。"""
-    async with _session() as db:
-        svc = EvaluationService(db)
-        await svc.save_test_set(
-            eval_kb, [_case(f"旧标签-{uuid.uuid4().hex[:8]}", question_type="general")],
-            dataset_version="tcm-v1",
-        )
-        run, _ = await svc.run(
-            eval_kb, retrieval_strategy=BASELINE_RETRIEVAL_STRATEGY,
-        )
-        assert run.retrieval_strategy == BASELINE_RETRIEVAL_STRATEGY
-        # 未识别 → strategy=None → Baseline 参数（行为与阶段十一及之前一致）
-        assert _recorded_rag[0]["strategy"] is None
-
-
-@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
-async def test_dynamic_router_run_records_per_case_strategy(client, eval_kb, _recorded_rag):
-    """use_dynamic_router：逐条 Analyzer → Router，策略按 question_type 落到结果。"""
-    suffix = uuid.uuid4().hex[:8]
-    async with _session() as db:
-        svc = EvaluationService(db)
-        await svc.save_test_set(
-            eval_kb,
-            [
-                _case(f"金银花有什么功效？-{suffix}", question_type="herb"),
-                _case(f"银翘散由哪些药物组成？-{suffix}", question_type="prescription"),
-                _case(f"公司实行什么工时制度？-{suffix}", question_type="general"),
-            ],
-            dataset_version="tcm-v1",
-        )
-        run, results = await svc.run(eval_kb, use_dynamic_router=True)
-
-        assert run.retrieval_strategy == DYNAMIC_ROUTER_STRATEGY
-        assert run.config_snapshot["router"]["dynamic_router"] is True
-        by_type = {r.question_type: r.retrieval_strategy for r in results}
-        assert by_type == {
-            "herb": "herb_focused",
-            "prescription": "prescription_focused",
-            "general": BASELINE_STRATEGY,
-        }
-        # 每条用例确实按自己的策略执行检索
-        assert [c["strategy"] for c in _recorded_rag] == [
-            "herb_focused", "prescription_focused", BASELINE_STRATEGY,
-        ]
-
-
-@pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
-def test_strategies_endpoint_lists_all_strategies(client):
-    """GET /evaluation/strategies：策略清单 + 生效参数（实验对比用）。"""
-    resp = client.get("/api/v1/evaluation/strategies")
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
-    assert body["default_strategy"] == BASELINE_STRATEGY
-    assert set(body["names"]) == set(strategy_names())
-    by_name = {s["name"]: s for s in body["strategies"]}
-    assert len(by_name) == len(strategy_names())
-    assert len(by_name) >= 6  # 阶段十二的六类基础策略不得被删除
-    assert by_name["baseline_hybrid"]["config"]["recall_top_k"] == settings.RECALL_TOP_K
-    assert by_name["literature_focused"]["config"]["hyde_enabled"] is False
-    assert by_name["multi_source"]["resource_types_from_analysis"] is True
+# 原「GET /evaluation/strategies」API 用例随评估模块下线移除
+# （策略注册与生效参数由 test_retrieval_strategies.py 覆盖）。

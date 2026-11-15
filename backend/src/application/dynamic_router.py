@@ -35,17 +35,10 @@ from src.application.question_types import QUESTION_TYPES
 # 路由规则版本：规则变更时递增，写入 RouterDecision 与配置快照（实验可追溯）
 # rule-v1：阶段十二（question_type / resource_types → 六类策略）
 # rule-v2：阶段十三新增 kg_enhanced（明显实体关系查询），其余映射保持不变
-ROUTER_VERSION = "rule-v2"
+# rule-v3：知识图谱（KG）功能下线，移除 kg_enhanced 路由规则，其余映射保持不变
+ROUTER_VERSION = "rule-v3"
 
-# 阶段十三：走 KG 增强策略的问题类型。
-# 依据：现有 KG 最可靠的关系是「方剂 → contains → 中药」与「文献 → records → 资源」，
-# 因此只对 herb / prescription 类、且识别出多个实体的"关系型/比较型"查询启用 KG；
-# theory / literature 类仍走原有聚焦策略（其 KG 关系仅来自共享标签，证据性弱）。
-KG_RELATION_QUESTION_TYPES = frozenset({"herb", "prescription"})
-# 关系型查询的实体数下限（单实体提问通常是"某药功效"这类属性查询，KG 无增量）
-KG_MIN_ENTITIES = 2
-
-# 动态路由实验的 run 级标签（写入 EvaluationRun.retrieval_strategy）
+# 动态路由的实验标签（写入问答响应的 router_decision）
 DYNAMIC_ROUTER_STRATEGY = "dynamic_router"
 
 # question_type → 策略映射（兜底 unknown → Baseline）
@@ -133,36 +126,15 @@ def fallback_decision(analysis: QueryAnalysis | None, reason: str) -> RouterDeci
     )
 
 
-def _is_kg_relation_query(analysis: QueryAnalysis) -> bool:
-    """阶段十三：判断是否为"明显实体关系查询"（→ kg_enhanced）。
-
-    规则（简单、确定、可测试）：分析结果有效 + question_type 属于
-    KG_RELATION_QUESTION_TYPES + Query Analyzer 识别出 ≥ KG_MIN_ENTITIES 个实体。
-    不重新解析原始 query，只消费 QueryAnalysis 的既有字段。
-    """
-    if not getattr(analysis, "is_valid", False):
-        return False
-    if getattr(analysis, "question_type", None) not in KG_RELATION_QUESTION_TYPES:
-        return False
-    entities = [
-        e
-        for e in (getattr(analysis, "entities", None) or [])
-        if isinstance(e, dict) and e.get("text")
-    ]
-    return len(entities) >= KG_MIN_ENTITIES
-
-
 def _select(analysis: QueryAnalysis) -> tuple[str, str]:
     """路由规则本体（纯函数）：返回 (strategy_name, reason)。
 
     优先级（需求 §10）：
     1. 明确 multi_source（is_multi_source / question_type=multi_source / ≥2 类资源）
-    2. 阶段十三：明显实体关系查询 → kg_enhanced
-       （multi_source 保持阶段十二既有映射，不被抢占）
-    3. 明确单一资源类型 → 对应聚焦策略
-    4. question_type 映射
-    5. general → Baseline
-    6. 兜底 → Baseline
+    2. 明确单一资源类型 → 对应聚焦策略
+    3. question_type 映射
+    4. general → Baseline
+    5. 兜底 → Baseline
     """
     rtypes = [t for t in (analysis.resource_types or []) if t]
     suffix = f"question_type={analysis.question_type}; resource_types={rtypes}"
@@ -173,24 +145,19 @@ def _select(analysis: QueryAnalysis) -> tuple[str, str]:
     if analysis.is_multi_source or len(rtypes) >= 2 or analysis.question_type == "multi_source":
         return "multi_source", suffix
 
-    # 2) 阶段十三：明显实体关系查询 → KG 增强
-    if _is_kg_relation_query(analysis):
-        entities = [e.get("text") for e in (analysis.entities or []) if e.get("text")]
-        return "kg_enhanced", f"{suffix}; entities={entities}"
-
-    # 3) 单一资源类型
+    # 2) 单一资源类型
     if len(rtypes) == 1:
         focused = FOCUSED_STRATEGY_BY_RESOURCE_TYPE.get(rtypes[0])
         if focused:
             return focused, suffix
         logger.warning(f"未知资源类型 {rtypes[0]!r}，按 question_type 兜底路由")
 
-    # 4) question_type 映射（含 general / unanswerable → Baseline）
+    # 3) question_type 映射（含 general / unanswerable → Baseline）
     mapped = _STRATEGY_BY_QUESTION_TYPE.get(analysis.question_type)
     if mapped:
         return mapped, suffix
 
-    # 5) 兜底
+    # 4) 兜底
     return BASELINE_STRATEGY, f"{suffix}; unknown_question_type"
 
 

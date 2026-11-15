@@ -133,36 +133,24 @@ describe('阶段十六：SSE 事件顺序与解析', () => {
     assert.equal(reflection.revised, true);
   });
 
-  it('citations 事件保留 KG 证据与 Evidence Gate 数据', async () => {
-    const kg = [
-      {
-        chunk_id: 'kg:e1',
-        source_index: 2,
-        doc_id: 'kg:e1',
-        doc_name: '金银花',
-        content: '银翘散 → contains → 金银花',
-        score: 0.9,
-        source_kind: 'kg',
-        source_label: '图谱·中药',
-        resource_type: 'herb',
-      },
-    ];
+  it('citations 事件保留 Evidence Gate 数据与多余未知字段容忍', async () => {
     const text =
       event('citations', {
-        citations: [...CITATIONS, ...kg],
-        evidence: [...CITATIONS, ...kg],
-        evidence_groups: [{ group_key: 'kg:herb' }, { group_key: 'document' }],
-        evidence_summary: { evidence_count: 2, group_count: 2 },
-        kg_evidence: kg,
+        citations: CITATIONS,
+        evidence: CITATIONS,
+        evidence_groups: [{ group_key: 'document' }],
+        evidence_summary: { evidence_count: 1, group_count: 1 },
+        // KG 证据切片（kg_evidence）已随 KG 下线移除；SSE 解析必须容忍后端
+        // 多余/未知字段，不影响 citations 与 evidence_gate 的正常透传
+        unknown_future_field: { ignored: true },
         evidence_gate: { decision: 'accept', gate_version: 'gate-v1' },
       }) + event('done', { conversation_id: 'c', message_id: 'm' });
     const { events } = await collect(text);
 
     const citationsEvent = events.find((e) => e.name === 'citations');
     assert.ok(citationsEvent);
-    assert.equal((citationsEvent.data.kg_evidence as unknown[]).length, 1);
-    assert.equal((citationsEvent.data.citations as unknown[]).length, 2);
-    assert.equal((citationsEvent.data.evidence_groups as unknown[]).length, 2);
+    assert.equal((citationsEvent.data.citations as unknown[]).length, CITATIONS.length);
+    assert.equal((citationsEvent.data.evidence_groups as unknown[]).length, 1);
     assert.deepEqual(citationsEvent.data.evidence_gate, {
       decision: 'accept',
       gate_version: 'gate-v1',

@@ -61,10 +61,10 @@ export interface Citation {
   credibility_level?: number | null;
   /**
    * 来源类别：document（上传文献） / resource（中药·方剂·理论·文献条目） /
-   * kg（阶段十三知识图谱关系证据） / structured（结构化数据记录） /
-   * structured_group（关联数据记录），与后端 SOURCE_KIND_LABELS 一致。
+   * structured（结构化数据记录） / structured_group（关联数据记录），
+   * 与后端 SOURCE_KIND_LABELS 一致。
    */
-  source_kind?: 'document' | 'resource' | 'kg' | 'structured' | 'structured_group';
+  source_kind?: 'document' | 'resource' | 'structured' | 'structured_group';
   /** 文档所属知识库（来源定位链接用；历史数据可能为空） */
   kb_id?: string | null;
   /** 证据等级：high / medium / insufficient */
@@ -99,10 +99,6 @@ export interface Citation {
   /** 来源分类展示标签：文档 / 中药 / 方剂 / 理论 / 文献 */
   source_label?: string;
   evidence_text?: string;
-  // ── 阶段十四：KG 关系属性（BUG-065：非流式路径此前丢失，现后端统一声明）──
-  kg_relation?: string | null;
-  kg_hop?: number | null;
-  kg_provenance?: string | null;
   // ── 相关度展示（BUG-（相关度 3%））：BGE-M3 dense cosine，由后端
   //    application/evidence.py:hit_to_evidence 写入 evidence dict，
   //    /chat/ask-stream 流式 dict 直传已含此字段；/chat/ask 同步路径此前
@@ -281,8 +277,6 @@ export interface ChatMessage {
   queryAnalysis?: QueryAnalysis;
   /** 阶段十二：检索策略路由决策（流式由 start 事件下发） */
   routerDecision?: RouterDecision;
-  /** 阶段十三：KG 关系证据切片（流式由 citations 事件下发；citations 已包含，此处为同一份数据的视图） */
-  kgEvidence?: Citation[];
   /** 阶段十四：证据门控决策（流式由 citations 事件下发） */
   evidenceGate?: GateDecision;
   /** 阶段十五：自反思决策（流式由 done 事件下发） */
@@ -560,7 +554,7 @@ export interface StructuredGroup {
   vectorized_at?: string | null;
 }
 
-/** 一条关联关系：manual 是用户手动选字段；suggested 仅兼容历史遗留数据。 */
+/** 一条关联关系：manual 是用户手动选字段；suggested 是系统推荐（需人工确认）。 */
 export interface StructuredRelation {
   id: string;
   from_doc_id: string;

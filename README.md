@@ -1,18 +1,18 @@
 # 中医药知识资源管理与智能问答系统
 
-面向中医药知识学习与查询的知识资源管理平台：统一管理中药、方剂、中医理论、经典及现代文献，并提供基于 RAG 的智能问答、证据引用、知识图谱与评测能力。
+面向中医药知识学习与查询的文档管理与智能问答平台：统一管理知识库中的普通文档、结构化数据和关联结构化数据，并提供基于 RAG 的问答与证据引用能力。
 
 系统首先是知识资源管理系统，AI 问答是增强模块，不提供医疗诊断、自动处方或面向具体患者的治疗方案。
 
 ## 核心能力
 
 - 用户、角色、权限、审计与回收站
-- 知识库、文档上传 / 解析 / 切片 / 向量化
-- 中药、方剂、中医理论、文献的 CRUD、分类、标签与检索
-- 知识数据导入中心、批次溯源、测试数据清理
-- RAG 问答：HyDE、BGE-M3 Dense + Sparse、RRF、Reranker、Evidence Gate、Citation、多轮、SSE
-- 研究增强：Query Analyzer、Dynamic Router、KG Retrieval、Self Reflection、多来源证据
-- 评测：测试集、RAGAS 风格指标、实验归档、策略 / Gate / Reflection 消融
+- 文档管理：普通文档上传 / 解析 / 切片 / 向量化，文件夹整理、预览、下载、替换、回收站
+- 结构化数据：CSV / TSV / XLSX / JSON 等文件解析、字段识别、记录浏览、向量化
+- 关联结构化数据：多文件组、字段/外键配置、关系推荐与人工确认、关联记录生成与向量化
+- 统一 RAG：HyDE、BGE-M3 Dense + Sparse、RRF、Reranker、Evidence Gate、Citation、多轮、SSE
+- 大文件向量化：CPU int8 动态量化、动态文本长度、分批进度；停止后保留断点，下次继续
+- 研究增强：Query Analyzer、Dynamic Router、Self Reflection、多来源证据
 
 ## 技术栈
 
@@ -32,7 +32,7 @@ backend/
 │   ├── api/routes/       # FastAPI 路由
 │   ├── core/             # 配置、鉴权、RBAC、异常、运行时配置
 │   ├── domain/           # SQLAlchemy ORM 模型
-│   ├── application/      # 文档、资源、RAG、Router、Gate、评测、KG、导入
+│   ├── application/      # 文档、结构化数据、RAG、Router、Gate、关系生成
 │   ├── infrastructure/   # DB / Redis / Milvus / 模型 / 解析 / 存储
 │   └── utils/            # 切片、RRF、检索工具
 ├── alembic/              # 数据库迁移
@@ -94,20 +94,17 @@ npm run dev
 
 - 只安装 `requirements.txt` 时，默认 `flagembedding` 向量化不可用；本地完整问答需要 `requirements-ai.txt`。
 - 未启动 PostgreSQL/Redis 时后端仍可启动，`/health` 标记 `degraded`；但问答、检索、导入需要完整依赖。
-- 文档上传支持 PDF / DOCX / TXT / MD；Parquet 导入需要 `pyarrow`（已列入 `requirements.txt`）。
+- 文档上传支持 PDF / DOCX / XLSX / PPTX / TXT / MD / CSV / TSV / 图片；结构化数据支持 CSV / TSV / XLSX / JSON，Parquet 导入需要 `pyarrow`（已列入 `requirements.txt`）。
 
 ## 页面
 
 - `/chat`：智能问答、知识库选择、多轮会话、引用证据
-- `/documents`：文档上传、状态筛选、重新向量化、回收站
+- `/documents`：普通文档与结构化数据、文件夹、上传/预览/替换、关联数据组、回收站
 - `/kb`：知识库、成员、回收站
-- `/taxonomy`：分类与标签
-- `/evaluation`：测试集、评估、实验对比
 - `/users`：用户与回收站
 - `/audit`：审计日志
 - `/settings`：模型配置、向量状态、系统参数
 - `/admin`：系统仪表盘
-- `/admin/import`：知识数据导入中心
 - `/login`：登录
 
 ## 测试
@@ -124,7 +121,6 @@ npm run lint
 
 ## 质量门禁
 
-- 评测答案正确度默认 ≥ 75% 才允许合入
 - 后端修改跑相关 pytest，前端检查 lint / build
 - RAG 核心链路修改后进行实际问答测试
 - 详细规则见 [AGENTS.md](AGENTS.md)、[PRD.md](PRD.md)、[TECH_DESIGN.md](TECH_DESIGN.md)
@@ -135,7 +131,7 @@ Docker Compose 已把业务数据绑定到项目根目录 `docker-data/`：
 
 ```text
 docker-data/
-├── postgres/   # 用户、知识库、文档元数据、资源、会话、评测
+├── postgres/   # 用户、知识库、文档元数据、结构化记录、会话
 ├── redis/      # 会话缓存
 ├── etcd/       # Milvus 元数据
 ├── minio/      # Milvus 对象数据

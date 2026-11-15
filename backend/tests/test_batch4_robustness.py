@@ -204,19 +204,8 @@ async def test_old_collection_resource_hits_are_not_queried_as_documents():
     assert hits[0]["source_kind"] == "resource", "不得误标为 document 证据"
 
 
-async def test_kg_hits_keep_kg_source_kind():
-    """KG 命中 doc_id = "kg:<id>"（非 UUID）→ 归入资源分支，保留 source_kind=kg。"""
-    hits = [{
-        "id": "kg:1", "doc_id": "kg:1", "kb_id": None, "content": "黄芪-补气",
-        "score": 0.7, "chunk_index": 0, "source_kind": "kg",
-        "resource_type": "herb", "resource_name": "黄芪",
-    }]
-    async with _session() as db:
-        svc = RagService(db, store=_FakeStore([]), cache=InMemoryConversationCache())
-        await svc._enrich_hits_with_doc_name(hits)
-
-    assert hits[0]["source_kind"] == "kg"
-    assert hits[0]["doc_name"] == "黄芪"
+# 原「KG 命中保留 source_kind=kg」用例随知识图谱功能下线移除
+# （resource 命中元数据回填由 test_old_collection_resource_hits_are_not_queried_as_documents 覆盖）。
 
 
 # ── BUG-035：SSE 心跳与总超时 ────────────────────────────────────────────────

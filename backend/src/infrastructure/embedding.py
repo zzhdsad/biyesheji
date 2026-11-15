@@ -60,6 +60,18 @@ class BGE3Embedding(BaseEmbedding):
             use_fp16=_device != "cpu",
             device=_device,
         )
+        if _device == "cpu" and settings.EMBEDDING_QUANTIZE:
+            try:
+                import torch
+
+                self._model.model = torch.quantization.quantize_dynamic(
+                    self._model.model,
+                    {torch.nn.Linear},
+                    dtype=torch.qint8,
+                )
+                logger.info("BGE-M3 CPU 动态量化已启用（int8 Linear）")
+            except Exception as exc:  # noqa: BLE001 - 量化失败回退全精度
+                logger.warning(f"BGE-M3 CPU 动态量化失败，回退全精度：{exc}")
 
     @staticmethod
     def _resolve_model_path(model_name: str | None) -> str:
@@ -76,10 +88,15 @@ class BGE3Embedding(BaseEmbedding):
     def encode(self, texts: list[str]) -> tuple[list[list[float]], list[dict[int, float]]]:
         if not texts:
             return [], []
+        # 结构化记录通常只有几十到几百字，固定 max_length=1024 会让 CPU 把大量
+        # padding 也算进注意力；按本批最长文本动态截断，长文档仍保留 1024 上限。
+        # 中文字符数接近 token 数，+16 给标点和特殊 token 留余量。
+        max_chars = max(len(text) for text in texts)
+        max_length = min(1024, max(128, max_chars + 16))
         out = self._model.encode(
             texts,
             batch_size=settings.EMBEDDING_BATCH_SIZE,
-            max_length=1024,
+            max_length=max_length,
             return_dense=True,
             return_sparse=True,
             return_colbert_vecs=False,

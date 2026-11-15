@@ -35,6 +35,10 @@ from src.application.structured_runner import (
     run_structured_parse_safely,
     run_structured_vectorize_safely,
 )
+from src.application.structured_vector_service import (
+    VECTOR_CANCEL_MARKER,
+    resume_checkpoint,
+)
 from src.core.exceptions import AppException, NotFoundError
 from src.core.file_spaces import STRUCTURED_SPACE
 from src.domain.models import (
@@ -359,11 +363,18 @@ async def revectorize_document(
     ) or is_structured_vector_job_active("document", str(doc.id)):
         raise AppException(409, "该文件已在向量化队列中或正在向量化，请稍后刷新查看结果")
 
-    # 先占位再入队：排队期间显示 pending，真正开始 Embedding 才转为 indexing
+    # 续跑：上次被用户停止的 pending 保留计数和停止标记；其余情况从 0 重建。
+    resume_count = resume_checkpoint(
+        row.vector_status, row.vector_count, row.vector_error
+    )
     await db.execute(
         update(StructuredParse)
         .where(StructuredParse.doc_id == doc.id)
-        .values(vector_status=VECTOR_STATUS_PENDING, vector_error="")
+        .values(
+            vector_status=VECTOR_STATUS_PENDING,
+            vector_count=resume_count,
+            vector_error=VECTOR_CANCEL_MARKER if resume_count else "",
+        )
     )
     await db.commit()
     background_tasks.add_task(run_structured_vectorize_safely, str(doc.id))
@@ -404,8 +415,8 @@ async def cancel_vectorize_document(
             .where(StructuredParse.doc_id == doc.id)
             .values(
                 vector_status=VECTOR_STATUS_PENDING,
-                vector_count=0,
-                vector_error="已停止向量化",
+                vector_count=row.vector_count,
+                vector_error=VECTOR_CANCEL_MARKER,
             )
         )
         await db.commit()

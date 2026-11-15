@@ -5,6 +5,7 @@
 """
 
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -12,6 +13,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from src.api.routes import documents as documents_route
+from src.domain.models import Document
 
 
 class _Rows:
@@ -37,13 +39,30 @@ async def test_list_documents_sets_total_header_and_limit(monkeypatch):
     )
     db = MagicMock()
     db.scalar = AsyncMock(return_value=2)
-    db.scalars = AsyncMock(return_value=_Rows([object()]))
+    now = datetime.now(timezone.utc)
+    row = Document(
+        id=uuid.uuid4(),
+        kb_id=kb_id,
+        file_name="分页测试.txt",
+        file_type="txt",
+        file_size=1,
+        parse_status="completed",
+        chunk_count=1,
+        error_message="",
+        space="document",
+        index_status="not_indexed",
+        vector_count=0,
+        created_at=now,
+        updated_at=now,
+    )
+    db.scalars = AsyncMock(return_value=_Rows([row]))
     response = Response()
 
     rows = await documents_route.list_documents(
         request=request,
         response=response,
         kb_id=kb_id,
+        space="document",
         limit=1,
         offset=0,
         db=db,
@@ -70,6 +89,7 @@ async def test_list_documents_forbidden_kb_returns_empty_with_zero_total(monkeyp
         request=request,
         response=response,
         kb_id=uuid.uuid4(),
+        space="document",
         limit=1,
         offset=0,
         db=MagicMock(),

@@ -122,6 +122,18 @@ class BGERerank(BaseRerank):
             self._model = FlagReranker(
                 self._model_name, use_fp16=use_fp16
             )
+            if self._device == "cpu" and settings.RERANK_QUANTIZE:
+                try:
+                    import torch
+
+                    self._model.model = torch.quantization.quantize_dynamic(
+                        self._model.model,
+                        {torch.nn.Linear},
+                        dtype=torch.qint8,
+                    )
+                    logger.info("Reranker CPU 动态量化已启用（int8 Linear）")
+                except Exception as exc:  # noqa: BLE001 - 量化失败回退全精度
+                    logger.warning(f"Reranker CPU 动态量化失败，回退全精度：{exc}")
             logger.info(f"Reranker 加载完成：{self._model_name}")
         except Exception as exc:
             raise RerankError(
@@ -146,9 +158,21 @@ class BGERerank(BaseRerank):
             return []
         model = self._get_model()
         pairs = [[query, c.get("content", "")] for c in candidates]
+        # 证据通常只有几十到几百字，按本批最长证据动态截断，避免 Cross-Encoder
+        # 对超长 padding 做无效计算；长文档仍保留配置上限。
+        max_content = max((len(str(c.get("content", ""))) for c in candidates), default=1)
+        max_length = min(
+            int(settings.RERANK_MAX_LENGTH or 512),
+            max(128, max_content + 32),
+        )
         try:
             # normalize=True 输出 sigmoid 归一化分数（0-1）
-            scores = model.compute_score(pairs, normalize=True)
+            scores = model.compute_score(
+                pairs,
+                batch_size=max(1, int(settings.RERANK_BATCH_SIZE or 32)),
+                max_length=max_length,
+                normalize=True,
+            )
         except Exception as exc:
             raise RerankError(f"Reranker 打分失败：{exc}") from exc
         # compute_score 单条返回 float，多条返回 list

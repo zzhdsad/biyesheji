@@ -155,7 +155,28 @@ def locate_text(row: StructuredRecord) -> str:
 
 
 class VectorizeCancelled(Exception):
-    """用户主动停止向量化（批次之间检查，已写入的部分向量由调用方清理）。"""
+    """用户主动停止向量化；携带已写入条数，供断点续跑使用。"""
+
+    def __init__(self, written: int = 0) -> None:
+        super().__init__("vectorize cancelled")
+        self.written = max(0, int(written))
+
+
+VECTOR_CANCEL_MARKER = "已停止向量化，可继续"
+
+
+def resume_checkpoint(status: str | None, count: int, error: str | None) -> int:
+    """判断是否可以从上一次停止处续跑。
+
+    只有「pending + 有已写入条数 + 停止标记」才算断点；完成后的再次向量化
+    不应把旧计数当作断点，否则会漏写。"""
+    if status != VECTOR_STATUS_PENDING:
+        return 0
+    if int(count or 0) <= 0:
+        return 0
+    if not str(error or "").startswith("已停止向量化"):
+        return 0
+    return int(count)
 
 
 def _progress_chunk() -> int:
@@ -243,13 +264,28 @@ class StructuredVectorService:
                 await self._set_parse_status(doc.id, VECTOR_STATUS_PENDING, 0, "")
             return 0
 
+        # 续跑：只有「上次被用户停止」的 pending 才从已写入条数继续；
+        # completed 后再次点击仍是整份重建，不能把旧计数当断点。
+        resume_count = resume_checkpoint(
+            parse.vector_status, parse.vector_count, parse.vector_error
+        )
+        resume_keep_ids = (
+            await self._resume_record_vector_ids(doc.id, resume_count)
+            if resume_count
+            else set()
+        )
         # 排队期间保持 pending，真正开始 Embedding 才置 indexing（前端可区分等待/执行）
-        await self._set_parse_status(doc.id, VECTOR_STATUS_PENDING, parse.vector_count, "")
+        await self._set_parse_status(
+            doc.id,
+            VECTOR_STATUS_PENDING,
+            resume_count,
+            VECTOR_CANCEL_MARKER if resume_count else "",
+        )
         semaphore_held = False
         try:
             semaphore_held = await asyncio.to_thread(_VECTOR_WRITE_SEM.acquire)
             await self._set_parse_status(
-                doc.id, VECTOR_STATUS_INDEXING, parse.vector_count, ""
+                doc.id, VECTOR_STATUS_INDEXING, resume_count, ""
             )
             try:
                 await self._ensure_embedding()
@@ -264,18 +300,27 @@ class StructuredVectorService:
 
                 total = await self._replace_in_batches(
                     doc_key,
-                    lambda: self._document_batches(doc_pk, kb_id, file_name, doc_key),
+                    lambda: self._document_batches(
+                        doc_pk, kb_id, file_name, doc_key, skip=resume_count
+                    ),
                     _on_progress,
                     should_cancel,
+                    initial_count=resume_count,
+                    keep_ids=resume_keep_ids,
                 )
-            except VectorizeCancelled:
-                # 用户主动停止：丢弃本次已写入的部分向量，回到待向量化（可重新开始）
-                logger.info(f"结构化向量化已被用户停止 doc_id={doc.id}")
-                await self._delete_doc_vectors(doc_key)
+            except VectorizeCancelled as exc:
+                # 用户主动停止：保留已写入向量和计数，下一次从这里继续。
+                logger.info(
+                    f"结构化向量化已被用户停止（保留断点）doc_id={doc.id} "
+                    f"vectors={exc.written}"
+                )
                 await self._set_parse_status(
-                    doc.id, VECTOR_STATUS_PENDING, 0, "已停止向量化"
+                    doc.id,
+                    VECTOR_STATUS_PENDING,
+                    exc.written,
+                    VECTOR_CANCEL_MARKER,
                 )
-                return 0
+                return exc.written
             except Exception as exc:  # noqa: BLE001 - 记录失败原因；清旧之前的失败不触碰旧索引
                 logger.error(f"结构化记录向量化失败 doc_id={doc.id}: {exc}")
                 await self._set_parse_status(
@@ -319,13 +364,27 @@ class StructuredVectorService:
             )
             return 0
 
+        # 续跑规则同单文件：只有上次停止留下的 pending 计数才作为断点。
+        resume_count = resume_checkpoint(
+            group.vector_status, group.vector_count, group.vector_error
+        )
+        resume_keep_ids = (
+            await self._resume_group_vector_ids(group.id, resume_count)
+            if resume_count
+            else set()
+        )
         # 排队期间保持 pending，真正开始 Embedding 才置 indexing（前端可区分等待/执行）
-        await self._set_group_status(group.id, VECTOR_STATUS_PENDING, group.vector_count, "")
+        await self._set_group_status(
+            group.id,
+            VECTOR_STATUS_PENDING,
+            resume_count,
+            VECTOR_CANCEL_MARKER if resume_count else "",
+        )
         semaphore_held = False
         try:
             semaphore_held = await asyncio.to_thread(_VECTOR_WRITE_SEM.acquire)
             await self._set_group_status(
-                group.id, VECTOR_STATUS_INDEXING, group.vector_count, ""
+                group.id, VECTOR_STATUS_INDEXING, resume_count, ""
             )
             try:
                 await self._ensure_embedding()
@@ -340,18 +399,27 @@ class StructuredVectorService:
 
                 total = await self._replace_in_batches(
                     group_key,
-                    lambda: self._group_batches(group_pk, kb_id, group_name, group_key),
+                    lambda: self._group_batches(
+                        group_pk, kb_id, group_name, group_key, skip=resume_count
+                    ),
                     _on_progress,
                     should_cancel,
+                    initial_count=resume_count,
+                    keep_ids=resume_keep_ids,
                 )
-            except VectorizeCancelled:
-                # 用户主动停止：丢弃本次已写入的部分向量，回到待向量化
-                logger.info(f"关联记录向量化已被用户停止 group_id={group.id}")
-                await self._delete_doc_vectors(group_key)
+            except VectorizeCancelled as exc:
+                # 用户主动停止：保留已写入向量和计数，下一次从这里继续。
+                logger.info(
+                    f"关联记录向量化已被用户停止（保留断点）group_id={group.id} "
+                    f"vectors={exc.written}"
+                )
                 await self._set_group_status(
-                    group.id, VECTOR_STATUS_PENDING, 0, "已停止向量化"
+                    group.id,
+                    VECTOR_STATUS_PENDING,
+                    exc.written,
+                    VECTOR_CANCEL_MARKER,
                 )
-                return 0
+                return exc.written
             except Exception as exc:  # noqa: BLE001 - 记录失败原因；清旧之前的失败不触碰旧索引
                 logger.error(f"关联记录向量化失败 group_id={group.id}: {exc}")
                 await self._set_group_status(
@@ -378,17 +446,52 @@ class StructuredVectorService:
 
     # ── 内部工具 ──────────────────────────────────────────────────────────
 
+    async def _resume_record_vector_ids(
+        self, doc_id: uuid.UUID, count: int
+    ) -> set[str]:
+        """已写入断点对应的记录向量主键（用于避免续跑时被当成旧向量清掉）。"""
+        if count <= 0:
+            return set()
+        rows = await self.db.scalars(
+            select(StructuredRecord.id)
+            .where(StructuredRecord.doc_id == doc_id)
+            .order_by(StructuredRecord.seq_no.asc())
+            .limit(count)
+        )
+        return {structured_vector_id(record_id) for record_id in rows}
+
+    async def _resume_group_vector_ids(
+        self, group_id: uuid.UUID, count: int
+    ) -> set[str]:
+        if count <= 0:
+            return set()
+        rows = await self.db.scalars(
+            select(StructuredGroupRecord.id)
+            .where(StructuredGroupRecord.group_id == group_id)
+            .order_by(StructuredGroupRecord.seq_no.asc())
+            .limit(count)
+        )
+        return {structured_group_vector_id(record_id) for record_id in rows}
+
     async def _document_batches(
-        self, doc_id: uuid.UUID, kb_id: str, file_name: str, doc_key: str
+        self,
+        doc_id: uuid.UUID,
+        kb_id: str,
+        file_name: str,
+        doc_key: str,
+        *,
+        skip: int = 0,
     ) -> AsyncIterator[list[VectorRow]]:
         """键集分页读记录 → 每批构造 VectorRow → 每批单独编码后 yield。
 
         与 StructuredGroupService._iter_record_batches 同一键集机制
         （seq_no > 上一批末位，(doc_id, seq_no) 有索引）：不重复、不遗漏，
         内存里只留当前一批。生成器可重复调用（重复向量回退时重放）。
+        ``skip`` 仅用于断点续跑：按 seq_no 跳过已写入的前 N 条记录。
         """
         size = max(int(settings.STRUCTURED_VECTOR_READ_BATCH or 0), 1)
         last_seq: int | None = None
+        first_page = True
         while True:
             stmt = (
                 select(
@@ -403,6 +506,9 @@ class StructuredVectorService:
                 .order_by(StructuredRecord.seq_no.asc())
                 .limit(size)
             )
+            if first_page and skip > 0:
+                stmt = stmt.offset(skip)
+            first_page = False
             if last_seq is not None:
                 stmt = stmt.where(StructuredRecord.seq_no > last_seq)
             rows = (await self.db.execute(stmt)).all()
@@ -438,11 +544,18 @@ class StructuredVectorService:
                 return
 
     async def _group_batches(
-        self, group_id: uuid.UUID, kb_id: str, group_name: str | None, group_key: str
+        self,
+        group_id: uuid.UUID,
+        kb_id: str,
+        group_name: str | None,
+        group_key: str,
+        *,
+        skip: int = 0,
     ) -> AsyncIterator[list[VectorRow]]:
         """关联记录的同款分批生成器（整组记录不一次性加载）。"""
         size = max(int(settings.STRUCTURED_VECTOR_READ_BATCH or 0), 1)
         last_seq: int | None = None
+        first_page = True
         while True:
             stmt = (
                 select(
@@ -454,6 +567,9 @@ class StructuredVectorService:
                 .order_by(StructuredGroupRecord.seq_no.asc())
                 .limit(size)
             )
+            if first_page and skip > 0:
+                stmt = stmt.offset(skip)
+            first_page = False
             if last_seq is not None:
                 stmt = stmt.where(StructuredGroupRecord.seq_no > last_seq)
             rows = (await self.db.execute(stmt)).all()
@@ -491,29 +607,25 @@ class StructuredVectorService:
         make_batches: Callable[[], AsyncIterator[list[VectorRow]]],
         on_progress: Callable[[int], Awaitable[None]] | None = None,
         should_cancel: Callable[[], bool] | None = None,
+        *,
+        initial_count: int = 0,
+        keep_ids: set[str] | None = None,
     ) -> int:
         """分批 staged 替换：先写入全部新向量，全部成功后才清理旧向量（BUG-046）。
 
-        与 replace_doc / replace_docs_bulk 的一致性语义，只是行按批流式进出：
-        1. 快照旧向量 id；
-        2. 逐批读取/编码/写入（flush=False）——任何一批失败立即抛出，
-           此时尚未删除任何旧向量，旧索引保持完整；
-        3. 全部成功后只删「旧 id 中不在新 id 集合里」的分片，统一 flush；
-        4. 校验条数：底层若把同主键行当新行插入（Milvus insert 允许重复主键，
-           InMemory 则是覆盖），回退「清旧写新」并重放批生成器（重读 + 重编码）。
-
-        内存中只保留当前批次的记录/向量与全量 id 短字符串（keep / 旧 id 快照）。
+        ``initial_count`` / ``keep_ids`` 用于断点续跑：调用方跳过已写入的前 N 条，
+        这些向量在清理旧 id 时必须保留，不能被当成 stale 删除。
         """
         store = self.store
         await asyncio.to_thread(store.ensure_collection)
         old_ids = await asyncio.to_thread(store.ids_by_doc, doc_key)
-        keep: set[str] = set()
-        total = 0
+        keep: set[str] = set(keep_ids or ())
+        total = max(0, int(initial_count))
         async for batch in make_batches():
             # 批次之间检查停止信号：单批编码不可中断，但用户点击「停止」后
-            # 最多再等当前一批（默认 256 条，短文本约 80 秒）完成就会退出。
+            # 最多再等当前一批完成就会退出；已写入的批次保留为断点。
             if should_cancel is not None and should_cancel():
-                raise VectorizeCancelled()
+                raise VectorizeCancelled(total)
             keep.update(r.id for r in batch)
             written = await asyncio.to_thread(store.insert_batch, batch, flush=False)
             if written != len(batch):
@@ -537,11 +649,18 @@ class StructuredVectorService:
             f"分批替换后条数不一致 doc_id={doc_key} 期望={total} 实际={actual}，"
             "回退为清旧写新（重放批次）"
         )
+        if initial_count:
+            # 续跑时生成器已跳过断点前缀，直接清旧重放会漏掉前缀；
+            # 宁可置 failed 让用户整份重建，也不能悄悄丢数据。
+            raise VectorStoreError(
+                f"断点续跑条数不一致：期望 {total}，实际 {actual}；"
+                "请重新执行整份向量化"
+            )
         await asyncio.to_thread(store.delete_by_doc, doc_key)
         replayed = 0
         async for batch in make_batches():
             if should_cancel is not None and should_cancel():
-                raise VectorizeCancelled()
+                raise VectorizeCancelled(replayed)
             written = await asyncio.to_thread(store.insert_batch, batch, flush=False)
             if written != len(batch):
                 raise VectorStoreError(

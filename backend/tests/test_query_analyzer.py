@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.application import evaluation_service as eval_mod
+import src.application.query_analyzer as qa_mod
 from src.application.evidence import RESOURCE_TYPE_LABELS
 from src.application.query_analyzer import (
     ANALYZER_VERSION,
@@ -179,8 +179,8 @@ def test_resource_types_always_in_vocabulary():
 
 def test_question_type_vocabulary_shared_with_stage9():
     """阶段十一与阶段九共用同一份 question_type 词表（不重复定义）。"""
-    assert eval_mod.QUESTION_TYPES is QUESTION_TYPES
-    assert eval_mod.QUESTION_TYPE_LABELS["herb"] == "中药知识"
+    assert qa_mod.QUESTION_TYPES is QUESTION_TYPES
+    assert qa_mod.QUESTION_TYPE_LABELS["herb"] == "中药知识"
 
 
 # ── 9. keywords ─────────────────────────────────────────────────────────────

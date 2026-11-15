@@ -264,11 +264,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             evidence,
             evidence_groups,
             evidence_summary,
-            kg_evidence,
             evidence_gate,
           }) => {
             // 引用卡片在生成前实时展示；阶段十：同时保存多来源证据分组
-            // 阶段十三：保存 KG 证据切片（与 citations 同源，供后续区分展示）
             // 阶段十四：附带保存 Evidence Gate 决策（暂不展示，仅留待后续阶段）
             // 流式阶段：检索完成（citations 已下发）→ 即将开始生成
             set((s) => ({
@@ -280,7 +278,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
                       evidence: evidence ?? citations,
                       evidenceGroups: evidence_groups,
                       evidenceSummary: evidence_summary,
-                      ...(kg_evidence ? { kgEvidence: kg_evidence } : {}),
                       ...(evidence_gate ? { evidenceGate: evidence_gate } : {}),
                       streamPhase: 'generating' as const,
                     }
@@ -304,7 +301,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
             evidence,
             evidence_groups,
             evidence_summary,
-            kg_evidence,
             reflection,
           }) => {
             set((s) => ({
@@ -324,7 +320,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
                             evidence: evidence ?? citations,
                             evidenceGroups: evidence_groups,
                             evidenceSummary: evidence_summary,
-                            kgEvidence: kg_evidence ?? [],
                           }
                         : {}),
                       ...(reflection ? { reflection } : {}),

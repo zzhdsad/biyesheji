@@ -17,7 +17,7 @@ if not rows:
 
 header = [
     "规模", "总行数", "解析s", "发现s", "导入s", "重导s", "总耗时s",
-    "峰值内存MB", "实体", "原始记录", "关系", "KG节点", "KG边",
+    "峰值内存MB", "实体", "原始记录", "关系",
     "失败", "重导新增实体", "重导后实体", "关联表",
 ]
 print(" | ".join(header))
@@ -36,8 +36,6 @@ for r in rows:
             str(r.get("db_entities")),
             str(r.get("db_records")),
             str(r.get("db_relations")),
-            str(r.get("db_kg_nodes")),
-            str(r.get("db_kg_edges")),
             str(r.get("stats", {}).get("failed_rows")),
             str(r.get("reimport_entities_added")),
             str(r.get("db_entities_after_reimport")),

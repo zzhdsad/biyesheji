@@ -45,6 +45,28 @@ _MIN_NAME_LENGTH = 2
 # 去标点后的查询核心（用于"整句就是一个资源名"的精确匹配判定）
 _PUNCT_PATTERN = re.compile(r"[^\u4e00-\u9fa5A-Za-z0-9]+")
 
+# 通用问题词不能当作命名实体（query_analyzer._GENERIC_SIGNAL_TERMS 的同一口径）。
+# 资源表里可能存在名为「功效」「主治」的历史条目；若把它们当实体，问句
+# 「丹参有什么功效」会被错误路由到 theory。这里在索引匹配阶段直接排除。
+_GENERIC_ENTITY_TERMS: frozenset[str] = frozenset(
+    {
+        "功效",
+        "主治",
+        "性味",
+        "归经",
+        "组成",
+        "用法",
+        "用量",
+        "别名",
+        "来源",
+        "禁忌",
+        "炮制",
+        "中药",
+        "药材",
+        "本草",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ResourceNameHit:
@@ -122,13 +144,17 @@ class EntityResolutionResult:
 
 _index_cache: ResourceNameIndex | None = None
 _index_built_at: float = 0.0
+# P8：缓存必须绑定数据库目标。测试/多库排障时切 DATABASE_URL 后，旧索引不能
+# 继续复用；否则会拿 A 库的资源名去解释 B 库的问题。
+_index_db_url: str = ""
 
 
 def clear_resource_name_index_cache() -> None:
     """清空索引缓存（测试 / 资源批量导入后手动刷新用）。"""
-    global _index_cache, _index_built_at
+    global _index_cache, _index_built_at, _index_db_url
     _index_cache = None
     _index_built_at = 0.0
+    _index_db_url = ""
 
 
 def _build_index(rows: dict[str, list[tuple]]) -> ResourceNameIndex:
@@ -183,14 +209,19 @@ async def load_resource_name_index(session) -> ResourceNameIndex:
 async def get_resource_name_index(
     session, *, ttl: float = _INDEX_TTL_SECONDS
 ) -> ResourceNameIndex:
-    """带 TTL 的索引获取；并发重复加载最多多一次快照读，无锁不跨事件循环。"""
-    global _index_cache, _index_built_at
+    """带 TTL 的索引获取；数据库目标变化时强制重建（P8）。"""
+    global _index_cache, _index_built_at, _index_db_url
+    from src.core.config import settings
+
     now = time.monotonic()
+    if _index_db_url and _index_db_url != settings.DATABASE_URL:
+        clear_resource_name_index_cache()
     if _index_cache is not None and now - _index_built_at < ttl:
         return _index_cache
     index = await load_resource_name_index(session)
     _index_cache = index
     _index_built_at = now
+    _index_db_url = settings.DATABASE_URL
     return index
 
 
@@ -215,7 +246,11 @@ def resolve_in_index(index: ResourceNameIndex, query: str) -> EntityResolutionRe
         return EntityResolutionResult(matched=False, reason="query_too_short")
 
     core = _PUNCT_PATTERN.sub("", raw)
-    hits = index.lookup(raw)
+    hits = [
+        h
+        for h in index.lookup(raw)
+        if h.matched_text not in _GENERIC_ENTITY_TERMS
+    ]
     if not hits:
         return EntityResolutionResult(matched=False, reason="no_name_match")
 

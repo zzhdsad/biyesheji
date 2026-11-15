@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "workflow",
+  "quality": "showcase",
+  "specification": {
+    "path": "C:\\biyesheji-3.0.0\\.archify\\workflow-tcm-rag-20261111-085100\\candidate.json",
+    "sha256": "c841ce7e9a1f03358e8537c2b5d6ca4be370e02cac9364adc0496352862fe153",
+    "bytes": 6908
+  },
+  "artifact": {
+    "path": "C:\\biyesheji-3.0.0\\.archify\\workflow-tcm-rag-20261111-085100\\tcm-rag-workflow.html",
+    "sha256": "c3ccb2e09ddc6a41957fcbd3a7d784627d6dcede7d863f4883161bf9474301d5",
+    "bytes": 864247
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "C:\\biyesheji-3.0.0\\.archify\\workflow-tcm-rag-20261111-085100\\tcm-rag-workflow.finalize.json",
+    "summaryReceipt": "C:\\biyesheji-3.0.0\\.archify\\workflow-tcm-rag-20261111-085100\\tcm-rag-workflow.finalize-summary.json",
+    "browserCheckReceipt": "C:\\biyesheji-3.0.0\\.archify\\workflow-tcm-rag-20261111-085100\\tcm-rag-workflow.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-11-11T00:52:04.070Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 6840,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  }
+}

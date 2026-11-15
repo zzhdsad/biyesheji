@@ -9,11 +9,15 @@ Stage 3 部分：Backend Resource 挂载 API（GET / POST / DELETE），
 
 import asyncio
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.core.config import settings
+from src.domain.models import Herb, Literature, Prescription, Theory
 
 # 复用 smoke 测试的临时库管理工具，保证一致的隔离与清理
 from tests.test_alembic_smoke import (
@@ -22,6 +26,60 @@ from tests.test_alembic_smoke import (
     _drop_smoke_db,
     SMOKE_DB_NAME,
 )
+
+
+_RESOURCE_TABLES = {
+    "herbs": Herb,
+    "prescriptions": Prescription,
+    "theories": Theory,
+    "literatures": Literature,
+}
+
+
+def _run_db(coro):
+    """TestClient 占用主线程事件循环，DB 直插/直删放到独立线程执行。"""
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
+def _insert_resource(table: str, name: str) -> str:
+    """资源中心 REST API 已下线，改为 ORM 直插最小资源行。
+
+    挂载端点仍按对应资源表严格校验存在性（_load_resource），
+    因此测试数据只需满足表的 NOT NULL 约束（其余列由 ORM default 补齐）。
+    """
+    cls = _RESOURCE_TABLES[table]
+    rid = uuid.uuid4()
+
+    async def _run():
+        engine = create_async_engine(settings.DATABASE_URL, poolclass=None)
+        try:
+            async with async_sessionmaker(engine)() as session:
+                session.add(cls(id=rid, name=name))
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+    _run_db(_run())
+    return str(rid)
+
+
+def _delete_resource(table: str, resource_id: str) -> None:
+    """按白名单表名直删资源行（REST 删除端点已下线）。"""
+    assert table in _RESOURCE_TABLES
+
+    async def _run():
+        engine = create_async_engine(settings.DATABASE_URL, poolclass=None)
+        try:
+            async with async_sessionmaker(engine)() as session:
+                await session.execute(
+                    text(f"DELETE FROM {table} WHERE id = :rid"), {"rid": resource_id}
+                )
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+    _run_db(_run())
 
 
 def _smoke_db_url() -> str:
@@ -265,38 +323,27 @@ class KBRKeeper:
 
     def herb(self, name: str | None = None) -> dict:
         label = name or f"挂载测试药-{_SUFFIX}"
-        resp = self.client.post("/api/v1/herbs", json={"name": label})
-        assert resp.status_code == 201, resp.text
-        body = resp.json()
-        self._created.append(("herb", body["id"], None))
-        return body
+        rid = _insert_resource("herbs", label)
+        self._created.append(("herb", rid, {"table": "herbs"}))
+        return {"id": rid, "name": label}
 
     def prescription(self, name: str | None = None) -> dict:
         label = name or f"挂载测试方-{_SUFFIX}"
-        resp = self.client.post("/api/v1/prescriptions", json={"name": label})
-        assert resp.status_code == 201, resp.text
-        body = resp.json()
-        self._created.append(("prescription", body["id"], None))
-        return body
+        rid = _insert_resource("prescriptions", label)
+        self._created.append(("prescription", rid, {"table": "prescriptions"}))
+        return {"id": rid, "name": label}
 
     def theory(self, name: str | None = None) -> dict:
         label = name or f"挂载测试理论-{_SUFFIX}"
-        resp = self.client.post("/api/v1/theories", json={"name": label})
-        assert resp.status_code == 201, resp.text
-        body = resp.json()
-        self._created.append(("theory", body["id"], None))
-        return body
+        rid = _insert_resource("theories", label)
+        self._created.append(("theory", rid, {"table": "theories"}))
+        return {"id": rid, "name": label}
 
     def literature(self, name: str | None = None) -> dict:
         label = name or f"挂载测试文献-{_SUFFIX}"
-        resp = self.client.post(
-            "/api/v1/literatures",
-            json={"name": label, "author": "测试作者", "dynasty": "汉"},
-        )
-        assert resp.status_code == 201, resp.text
-        body = resp.json()
-        self._created.append(("literature", body["id"], None))
-        return body
+        rid = _insert_resource("literatures", label)
+        self._created.append(("literature", rid, {"table": "literatures"}))
+        return {"id": rid, "name": label}
 
     def mount(self, kb_id: str, resource_type: str, resource_id: str) -> dict:
         """挂载并记录，便于回收时取消挂载。"""
@@ -317,14 +364,8 @@ class KBRKeeper:
                 self.client.delete(
                     f"/api/v1/kb/{ctx['kb_id']}/resources/{ctx['resource_type']}/{ctx['resource_id']}"
                 )
-            elif kind == "herb":
-                self.client.delete(f"/api/v1/herbs/{item_id}")
-            elif kind == "prescription":
-                self.client.delete(f"/api/v1/prescriptions/{item_id}")
-            elif kind == "theory":
-                self.client.delete(f"/api/v1/theories/{item_id}")
-            elif kind == "literature":
-                self.client.delete(f"/api/v1/literatures/{item_id}")
+            elif kind in ("herb", "prescription", "theory", "literature"):
+                _delete_resource(ctx["table"], item_id)
             elif kind == "kb":
                 self.client.delete(f"/api/v1/kb/{item_id}")
 

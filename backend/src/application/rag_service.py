@@ -118,6 +118,66 @@ GATE_REFUSAL_ANSWER = (
     "（已换用其他检索策略重试仍未获得充分证据），请补充相关资料或调整提问方式。"
 )
 
+# 结构化数据的“字段意图”覆盖检查：问题问功效/剂量/组成等，但检索到的记录
+# 只有名称、给药途径或术语关联时，不能让 LLM 把关联信息拼成答案。
+_ATTRIBUTE_COVERAGE: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "功效",
+        (
+            "功效",
+            "功能",
+            "主治",
+            "作用",
+            "疗效",
+            "effect",
+            "indication",
+            "medicinal_properties",
+            "properties",
+        ),
+    ),
+    ("剂量", ("剂量", "用量", "dose", "dosage")),
+    ("用法", ("用法", "administration", "route")),
+    ("组成", ("组成", "成分", "处方", "composition", "ingredient")),
+    ("禁忌", ("禁忌", "注意", "contraindication", "precaution")),
+    ("性味", ("性味", "四气", "五味")),
+    ("归经", ("归经", "meridian")),
+)
+
+_ATTRIBUTE_REFUSAL = (
+    "根据现有资料，我无法回答该问题：现有资料未提供其{attribute}信息，"
+    "只包含名称、给药途径或术语关联，不能据此推断{attribute}。"
+)
+
+
+def _missing_requested_attribute(question: str, hits: list[dict]) -> str | None:
+    """结构化证据是否覆盖问题要求的字段。
+
+    只在命中包含 structured / structured_group 时启用，避免误伤普通文档的
+    自由正文回答；目的不是增加医学判断，而是阻止“只命中名称/通路”时硬答。
+    """
+    if not hits:
+        return None
+    if not any(
+        str(h.get("source_kind") or "") in {"structured", "structured_group"}
+        for h in hits
+    ):
+        return None
+    q = (question or "").casefold()
+    for label, aliases in _ATTRIBUTE_COVERAGE:
+        if not any(alias in q for alias in aliases):
+            continue
+        blob = " ".join(
+            " ".join(
+                str(h.get(key) or "")
+                for key in ("content", "title_path", "locate", "source_name")
+            )
+            for h in hits
+        ).casefold()
+        if any(alias in blob for alias in aliases):
+            return None
+        return label
+    return None
+
 _CONTEXT_MARKER = "参考资料"
 # [citation: 1, 3] / [citation: 1] / 模型误写 [citation: 1, 页码]
 # 页码只做语法兼容；最终页码始终以检索命中的权威 page_num 为准。
@@ -160,7 +220,6 @@ from src.application.evidence import (  # noqa: E402
 )
 from src.application.evidence import evidence_level as _evidence_level  # noqa: E402
 from src.application.evidence import (  # noqa: E402
-    SOURCE_KIND_KG,
     build_evidence,
     displayable_hits,
     hit_to_evidence,
@@ -189,7 +248,6 @@ from src.application.self_reflection import (  # noqa: E402
     with_reflection_retry,
     with_revision,
 )
-from src.application.kg_retrieval import KgRetriever  # noqa: E402
 from src.application.entity_resolver import resolve_resource_name  # noqa: E402
 from src.application.query_analyzer import (  # noqa: E402
     QueryAnalysis,
@@ -234,7 +292,6 @@ class RagService:
         hyde: BaseHyDE | None = None,
         analyzer: QueryAnalyzer | None = None,
         router: DynamicRouter | None = None,
-        kg: KgRetriever | None = None,
         gate: EvidenceGate | None = None,
         reflector: SelfReflection | None = None,
     ) -> None:
@@ -251,9 +308,7 @@ class RagService:
         self.analyzer = analyzer or QueryAnalyzer()
         # 阶段十二：Dynamic Router（Analyzer 之后、Retrieval 之前选择检索策略）
         self.router = router or DynamicRouter()
-        # 阶段十三：KG 检索（可选来源，仅在策略开启时执行；失败不影响向量检索）
-        self.kg = kg or KgRetriever(db)
-        # 阶段十四：Evidence Gate（Vector + KG 证据合并后的统一质量判断）
+        # 阶段十四：Evidence Gate（向量证据的统一质量判断）
         self.gate = gate or EvidenceGate()
         # 本次问答的 Gate 决策（供 /chat/ask 输出；旧调用方不感知，默认 None）
         self.last_gate_decision: GateDecision | None = None
@@ -298,8 +353,8 @@ class RagService:
         流程：HyDE 改写 → 混合检索 → RRF 融合 → Rerank → 上下文拼接 → LLM 生成。
         不写会话/消息/缓存，避免评估批量调用污染聊天记录。
 
-        阶段十四：Rerank 之后、生成之前插入 Evidence Gate（Vector + KG 证据合并
-        后的统一质量判断）；Gate 判为 insufficient 时返回拒答文案并保留 hits
+        阶段十四：Rerank 之后、生成之前插入 Evidence Gate（向量证据的统一质量判断）；
+        Gate 判为 insufficient 时返回拒答文案并保留 hits
         （证据/引用仍可展示），retry 时最多换一次已有策略。
         阶段十五：生成之后插入 Self Reflection（accept / revise / retry）。
 
@@ -314,8 +369,7 @@ class RagService:
             strategy: 阶段十二 RetrievalStrategy；None = Baseline（沿用全局配置，
                 行为与阶段十一及之前完全一致；评估可显式指定策略做对比实验）
             resource_types: 动态策略（multi_source）运行时解析出的资源类型过滤
-            analysis: 阶段十三 QueryAnalysis（KG 策略需要实体做图遍历；未提供时
-                由本方法内部调用 Analyzer 补算，保证 KG 永远由结构化分析驱动）
+            analysis: QueryAnalysis（multi_source 运行时过滤 / 实体识别结果）
             router_decision: 阶段十四 RouterDecision（Gate 需要当前策略名以选择
                 retry 策略；未提供时回退 strategy.name）
 
@@ -330,16 +384,12 @@ class RagService:
         """
         from src.core.exceptions import AppException
 
-        # 阶段十三：KG 策略需要 QueryAnalysis；调用方未传时内部补算（不重复分析）
-        if strategy is not None and strategy.kg_enabled and analysis is None:
-            analysis = self.analyze_query(question)
-
-        # 检索+重排核心（HyDE → 混合检索 → RRF → Rerank → 注入文档名 → 可选 KG 证据）
+        # 检索+重排核心（HyDE → 混合检索 → RRF → Rerank → 注入文档名）
         hits = await self._retrieve(
             kb_ids, question, strategy, resource_types, analysis=analysis
         )
 
-        # 阶段十四：Evidence Gate（Vector + KG 证据合并后的统一质量判断）
+        # 阶段十四：Evidence Gate（向量证据的统一质量判断）
         # - accept：继续生成（行为与阶段十三完全一致）
         # - retry：换一个已注册的检索策略重试一次（最多一次）
         # - insufficient：返回拒答文案 + 保留 hits（供评估/日志），不调用 LLM、不展示引用
@@ -372,6 +422,14 @@ class RagService:
                 f"threshold={get_system_value('relevance_threshold')} q={question[:30]!r}"
             )
             return REFUSAL_ANSWER, []
+
+        missing_attribute = _missing_requested_attribute(question, hits)
+        if missing_attribute:
+            logger.info(
+                f"[RAG] 字段覆盖不足拒答：缺少={missing_attribute} "
+                f"q={question[:40]!r} hits={len(hits)}"
+            )
+            return _ATTRIBUTE_REFUSAL.format(attribute=missing_attribute), hits
 
         # 生成
         user_prompt = self._build_user_prompt(question, hits)
@@ -425,16 +483,13 @@ class RagService:
         resource_types: list[str] | None = None,
         analysis: QueryAnalysis | None = None,
     ) -> list[dict]:
-        """检索+重排核心：HyDE → 混合检索 → RRF → Rerank → 注入文档名（+ 可选 KG）。
+        """检索+重排核心：HyDE → 混合检索 → RRF → Rerank → 注入文档名。
 
         抽取自 retrieve_and_answer，供非流式与流式路径共用，避免逻辑漂移。
 
         阶段十二：strategy 决定本次检索参数（HyDE 开关、Dense/Sparse 路数、
         recall/rerank 条数、RRF k、resource_type 过滤）。strategy=None 时全部参数
         回落全局 settings，行为与 Baseline（阶段十一及之前）完全一致。
-
-        阶段十三：kg_enabled 策略在向量命中之外追加 KG 关系证据（补充证据），
-        KG 异常一律吞掉并记日志，不影响向量检索结果与本次问答。
 
         Raises:
             AppException: 422 检索/重排失败
@@ -562,13 +617,27 @@ class RagService:
                     h["dense_score"] = ds
 
         # Rerank 精排 → Top-N 送 LLM
+        # 只精排 RRF 前 N 条：CPU Cross-Encoder 对 40–80 条全量打分是问答延迟
+        # 的主要来源；召回结果仍保留在 fused 中，后续只缩小精排输入。
+        # 字段覆盖不足（例如问功效，但结构化证据只有名称/通路/术语关联）时
+        # 不进入 Cross-Encoder：后续会确定性拒答，精排只会白白增加延迟。
+        if _missing_requested_attribute(question, fused):
+            logger.info(
+                f"[RAG] 字段覆盖不足，跳过 Rerank：q={question[:40]!r} "
+                f"fused={len(fused)}"
+            )
+            return fused[: max(1, int(cfg["rerank_top_k"] or 1))]
+
+        rerank_input = fused[
+            : max(1, int(settings.RERANK_MAX_CANDIDATES or len(fused)))
+        ]
         try:
             hits = await asyncio.to_thread(
-                self.rerank.rerank, question, fused, cfg["rerank_top_k"]
+                self.rerank.rerank, question, rerank_input, cfg["rerank_top_k"]
             )
         except RerankError as exc:
             # BUG-017：Reranker 是增强环节，不得成为问答的单点故障。
-            # 与 KG 检索一致的降级语义：模型/服务不可用时退回 RRF 融合顺序，
+            # 降级语义：模型/服务不可用时退回 RRF 融合顺序，
             # 召回质量下降但仍可作答（此时拒绝式静默优于 422 中断）。
             logger.warning(f"RAG 重排不可用，本次使用 RRF 融合顺序: {exc}")
             hits = fused[: cfg["rerank_top_k"]]
@@ -576,30 +645,6 @@ class RagService:
         # 资源过滤（后置权威过滤）：向量库侧过滤生效时此处为 no-op；
         # 老集合不支持动态字段时由此保证策略语义一致。
         hits = filter_hits(hits, rtypes, include_document)
-
-        # 阶段十三：KG 关系证据（补充，不替代向量命中；失败不影响本次问答）
-        kg_hits: list[dict] = []
-        if cfg["kg_enabled"]:
-            try:
-                kg_hits = await self.kg.retrieve(
-                    list(kb_ids),
-                    analysis,
-                    max_hops=cfg["kg_max_hops"],
-                    top_k=cfg["kg_top_k"],
-                )
-                # 与向量命中同一套资源过滤口径
-                kg_hits = filter_hits(kg_hits, rtypes, include_document)
-                # BUG-064（已知限制，本批不修改行为）：KG 命中拼在末尾，
-                # 未经 Reranker 与向量命中统一排序，因此 KG 证据编号总是最大的一批；
-                # 而 group_evidence() 按组内最高分重排，会导致前端分层展示顺序与
-                # source_index 编号顺序不一致。**刻意不在此处重排**——那会改变
-                # Prompt 编号与既有引用对应关系（属于检索业务规则变更），
-                # 需要带评测数据的专门实验，不由质量收尾批次顺手改动。
-                # 当前一致性由 test_batch6_quality.py 的锁定用例守护。
-                hits = hits + kg_hits
-            except Exception as exc:  # noqa: BLE001  KG 不得成为问答的单点故障
-                logger.warning(f"KG 检索不可用，本次仅用向量检索: {exc}")
-                kg_hits = []
 
         # 排障日志（不含密钥等敏感信息）：问题 → 模型 → 各层命中数 → 分数区间
         best_dense = max((float(h.get("dense_score", 0.0)) for h in dense_hits), default=0.0)
@@ -611,12 +656,11 @@ class RagService:
             f"[RAG] q={question[:40]!r} model={model_key} strategy={cfg['strategy_name']} "
             f"kb={len(kb_ids)} dense={len(dense_hits)}(best={best_dense:.4f}) "
             f"sparse={len(sparse_hits)} fused={len(fused)} "
-            f"reranked={len(hits) - len(kg_hits)}(best={best_rerank:.4f}) kg={len(kg_hits)}"
+            f"reranked={len(hits)}(best={best_rerank:.4f})"
         )
 
         # 为精排后的命中注入 doc_name（Prompt 与引用卡片均需展示文档名）
         await self._enrich_hits_with_doc_name(hits)
-        # KG 证据在向量检索之后合并，这里再校验一次，避免软删除资源经图谱漏出
         hits = await self._filter_inactive_hits(hits)
         return hits
 
@@ -673,7 +717,7 @@ class RagService:
     async def _attach_resource_meta(self, kb_ids: list[uuid.UUID], hits: list[dict]) -> None:
         """为资源类命中补齐 resource_type / resource_name（就地修改）。
 
-        仅处理 Milvus 未带回资源字段的命中：doc_id 非 UUID 即资源（或 KG）行。
+        仅处理 Milvus 未带回资源字段的命中：doc_id 非 UUID 即资源行。
         补齐后：后置 filter_hits 能按策略的 resource_types 真正过滤；
         Evidence / Citation 能展示真实资源名（如"丹参"）而非占位名"资源"。
         """
@@ -863,7 +907,7 @@ class RagService:
             rid = hit.get("resource_id")
             if rtype and rid:
                 return (rtype, str(rid)) in active_resources
-            # 老集合 / KG 行可能没有 resource_id：无法校验时保留，避免误删召回
+            # 老集合可能没有 resource_id：无法校验时保留，避免误删召回
             return True
 
         return [hit for hit in hits if _active(hit)]
@@ -963,7 +1007,7 @@ class RagService:
             f"Evidence Gate 建议重试（{retry_reason}）: "
             f"{original} → {decision.retry_strategy}"
         )
-        # retry 策略可能需要 QueryAnalysis（multi_source 运行时过滤 / KG 图遍历）
+        # retry 策略可能需要 QueryAnalysis（multi_source 运行时过滤）
         ana = analysis if analysis is not None else self.analyze_query(question)
         retry_types: list[str] | None = None
         if retry_strategy.resource_types_from_analysis:
@@ -1317,10 +1361,6 @@ class RagService:
             "evidence": citations,
             "evidence_groups": groups,
             "evidence_summary": summary,
-            # 阶段十三：KG 证据切片（citations/evidence 结构不变，仅新增可选视图）
-            "kg_evidence": [
-                c for c in citations if c.get("source_kind") == SOURCE_KIND_KG
-            ],
             # 阶段十四：证据门控决策（事件名与顺序不变，旧客户端忽略新增字段即可）
             "evidence_gate": gate,
         }
@@ -1446,8 +1486,7 @@ class RagService:
         self.db.add(user_msg)
         await self.db.commit()
 
-        # 检索+生成核心（不持久化；阶段十二按路由选择的策略执行；
-        # 阶段十三透传 QueryAnalysis，供 KG 策略做图遍历）
+        # 检索+生成核心（不持久化；阶段十二按路由选择的策略执行）
         try:
             answer, hits = await self.retrieve_and_answer(
                 kb_ids, question, history,
@@ -1498,8 +1537,7 @@ class RagService:
         阶段十一：start 事件在原 conversation_id 之外附带 query_analysis
         （事件名与顺序不变，旧客户端解析不受影响）。
         阶段十二：start 事件同时附带 router_decision（事件名与顺序不变）。
-        done 事件附带最终 citations / evidence / evidence_groups / evidence_summary /
-        kg_evidence：citations 事件是生成前候选，done 只保留正文实际引用的来源。
+        done 事件附带最终 citations / evidence / evidence_groups / evidence_summary：
 
         Args:
             user: 当前登录用户（用于归属校验 + 新建会话绑定）
@@ -1584,6 +1622,20 @@ class RagService:
             )
             citations = []
             answer = GATE_REFUSAL_ANSWER
+            yield {
+                "event": "citations",
+                "data": self._evidence_payload(citations, gate_payload),
+            }
+            yield {"event": "delta", "data": {"content": answer}}
+        elif (missing_attribute := _missing_requested_attribute(question, hits)):
+            # 结构化记录只命中名称/通路/术语关联，未覆盖“功效/剂量/组成”等
+            # 被问字段：确定性拒答，不把关联信息包装成答案。
+            logger.info(
+                f"[RAG] 字段覆盖不足拒答：缺少={missing_attribute} "
+                f"q={question[:40]!r} hits={len(hits)}"
+            )
+            citations = []
+            answer = _ATTRIBUTE_REFUSAL.format(attribute=missing_attribute)
             yield {
                 "event": "citations",
                 "data": self._evidence_payload(citations, gate_payload),
@@ -1676,9 +1728,6 @@ class RagService:
                 "evidence": citations,
                 "evidence_groups": final_groups,
                 "evidence_summary": final_summary,
-                "kg_evidence": [
-                    c for c in citations if c.get("source_kind") == SOURCE_KIND_KG
-                ],
                 "reflection": (
                     reflection_decision.to_dict()
                     if reflection_decision is not None
@@ -1783,14 +1832,13 @@ class RagService:
         老集合（未开启动态字段）取不到 resource_type，旧判定会把 SHA256 doc_id
         送进 Document.id（UUID 列）查询 → PG `invalid input syntax for type uuid`
         （500），且把资源证据误标成 source_kind='document'。按 doc_id 分类在
-        两种集合上结论一致：KG 行 doc_id = "kg:<edge_id>" 同样非 UUID，归入
-        Resource 分支且保留自带 source_kind=kg。
+        Resource 行 doc_id 为 SHA256 同样非 UUID，归入 Resource 分支。
         """
         if not hits:
             return
 
         def _is_doc_row(hit: dict) -> bool:
-            """Document 行 doc_id 为 UUID；Resource 行为 SHA256，KG 行为 kg:<id>。"""
+            """Document 行 doc_id 为 UUID；Resource 行为 SHA256。"""
             raw = hit.get("doc_id")
             if not raw:
                 return False
@@ -1844,12 +1892,9 @@ class RagService:
             )
 
         # Resource 命中：元数据由 Milvus 动态字段带回，直接填充
-        # 阶段十三：KG 命中同样带 resource_type（指回具体资源），但来源类别必须
-        # 保持为 kg，否则会被误标成 resource 证据、丢掉图谱归属
         for h in res_hits:
             h["doc_name"] = h.get("resource_name") or h.get("resource_type") or "资源"
-            if h.get("source_kind") != SOURCE_KIND_KG:
-                h["source_kind"] = "resource"
+            h["source_kind"] = "resource"
             # source_type / credibility_level 在 Stage 4-3 写入时为 None（资源表无此字段）
             # 保留 Milvus 带回的值（可能为 None）
             h.setdefault("source_type", None)
@@ -2034,16 +2079,7 @@ class RagService:
             page = h.get("page_num")
             page_label = f"页码：{page}" if page else "页码：0"
             provenance = self._format_provenance(h)
-            if h.get("source_kind") == SOURCE_KIND_KG:
-                # 阶段十三：KG 关系证据（标题即"银翘散 → 组成 → 金银花"）
-                rtype_label = _RESOURCE_TYPE_LABELS.get(
-                    h.get("resource_type"), h.get("resource_type") or "资源"
-                )
-                blocks.append(
-                    f"[{i}] 图谱：{rtype_label} {h.get('doc_name', '未知')}{provenance} | "
-                    f"{page_label} | 标题：{source}\n{h['content']}"
-                )
-            elif h.get("source_kind") == "resource":
+            if h.get("source_kind") == "resource":
                 # Resource 命中：标注资源类型 + 名称
                 rtype_label = _RESOURCE_TYPE_LABELS.get(
                     h.get("resource_type"), h.get("resource_type") or "资源"
@@ -2123,6 +2159,10 @@ class RagService:
         非流式 / 流式两条路径的 Evidence 结构完全一致。
         """
         if not hits:
+            return []
+        # 拒答/保守回答即使模型误写了 [citation: …] 也不能展示引用；
+        # 先于编号解析返回，避免“拒答却带一张无关来源卡片”。
+        if _is_refusal_answer(answer):
             return []
         # BUG-016：编号空间统一为"可展示命中"，与 _build_user_prompt 一致
         shown = displayable_hits(hits)

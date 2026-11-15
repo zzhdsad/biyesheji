@@ -5,18 +5,81 @@ conftest 自动注入：mock 向量化 + mock LLM + 向量库（Milvus 可用→
 """
 
 import asyncio
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from src.infrastructure import redis_client
+from src.core.config import settings
+from src.domain.models import Herb
+from src.infrastructure import milvus_store, redis_client
+from src.application.resource_vector_service import make_doc_id
 from tests.test_parse import _make_kb
 from tests.test_upload import PG_AVAILABLE
 
 
+def _insert_herb(name: str) -> str:
+    """资源中心 REST API 已下线，改为 ORM 直插最小资源行
+    （挂载端点仍按 herbs 表校验存在性）。"""
+    rid = uuid.uuid4()
+
+    async def _run():
+        engine = create_async_engine(settings.DATABASE_URL, poolclass=None)
+        try:
+            async with async_sessionmaker(engine)() as session:
+                session.add(Herb(id=rid, name=name))
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+    # TestClient 占用主线程事件循环，DB 直插放到独立线程执行
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(asyncio.run, _run()).result()
+    return str(rid)
+
+
+def _delete_herb_row(herb_id: str) -> None:
+    async def _run():
+        engine = create_async_engine(settings.DATABASE_URL, poolclass=None)
+        try:
+            async with async_sessionmaker(engine)() as session:
+                await session.execute(
+                    text("DELETE FROM herbs WHERE id = :rid"), {"rid": herb_id}
+                )
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pool.submit(asyncio.run, _run()).result()
+
+
+def _wait_doc_gone(doc_id: str, timeout: float = 5.0) -> None:
+    """Milvus 删除为最终一致（约 1s 内生效、立即查询仍可见），
+    轮询等待删除传播完成后再提问，保证检索断言可靠。"""
+    store = milvus_store.get_vector_store()
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if len(store.query_rows(doc_id)) == 0:
+            return
+        time.sleep(0.2)
+    assert len(store.query_rows(doc_id)) == 0, f"删除后 {timeout}s 向量仍可见：{doc_id}"
+
+
 def _upload_doc(client, kb_id: str, name: str = "考勤制度.txt") -> str:
-    """上传并等待自动流水线（解析→切片→向量化）完成，返回 doc_id。"""
-    text = "# 员工手册\n\n## 考勤制度\n\n" + ("公司实行标准工时制度，每日工作八小时。" * 30)
+    """上传并等待自动流水线（解析→切片→向量化）完成，返回 doc_id。
+
+    P4：文件名参与正文，避免同一知识库内多次调用因内容完全相同而命中
+    “重复上传”复用旧 doc_id，导致需要两份独立文档的测试互相污染。
+    """
+    text = (
+        "# 员工手册\n\n## 考勤制度\n\n"
+        + ("公司实行标准工时制度，每日工作八小时。" * 30)
+        + f"\n\n来源文件：{name}"
+    )
     resp = client.post(
         "/api/v1/documents/upload",
         data={"kb_id": kb_id},
@@ -86,24 +149,16 @@ def test_edit_question_truncates_old_turn_and_can_ask_again(client):
 
 
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
-def test_soft_deleted_resource_not_retrievable(client):
-    """软删除并卸载资源后，RAG 不得再命中其残留向量。"""
+def test_unmounted_resource_not_retrievable(client):
+    """资源卸载（挂载与向量一并移除）后，RAG 不得再命中其残留向量。
+
+    原用例经旧资源中心 REST API（POST/DELETE /api/v1/herbs）构造与软删除资源，
+    资源中心已下线；改为 ORM 直插资源 + 现行卸载端点移除挂载与向量，
+    检索与引用断言不变（卸载与软删除最终都走挂载清理 + 向量删除）。
+    """
     kb_id = _make_kb(client)
     herb_name = f"丹参-{uuid.uuid4().hex[:8]}"
-    resp = client.post(
-        "/api/v1/herbs",
-        json={
-            "name": herb_name,
-            "aliases": ["赤参"],
-            "properties": "苦；微寒",
-            "channels": ["心", "肝"],
-            "effects": "活血祛瘀；通经止痛",
-            "source": "神农本草经",
-            "description": "唇形科植物丹参的根",
-        },
-    )
-    assert resp.status_code == 201, resp.text
-    herb_id = resp.json()["id"]
+    herb_id = _insert_herb(herb_name)
     resp = client.post(
         f"/api/v1/kb/{kb_id}/resources",
         json={"resource_type": "herb", "resource_id": herb_id},
@@ -113,9 +168,18 @@ def test_soft_deleted_resource_not_retrievable(client):
     first = _ask(client, f"{herb_name}有什么功效？", kb_id)
     assert first["citations"], "删除前应能检索到资源"
 
-    assert client.delete(f"/api/v1/herbs/{herb_id}").status_code == 200
+    doc_id = make_doc_id("herb", uuid.UUID(herb_id), uuid.UUID(kb_id))
+    resp = client.delete(f"/api/v1/kb/{kb_id}/resources/herb/{herb_id}")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["unmounted"] is True
+    # 等待向量删除传播完成（Milvus 最终一致），再验证检索隔离
+    _wait_doc_gone(doc_id)
+
     second = _ask(client, f"{herb_name}有什么功效？", kb_id)
     assert second["citations"] == [], "软删除资源不得继续出现在引用中"
+
+    # 清理直插的资源行（挂载已随卸载移除）
+    _delete_herb_row(herb_id)
 
 
 @pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")

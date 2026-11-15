@@ -17,6 +17,7 @@ import pytest
 from src.application.rag_service import RagService, _RESOURCE_TYPE_LABELS
 from src.infrastructure import milvus_store
 from src.infrastructure.embedding import MockEmbedding
+from src.infrastructure.milvus_store import VectorRow
 from src.infrastructure.rerank import MockRerank
 from src.application.resource_vector_service import ResourceVectorService, make_doc_id
 from tests.test_upload import PG_AVAILABLE
@@ -173,34 +174,42 @@ def test_resource_type_labels_complete():
 
 @pytest.fixture
 def kb_with_resource(client):
-    """创建 KB + Herb + 挂载，返回 (kb_id, herb_id, herb_name)。"""
+    """创建 KB + 直接写入一条资源向量行，返回 (kb_id, herb_id, herb_name)。
+
+    原实现经旧资源中心 REST API（POST /api/v1/herbs）创建资源并挂载，
+    资源中心已下线；资源命中检索与 KB 隔离语义不变，改为直接构造
+    VectorRow 写入向量库（与资源向量化路径写入的字段口径一致）。
+    """
     resp = client.post("/api/v1/kb", json={"name": f"RAG集成KB-{_SUFFIX}"})
     assert resp.status_code == 201
     kb_id = resp.json()["id"]
 
     herb_name = f"检索药-{_SUFFIX}"
-    resp = client.post("/api/v1/herbs", json={
-        "name": herb_name,
-        "aliases": ["测试别名"],
-        "properties": "辛甘温",
-        "channels": ["心", "肺"],
-        "effects": "发汗解表",
-        "source": "伤寒论",
-        "description": "测试中药描述",
-    })
-    assert resp.status_code == 201
-    herb_id = resp.json()["id"]
-
-    resp = client.post(
-        f"/api/v1/kb/{kb_id}/resources",
-        json={"resource_type": "herb", "resource_id": herb_id},
-    )
-    assert resp.status_code == 201
+    herb_id = str(uuid.uuid4())
+    doc_id = make_doc_id("herb", uuid.UUID(herb_id), uuid.UUID(kb_id))
+    emb = MockEmbedding()
+    dense, sparse = emb.encode([herb_name])
+    store = milvus_store.get_vector_store()
+    store.ensure_collection()
+    store.insert([VectorRow(
+        id=doc_id,
+        doc_id=doc_id,
+        kb_id=kb_id,
+        chunk_index=0,
+        content=f"{herb_name}：辛甘温，发汗解表。测试中药描述。",
+        page_num=None,
+        title_path=None,
+        dense_vector=dense[0],
+        sparse_vector=sparse[0],
+        resource_type="herb",
+        resource_id=herb_id,
+        resource_name=herb_name,
+        source_kind="resource",
+    )])
 
     yield kb_id, herb_id, herb_name
 
-    client.delete(f"/api/v1/kb/{kb_id}/resources/herb/{herb_id}")
-    client.delete(f"/api/v1/herbs/{herb_id}")
+    store.delete_by_kb(kb_id)
     client.delete(f"/api/v1/kb/{kb_id}")
 
 

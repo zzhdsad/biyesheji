@@ -12,12 +12,18 @@
 复用 test_knowledge_base_resources.py 的 KBRKeeper 模式，保证测试隔离与清理。
 """
 
+import asyncio
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import src.core.deps as deps_mod  # noqa: E402
-from src.domain.models import User  # noqa: E402
+from src.core.config import settings  # noqa: E402
+from src.domain.models import Herb, Literature, Prescription, Theory, User  # noqa: E402
 from src.infrastructure import milvus_store  # noqa: E402
 from src.application.resource_vector_service import make_doc_id  # noqa: E402
 from tests.test_upload import PG_AVAILABLE  # noqa: E402
@@ -25,6 +31,55 @@ from tests.test_upload import PG_AVAILABLE  # noqa: E402
 pytestmark = pytest.mark.skipif(not PG_AVAILABLE, reason="PostgreSQL 未启动")
 
 _SUFFIX = uuid.uuid4().hex[:8]
+
+_RESOURCE_TABLES = {
+    "herbs": Herb,
+    "prescriptions": Prescription,
+    "theories": Theory,
+    "literatures": Literature,
+}
+
+
+def _run_db(coro):
+    """TestClient 占用主线程事件循环，DB 直插/直删放到独立线程执行。"""
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
+def _insert_resource(table: str, name: str) -> str:
+    """资源中心 REST API 已下线，改为 ORM 直插最小资源行（挂载端点仍校验存在性）。"""
+    cls = _RESOURCE_TABLES[table]
+    rid = uuid.uuid4()
+
+    async def _run():
+        engine = create_async_engine(settings.DATABASE_URL, poolclass=None)
+        try:
+            async with async_sessionmaker(engine)() as session:
+                session.add(cls(id=rid, name=name))
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+    _run_db(_run())
+    return str(rid)
+
+
+def _delete_resource(table: str, resource_id: str) -> None:
+    """按白名单表名直删资源行（REST 删除端点已下线）。"""
+    assert table in _RESOURCE_TABLES
+
+    async def _run():
+        engine = create_async_engine(settings.DATABASE_URL, poolclass=None)
+        try:
+            async with async_sessionmaker(engine)() as session:
+                await session.execute(
+                    text(f"DELETE FROM {table} WHERE id = :rid"), {"rid": resource_id}
+                )
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+    _run_db(_run())
 
 
 class _KBRIntegrationKeeper:
@@ -44,38 +99,27 @@ class _KBRIntegrationKeeper:
 
     def herb(self, name: str | None = None) -> dict:
         label = name or f"集成药-{_SUFFIX}"
-        resp = self.client.post("/api/v1/herbs", json={"name": label})
-        assert resp.status_code == 201, resp.text
-        body = resp.json()
-        self._created.append(("herb", body["id"], None))
-        return body
+        rid = _insert_resource("herbs", label)
+        self._created.append(("herb", rid, {"table": "herbs"}))
+        return {"id": rid, "name": label}
 
     def prescription(self, name: str | None = None) -> dict:
         label = name or f"集成方-{_SUFFIX}"
-        resp = self.client.post("/api/v1/prescriptions", json={"name": label})
-        assert resp.status_code == 201, resp.text
-        body = resp.json()
-        self._created.append(("prescription", body["id"], None))
-        return body
+        rid = _insert_resource("prescriptions", label)
+        self._created.append(("prescription", rid, {"table": "prescriptions"}))
+        return {"id": rid, "name": label}
 
     def theory(self, name: str | None = None) -> dict:
         label = name or f"集成理论-{_SUFFIX}"
-        resp = self.client.post("/api/v1/theories", json={"name": label})
-        assert resp.status_code == 201, resp.text
-        body = resp.json()
-        self._created.append(("theory", body["id"], None))
-        return body
+        rid = _insert_resource("theories", label)
+        self._created.append(("theory", rid, {"table": "theories"}))
+        return {"id": rid, "name": label}
 
     def literature(self, name: str | None = None) -> dict:
         label = name or f"集成文献-{_SUFFIX}"
-        resp = self.client.post(
-            "/api/v1/literatures",
-            json={"name": label, "author": "测试作者", "dynasty": "汉"},
-        )
-        assert resp.status_code == 201, resp.text
-        body = resp.json()
-        self._created.append(("literature", body["id"], None))
-        return body
+        rid = _insert_resource("literatures", label)
+        self._created.append(("literature", rid, {"table": "literatures"}))
+        return {"id": rid, "name": label}
 
     def mount(self, kb_id: str, resource_type: str, resource_id: str) -> dict:
         resp = self.client.post(
@@ -95,14 +139,8 @@ class _KBRIntegrationKeeper:
                 self.client.delete(
                     f"/api/v1/kb/{ctx['kb_id']}/resources/{ctx['resource_type']}/{ctx['resource_id']}"
                 )
-            elif kind == "herb":
-                self.client.delete(f"/api/v1/herbs/{item_id}")
-            elif kind == "prescription":
-                self.client.delete(f"/api/v1/prescriptions/{item_id}")
-            elif kind == "theory":
-                self.client.delete(f"/api/v1/theories/{item_id}")
-            elif kind == "literature":
-                self.client.delete(f"/api/v1/literatures/{item_id}")
+            elif kind in ("herb", "prescription", "theory", "literature"):
+                _delete_resource(ctx["table"], item_id)
             elif kind == "kb":
                 self.client.delete(f"/api/v1/kb/{item_id}")
 
@@ -127,6 +165,18 @@ def _make_other_user() -> User:
 def _store():
     """获取当前全局向量库（conftest 注入的 InMemoryVectorStore 或 MilvusStore）。"""
     return milvus_store.get_vector_store()
+
+
+def _wait_doc_gone(doc_id: str, timeout: float = 5.0) -> None:
+    """Milvus 删除为最终一致（实验：约 1s 内生效、立即查询仍可见），
+    轮询等待删除传播完成后再做断言；InMemoryVectorStore 立即返回。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if len(_store().query_rows(doc_id)) == 0:
+            return
+        time.sleep(0.2)
+    remaining = _store().query_rows(doc_id)
+    assert len(remaining) == 0, f"删除后 {timeout}s 向量仍可见：{doc_id}"
 
 
 # ── 挂载写入向量 ────────────────────────────────────────────────────────────
@@ -191,7 +241,7 @@ def test_unmount_deletes_vectors(kbr_int_keeper, client):
     assert resp.json()["unmounted"] is True
 
     # 向量已被删除
-    assert len(_store().query_rows(doc_id)) == 0
+    _wait_doc_gone(doc_id)
     # 从 keeper 移除已删 mount，避免 teardown 重复 DELETE
     kbr_int_keeper._created = [
         c for c in kbr_int_keeper._created
@@ -226,9 +276,8 @@ def test_cross_kb_isolation_vectors(kbr_int_keeper, client):
         c for c in kbr_int_keeper._created if c[1] != m1["id"]
     ]
 
-    # KB1 向量已删除
-    assert len(_store().query_rows(doc_id_1)) == 0
-    # KB2 向量不受影响
+    # KB1 向量已删除；KB2 向量不受影响
+    _wait_doc_gone(doc_id_1)
     assert len(_store().query_rows(doc_id_2)) >= 1
 
 
@@ -248,7 +297,7 @@ def test_remount_idempotent(kbr_int_keeper, client):
     # 卸载
     resp = client.delete(f"/api/v1/kb/{kb['id']}/resources/herb/{h['id']}")
     assert resp.status_code == 200
-    assert len(_store().query_rows(doc_id)) == 0
+    _wait_doc_gone(doc_id)
     # 从 keeper 移除已删 mount
     kbr_int_keeper._created = [
         c for c in kbr_int_keeper._created

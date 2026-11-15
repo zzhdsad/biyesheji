@@ -199,7 +199,10 @@ class Settings(BaseSettings):
     EMBEDDING_DEVICE: str = "cpu"
     # 模型内部真正的前向微批（一次前向编码多少条）：实测 2 线程 CPU 上
     # 16 已是最优，放大到 32/64 反而明显变慢（长序列的内存/缓存压力更大）。
-    EMBEDDING_BATCH_SIZE: int = 16
+    EMBEDDING_BATCH_SIZE: int = 64
+    # CPU 上对 BGE-M3 的 Linear 层做动态 int8 量化（约 2-3 倍吞吐）；
+    # 量化失败会自动回退全精度，不阻断向量化。GPU 不使用。
+    EMBEDDING_QUANTIZE: bool = True
     MILVUS_DIM: int = 1024
     # Milvus 单次 insert RPC 发送的行数（结构化向量化与分批写入共用）。
     # 只影响 RPC 分片，不改变写入总量；保持较小值避免单条 gRPC 消息过大。
@@ -208,7 +211,7 @@ class Settings(BaseSettings):
     # 放大后 FlagEmbedding 能在更大集合内按长度排序再切微批，减少动态
     # padding 的填充；模型内部前向仍按 EMBEDDING_BATCH_SIZE 控制，单条
     # 由 max_length=1024 截断，因此不抬高单次前向的 token 上限。
-    VECTORIZE_ENCODE_BATCH_SIZE: int = 256
+    VECTORIZE_ENCODE_BATCH_SIZE: int = 512
 
     # ── 结构化数据解析 / 关联记录生成的分批大小 ──────────────────────────────
     # 解析：每批从文件产出多少条记录、每次 INSERT 多少条；关联生成：每次从
@@ -248,7 +251,14 @@ class Settings(BaseSettings):
 
     # 检索参数（默认值同时作为系统配置的默认值来源，见 routes/settings.py::_system_defaults）
     RECALL_TOP_K: int = 10  # 每路召回数量（送入 RRF 融合）
-    RERANK_TOP_N: int = 3  # 精排后返回给 LLM 的最终数量
+    RERANK_TOP_N: int = 3
+    # Reranker 是 CPU 问答延迟的主要来源：只精排 RRF 前 N 条，
+    # 不再把 40–80 条全送 Cross-Encoder；N 可按机器性能调整。
+    RERANK_MAX_CANDIDATES: int = 10
+    RERANK_BATCH_SIZE: int = 32
+    RERANK_MAX_LENGTH: int = 512
+    # CPU 上对 Reranker 的 Linear 层做 int8 动态量化；失败自动回退。
+    RERANK_QUANTIZE: bool = True  # 精排后返回给 LLM 的最终数量
     RRF_K: int = 60  # RRF 融合平滑常数
     # 相关性门槛（BUSINESS_RULES §6：检索相关度 < 0.35 时拒答）
     RELEVANCE_THRESHOLD: float = 0.35

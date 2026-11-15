@@ -5,14 +5,15 @@
 
 覆盖：
 - BUG-063 evidence_id 不得混入展示位次 source_index（必须是稳定主键）
-- BUG-064 KG 证据编号与分组顺序的已知差异（本批不改排序规则，仅锁定）
-- BUG-065 非流式 Citation 保留 KG 关系字段（kg_relation / kg_hop / kg_provenance）
+- BUG-064（更新）证据分组按组内最高分降序，与 source_index 编号顺序可能不一致
 - BUG-066 SSE 协议稳定：不新增事件类型，done.answer 为最终权威答案
 - BUG-068 _require_admin 与 client_ip 单一实现
 - BUG-069 回收站保留天数口径统一
 - BUG-070 统计口径排除已删除数据
 - BUG-071 batch_restore 预检不再全表加载
 - BUG-072 审计 IP 取值经可信代理门禁
+
+注：原 BUG-064 KG 编号锁定与 BUG-065 KG 关系字段用例随知识图谱功能下线移除。
 
 需要 PostgreSQL 的用例统一 skip（其余为纯逻辑用例）。
 """
@@ -40,26 +41,6 @@ def _doc_hit(chunk_id: str = "d1c1", score: float = 0.9, content: str = "工时�
         "title_path": "考勤",
         "content": content,
         "score": score,
-    }
-
-
-def _kg_hit(score: float = 0.5, content: str = "当归 配伍 黄芪") -> dict:
-    """KG 关系命中（阶段十三；字段口径对齐 kg_retrieval.retrieve 的输出）。"""
-    return {
-        "id": "kg:e1",
-        "doc_id": "kg:e1",
-        "content": content,
-        "score": score,
-        # BUG-064：KG 命中复用 dense_score 字段通过 Relevance Gate（量纲不同，已知限制）
-        "dense_score": score,
-        "source_kind": "kg",
-        "resource_type": "herb",
-        "resource_id": "r-1",
-        "resource_name": "当归",
-        "doc_name": "当归",
-        "kg_relation": "compatible",
-        "kg_hop": 1,
-        "kg_provenance": "《本草纲目》",
     }
 
 
@@ -346,58 +327,33 @@ def test_stable_evidence_id_uses_content_not_index():
     assert same != other
 
 
-# ── BUG-064：KG 证据编号与分组顺序的已知差异（锁定） ─────────────────────────
-
-
-def test_kg_evidence_numbered_last():
-    """KG 命中拼在心排序列末尾 → KG 的 source_index 总是最大的一批（当前行为）。"""
-    from src.application.evidence import build_evidence
-
-    ev = build_evidence([_doc_hit(score=0.9), _kg_hit(score=0.5)])
-
-    assert [e["source_index"] for e in ev] == [1, 2]
-    assert ev[-1]["source_kind"] == "kg"
+# ── BUG-064：证据分组顺序按组内最高分（锁定） ────────────────────────────────
 
 
 def test_group_order_follows_max_score_not_source_index():
     """已知限制（BUG-064，本批不修）：分组按组内最高分降序，与 source_index 可能不一致。
 
-    这里构造「KG 分更高但编号靠后」的场景，把这一不一致固化为断言：
+    构造「资源证据分更高但编号靠后」的场景，把这一不一致固化为断言：
     将来若要做"统一排序"的实验，本用例必须同步更新。
     """
     from src.application.evidence import group_evidence
 
-    ev = hit_to_evidence(_doc_hit(score=0.4), 1), hit_to_evidence(_kg_hit(score=0.95), 2)
+    res_hit = {
+        "id": "r-1", "doc_id": "a" * 64, "content": "金银花证据文本",
+        "page_num": None, "title_path": None, "score": 0.95,
+        "dense_score": 0.95, "source_kind": "resource",
+        "resource_type": "herb", "resource_id": "r-1",
+        "resource_name": "金银花", "doc_name": "金银花",
+    }
+    ev = hit_to_evidence(_doc_hit(score=0.4), 1), hit_to_evidence(res_hit, 2)
     groups = group_evidence(list(ev))
 
-    assert [g["group_key"] for g in groups] == ["kg:herb", "document"], "分组按最高分降序"
-    kg_evidence = [e for g in groups if g["group_key"] == "kg:herb" for e in g["sources"][0]["evidences"]]
-    assert kg_evidence[0]["source_index"] == 2, "KG 编号仍在末尾：分组顺序与编号顺序不一致"
-
-
-# ── BUG-065：非流式 Citation 不得丢失 KG 关系字段 ────────────────────────────
-
-
-def test_citation_model_keeps_kg_relation_fields():
-    """Pydantic 会静默丢弃未声明字段 → 必须在 Citation 上显式声明（BUG-065）。"""
-    from src.api.routes.chat import Citation
-
-    citation = Citation(**hit_to_evidence(_kg_hit(), 1))
-
-    assert citation.kg_relation == "compatible"
-    assert citation.kg_hop == 1
-    assert citation.kg_provenance == "《本草纲目》"
-
-
-def test_citation_model_kg_fields_are_none_for_non_kg_evidence():
-    """非 KG 证据的三个 KG 字段保持 None（不影响旧客户端解析）。"""
-    from src.api.routes.chat import Citation
-
-    citation = Citation(**hit_to_evidence(_doc_hit(), 1))
-
-    assert citation.kg_relation is None
-    assert citation.kg_hop is None
-    assert citation.kg_provenance is None
+    assert [g["group_key"] for g in groups] == ["resource:herb", "document"], "分组按最高分降序"
+    res_evidence = [
+        e for g in groups if g["group_key"] == "resource:herb"
+        for e in g["sources"][0]["evidences"]
+    ]
+    assert res_evidence[0]["source_index"] == 2, "资源编号在末尾：分组顺序与编号顺序不一致"
 
 
 # ── BUG-066：SSE 协议稳定 + done.answer 权威性 ──────────────────────────────

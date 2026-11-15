@@ -35,7 +35,6 @@ const PREFIX_TO_ROUTE_FILE: Record<string, string> = {
   audit: 'audit.py',
   settings: 'settings.py',
   feedbacks: 'feedbacks.py',
-  kg: 'kg.py',
 };
 
 /**
@@ -219,14 +218,13 @@ describe('阶段十六：前后端 API 契约守卫', () => {
       'reflection',
       'evidenceGroups',
       'evidenceSummary',
-      'kgEvidence',
       'reflection_retry_count',
       'total_retry_count',
     ]) {
       assert.ok(types.includes(field), `types/index.ts 缺少字段声明：${field}`);
     }
     const chatStoreSrc = fs.readFileSync(path.join(FRONTEND_ROOT, 'src/stores/chatStore.ts'), 'utf8');
-    for (const token of ['kgEvidence', 'evidenceGate', 'reflection', 'answer']) {
+    for (const token of ['evidenceGate', 'reflection', 'answer']) {
       assert.ok(chatStoreSrc.includes(token), `chatStore.ts 未处理 ${token}`);
     }
   });

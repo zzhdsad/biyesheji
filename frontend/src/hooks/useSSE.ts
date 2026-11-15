@@ -30,8 +30,6 @@ export interface SSEHandlers {
     evidence?: Citation[];
     evidence_groups?: EvidenceGroup[];
     evidence_summary?: EvidenceSummary;
-    /** 阶段十三：KG 证据切片 */
-    kg_evidence?: Citation[];
     /** 阶段十四：Evidence Gate 决策（Gate 关闭时为 null） */
     evidence_gate?: GateDecision | null;
   }) => void;
@@ -47,7 +45,6 @@ export interface SSEHandlers {
     evidence?: Citation[];
     evidence_groups?: EvidenceGroup[];
     evidence_summary?: EvidenceSummary;
-    kg_evidence?: Citation[];
     reflection?: ReflectionDecision | null;
   }) => void;
   onError?: (data: { message: string }) => void;

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import weakref
 from typing import Any
 
 from loguru import logger
@@ -49,15 +50,21 @@ _snapshot: dict[str, Any] | None = None
 _snapshot_at: float = 0.0
 _from_db: bool = False
 _warned: bool = False
-_lock: asyncio.Lock | None = None
+# P7：asyncio.Lock 一旦在某个事件循环中等待过，就不能被另一个循环复用。
+# 测试会为每个用例创建/销毁事件循环，旧实现会跨循环复用同一个 Lock，
+# 轻则 warning，重则 RuntimeError（"bound to a different event loop"）。
+# 这里按运行中的事件循环各持一把锁；锁只保护单次 DB 读取，快照仍全局共享。
+_locks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
 def _get_lock() -> asyncio.Lock:
-    """锁延迟到事件循环中再建（避免跨事件循环绑定）。"""
-    global _lock
-    if _lock is None:
-        _lock = asyncio.Lock()
-    return _lock
+    """返回当前事件循环专属的配置加载锁。"""
+    loop = asyncio.get_running_loop()
+    lock = _locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _locks[loop] = lock
+    return lock
 
 
 def system_config_defaults() -> dict[str, Any]:

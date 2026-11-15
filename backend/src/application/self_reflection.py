@@ -41,19 +41,19 @@ from dataclasses import dataclass, field
 
 from loguru import logger
 
-from src.application.evidence import SOURCE_KIND_KG, build_evidence
+from src.application.evidence import build_evidence
 from src.application.evidence_gate import (
     DECISION_ACCEPT as GATE_ACCEPT,
-    KG_STRONG_RELATIONS,
     classify_evidence,
     select_retry_strategy,
 )
 from src.core.config import settings
 
 # ── 反思规则版本（写入 ReflectionDecision / config_snapshot，实验可追溯）────
-# reflection-v1：阶段十五初始规则（引用完整性 + 证据支持 + KG 弱关系 + 多源覆盖
+# reflection-v1：阶段十五初始规则（引用完整性 + 证据支持 + 多源覆盖
 #                + 可选 LLM 一致性检查 + 单次 revise / retry）
-REFLECTION_VERSION = "reflection-v1"
+# reflection-v2：知识图谱（KG）功能下线，移除 KG 弱关系反思规则，其余不变
+REFLECTION_VERSION = "reflection-v2"
 
 # ── 三种反思结果（需求 §6）──────────────────────────────────────────────────
 DECISION_ACCEPT = "accept"
@@ -86,25 +86,17 @@ SUPPORT_MIN_OVERLAP = 0.25
 MAX_UNSUPPORTED_SAMPLES = 3
 SAMPLE_MAX_LEN = 80
 
-# ── 医学结论类关键词（出现在答案里，而支撑证据只有弱 KG 关系 → 不得接受）────
-MEDICAL_CLAIM_KEYWORDS: tuple[str, ...] = (
-    "主治", "功效", "疗效", "治疗", "治愈", "防治", "预防",
-    "用药", "剂量", "用量", "禁忌", "适应症", "适用于", "医嘱", "处方",
-)
-
 # ── 问题 → 动作映射（确定性；retry 优先于 revise）───────────────────────────
 ISSUE_ACTION: dict[str, str] = {
     # 需要新证据（现有证据不足以支撑答案）
     "answer_bypasses_gate": DECISION_RETRY,
     "no_evidence_for_factual_answer": DECISION_RETRY,
     "cited_evidence_weak": DECISION_RETRY,
-    "kg_weak_relation_only": DECISION_RETRY,
     "multi_source_partial_coverage": DECISION_RETRY,
     # 现有证据足够，但答案表达超出了证据 → 基于同一份证据重写
     "no_citation_for_factual_answer": DECISION_REVISE,
     "citation_out_of_range": DECISION_REVISE,
     "unsupported_sentences": DECISION_REVISE,
-    "medical_claim_from_weak_relation": DECISION_REVISE,
     "llm_unsupported_claims": DECISION_REVISE,
 }
 
@@ -126,7 +118,7 @@ REVISION_SYSTEM_PROMPT = (
     "【硬性规则】\n"
     "1. 不得引入资料之外的任何事实、数字、结论或医疗建议；不得用自己的知识补答。\n"
     "2. 资料没有直接支持的内容必须删除；宁可少答，不可多答。\n"
-    "3. 不得把图谱中的“共享标签/相关”关系扩展为功效、主治、用药等医学结论。\n"
+    "3. 不得将资料中没有明确支持的信息扩展为功效、主治、用药等医学结论。\n"
     "4. 每个来自资料的句子末尾必须标注来源 [citation: 编号, N]，N 为资料标注的页码数字（无页码写 0），"
     "不要把 N 或「页码」两个字照抄；编号即资料前的方括号编号。\n"
     "5. 若资料不足以支撑任何结论，直接回答：根据现有资料，我无法回答该问题。\n"
@@ -217,25 +209,6 @@ def is_content_sentence(sentence: str) -> bool:
     return True
 
 
-def has_medical_claim(text: str) -> bool:
-    """答案是否包含医学结论类表述（功效/主治/用量/禁忌……）。"""
-    body = strip_citations(text)
-    return any(k in body for k in MEDICAL_CLAIM_KEYWORDS)
-
-
-def _is_weak_kg(evidence: dict) -> bool:
-    """该 KG 证据是否为弱证据（related_to / 多跳 / 未知关系）。
-
-    与 EvidenceGate.classify_evidence 口径一致：只有 1 跳的 contains/records
-    业务事实算强事实，其余（弱关系、多跳）都不得单独支撑结论。
-    """
-    relation = str(evidence.get("kg_relation") or "")
-    hop = _as_int(evidence.get("kg_hop"), 1)
-    if relation in KG_STRONG_RELATIONS and hop <= 1:
-        return False
-    return True
-
-
 def fallback_reflection_decision(reason: str, evidence_count: int = 0) -> "ReflectionDecision":
     """安全兜底：Reflection 自身异常 → accept + is_valid=False（不影响原问答）。"""
     return ReflectionDecision(
@@ -249,7 +222,7 @@ def fallback_reflection_decision(reason: str, evidence_count: int = 0) -> "Refle
 
 
 def reflection_config(enabled: bool | None = None, llm_enabled: bool | None = None) -> dict:
-    """Reflection 配置快照（写入 EvaluationRun.config_snapshot，实验可复现）。"""
+    """Reflection 配置快照（写入问答响应的 reflection，保证决策可复现）。"""
     if enabled is None:
         enabled = bool(getattr(settings, "SELF_REFLECTION_ENABLED", True))
     if llm_enabled is None:
@@ -268,7 +241,6 @@ def reflection_config(enabled: bool | None = None, llm_enabled: bool | None = No
         "max_reflection_retry": 1,
         "max_revision": 1,
         "issue_action": dict(ISSUE_ACTION),
-        "medical_claim_keywords": list(MEDICAL_CLAIM_KEYWORDS),
     }
 
 
@@ -605,20 +577,11 @@ class SelfReflection:
         # 5) 引用编号越界：指向不存在的证据
         if invalid_count:
             issues.append("citation_out_of_range")
-        # 6) 引用的证据全是弱证据（低分 / related_to / 多跳 KG）→ 不足以支撑答案
+        # 6) 引用的证据全是弱证据（低于采纳阈值）→ 不足以支撑答案
         if cited and not cited_accepted:
             issues.append("cited_evidence_weak")
 
-        # 7) KG 弱关系检查：不得把 related_to / 多跳关系当作强医学事实
-        kg_cited = [e for e in cited if e.get("source_kind") == SOURCE_KIND_KG]
-        weak_kg_cited = [e for e in kg_cited if _is_weak_kg(e)]
-        if kg_cited and len(weak_kg_cited) == len(kg_cited):
-            if has_medical_claim(answer):
-                issues.append("medical_claim_from_weak_relation")
-            else:
-                issues.append("kg_weak_relation_only")
-
-        # 8) 句级支持度：找出"没有引用且不在证据文本上"的陈述
+        # 7) 句级支持度：找出"没有引用且不在证据文本上"的陈述
         #    （无证据时由 no_evidence_for_factual_answer 统一表达，不重复记问题）
         unsupported = self._unsupported_sentences(answer, evidence) if evidence else []
         if unsupported:
@@ -649,7 +612,6 @@ class SelfReflection:
             "cited_evidence_count": len(cited),
             "cited_accepted_count": len(cited_accepted),
             "cited_source_kinds": sorted({str(e.get("source_kind")) for e in cited}),
-            "cited_kg_relations": sorted({str(e.get("kg_relation")) for e in kg_cited}),
             "unsupported_sentence_count": len(unsupported),
             "unsupported_sentences": [
                 u[:SAMPLE_MAX_LEN] for u in unsupported[:MAX_UNSUPPORTED_SAMPLES]
@@ -677,11 +639,7 @@ class SelfReflection:
                 gate_decision=gate_decision,
             )
 
-        # 安全优先：答案把弱关系扩展为医学结论时，必须先改写（revise），
-        # 而不是再去检索更多证据试图"补强"这条弱关系（AGENTS.md §10 医疗安全）
-        if "medical_claim_from_weak_relation" in issues:
-            decision = DECISION_REVISE
-        elif any(ISSUE_ACTION.get(i) == DECISION_RETRY for i in issues):
+        if any(ISSUE_ACTION.get(i) == DECISION_RETRY for i in issues):
             decision = DECISION_RETRY
         else:
             decision = DECISION_REVISE

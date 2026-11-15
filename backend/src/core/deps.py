@@ -38,7 +38,9 @@ from src.infrastructure.database import get_db
 # 这样即使 FastAPI 已经缓存了函数引用，动态切换也能生效
 TEST_MODE_ENABLED: bool = False
 # 非生产环境才允许测试模式生效（生产误开也不至于直接绕过鉴权）
-TEST_MODE_ALLOWED_ENVS = ("dev", "test", "testing")
+# 非生产环境才允许测试模式生效；dev 也不再允许，避免本地/容器误用
+# ENV=dev 时把测试模式带进可访问网络的服务。自动化测试使用 ENV=test。
+TEST_MODE_ALLOWED_ENVS = ("test", "testing")
 
 
 def test_mode_active() -> bool:

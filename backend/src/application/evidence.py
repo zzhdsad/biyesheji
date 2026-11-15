@@ -33,8 +33,6 @@ from src.core.runtime_config import get_system_value
 # ── 来源类别（已有概念，Stage 4-4 引入，继续复用）────────────────────────────
 SOURCE_KIND_DOCUMENT = "document"
 SOURCE_KIND_RESOURCE = "resource"
-# 阶段十三：知识图谱关系证据（与 document / resource 并列，走同一套 Evidence）
-SOURCE_KIND_KG = "kg"
 # 第六阶段：结构化数据（非关联记录）与关联结构化数据（文件组关联记录）
 SOURCE_KIND_STRUCTURED = "structured"
 SOURCE_KIND_STRUCTURED_GROUP = "structured_group"
@@ -42,7 +40,6 @@ SOURCE_KIND_STRUCTURED_GROUP = "structured_group"
 SOURCE_KIND_LABELS = {
     SOURCE_KIND_DOCUMENT: "文档",
     SOURCE_KIND_RESOURCE: "资源",
-    SOURCE_KIND_KG: "知识图谱",
     SOURCE_KIND_STRUCTURED: "结构化数据",
     SOURCE_KIND_STRUCTURED_GROUP: "关联数据",
 }
@@ -96,13 +93,8 @@ def relevance_score(hit: dict) -> float | None:
 
     取值顺序：
     - 向量命中（Document / Resource）：dense_score（COSINE，同量纲）
-    - KG 命中：沿用既有行为（BUG-064：dense_score 被复用为实体匹配分，量纲不同），
-      取 rerank_score / score
     - 都没有 → None（相关度未知，调用方**不得**按 0 静默丢弃）
     """
-    if hit.get("source_kind") == SOURCE_KIND_KG:
-        raw = hit.get("rerank_score", hit.get("score"))
-        return float(raw) if raw is not None else None
     raw = hit.get("dense_score")
     if raw is None:
         raw = hit.get("rerank_score", hit.get("score"))
@@ -145,25 +137,19 @@ def hit_to_evidence(hit: dict, source_index: int) -> dict:
     # 证据分级用"语义相关度"（与阈值同量纲），展示分数仍用 hit_score（兼容 Citation）
     rel = relevance_score(hit)
     level_score = rel if rel is not None else score
-    is_kg = hit.get("source_kind") == SOURCE_KIND_KG
-    is_resource = is_resource_hit(hit) or is_kg
+    is_resource = is_resource_hit(hit)
     is_structured = hit.get("source_kind") in (
         SOURCE_KIND_STRUCTURED,
         SOURCE_KIND_STRUCTURED_GROUP,
     )
-    source_kind = (
-        SOURCE_KIND_KG
-        if is_kg
-        else (
-            SOURCE_KIND_STRUCTURED_GROUP
-            if hit.get("source_kind") == SOURCE_KIND_STRUCTURED_GROUP
-            else (
-                SOURCE_KIND_STRUCTURED
-                if hit.get("source_kind") == SOURCE_KIND_STRUCTURED
-                else (SOURCE_KIND_RESOURCE if is_resource else SOURCE_KIND_DOCUMENT)
-            )
-        )
-    )
+    if hit.get("source_kind") == SOURCE_KIND_STRUCTURED_GROUP:
+        source_kind = SOURCE_KIND_STRUCTURED_GROUP
+    elif hit.get("source_kind") == SOURCE_KIND_STRUCTURED:
+        source_kind = SOURCE_KIND_STRUCTURED
+    elif is_resource:
+        source_kind = SOURCE_KIND_RESOURCE
+    else:
+        source_kind = SOURCE_KIND_DOCUMENT
     content = hit.get("content", "") or ""
     chunk_id = hit.get("id")
 
@@ -187,10 +173,7 @@ def hit_to_evidence(hit: dict, source_index: int) -> dict:
         base_label = RESOURCE_TYPE_LABELS.get(
             resource_type, resource_type or SOURCE_KIND_LABELS[SOURCE_KIND_RESOURCE]
         )
-        # KG 命中标注为"图谱·中药"等，便于与同类型 Resource 证据区分
-        source_label = (
-            f"图谱·{base_label}" if is_kg else base_label
-        )
+        source_label = base_label
     else:
         source_id = hit.get("doc_id")
         source_name = hit.get("doc_name") or "未知文档"
@@ -258,20 +241,6 @@ def hit_to_evidence(hit: dict, source_index: int) -> dict:
             if is_structured
             else {}
         ),
-        # ── 阶段十四：KG 证据的关系属性（可选）───────────────────────────
-        # Evidence Gate 需要按「关系类型 + 跳数 + 来源」判断 KG 证据可信度，
-        # 不能只依赖 score（KG score 是实体匹配分，不是向量相似度）。
-        # 仅 KG 证据携带；Citation / Evidence 的 Pydantic 输出字段保持不变，
-        # 因此 API 响应结构与旧客户端解析不受影响。
-        **(
-            {
-                "kg_relation": hit.get("kg_relation"),
-                "kg_hop": hit.get("kg_hop"),
-                "kg_provenance": hit.get("kg_provenance"),
-            }
-            if is_kg
-            else {}
-        ),
     }
 
 
@@ -316,16 +285,8 @@ def _group_key_and_label(evidence: dict) -> tuple[str, str, str | None]:
     """Evidence → (group_key, group_label, 细分类型)。
 
     - Resource：按 resource_type（herb / prescription / theory / literature）分组
-    - KG：按 resource_type 归入 kg:<type> 组（与同名 Resource 组分开，便于实验对比）
     - Document：统一归入 document 组，组内按具体文档聚合
     """
-    if evidence.get("source_kind") == SOURCE_KIND_KG:
-        subtype = evidence.get("resource_type") or SOURCE_KIND_KG
-        return (
-            f"{SOURCE_KIND_KG}:{subtype}",
-            f"{SOURCE_KIND_LABELS[SOURCE_KIND_KG]}·{RESOURCE_TYPE_LABELS.get(subtype, subtype)}",
-            subtype,
-        )
     if evidence.get("source_kind") == SOURCE_KIND_RESOURCE:
         subtype = evidence.get("resource_type") or SOURCE_KIND_RESOURCE
         return (

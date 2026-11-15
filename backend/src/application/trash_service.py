@@ -218,17 +218,10 @@ async def _purge_one(
 async def _cleanup_resource_side_effects(
     db: AsyncSession, resource_type: str, resource_id: uuid.UUID
 ) -> None:
-    """彻底删除资源前：清理 KB 挂载 + Milvus 向量（失败即中断），再清 KG 节点。"""
+    """彻底删除资源前：清理 KB 挂载 + Milvus 向量（失败即中断）。"""
     from src.application.resource_vector_service import ResourceVectorService
 
     await ResourceVectorService().cleanup_resource_mounts(db, resource_type, resource_id)
-
-    try:
-        from src.application.kg_service import KgService
-
-        await KgService(db).delete_resource_nodes(resource_type, resource_id)
-    except Exception as exc:  # noqa: BLE001 - KG 清理失败不阻断删除
-        logger.warning(f"KG 节点清理失败 {resource_type}={resource_id}: {exc}")
 
 
 async def _detach_tag(db: AsyncSession, tag_id: uuid.UUID) -> None:

@@ -19,7 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.application.evidence import SOURCE_KIND_KG, package_evidence
+from src.application.evidence import package_evidence
 from src.application.rag_service import RagService
 from src.core.config import settings
 from src.core.deps import get_accessible_kb_ids
@@ -73,14 +73,6 @@ class Citation(BaseModel):
     source_name: str = ""
     source_label: str = ""
     evidence_text: str = ""
-    # 阶段十四：KG 关系属性（BUG-065）
-    # 这三个字段此前只存在于流式路径的 dict 里：非流式 /chat/ask 用 Citation(**hit)
-    # 构造，Pydantic 默认忽略未声明字段 → 同一条 KG 证据在流式里带关系信息、
-    # 在非流式里却静默丢失，两条路径语义不一致。这里统一声明为可选字段，
-    # 非 KG 证据保持 None，旧客户端解析不受影响（纯增量字段）。
-    kg_relation: str | None = None
-    kg_hop: int | None = None
-    kg_provenance: str | None = None
     # BUG-（相关度展示）：relevance_score = BGE-M3 dense cosine。
     # hit_to_evidence 已在 evidence dict 中写入，但 Citation Pydantic 未声明，
     # /chat/ask 同步路径下 Pydantic 会静默丢弃该字段，前端只能拿到 ev.score
@@ -88,7 +80,7 @@ class Citation(BaseModel):
     # 缺失时（如历史消息 / 旧 fixture / 缺 dense 的命中）保持 None，前端
     # EvidencePanel 自动 fallback 到 ev.score 展示，UI 行为不变（纯增量字段）。
     relevance_score: float | None = None
-    # 第六阶段：结构化来源追溯（普通文档 / 资源 / KG 证据保持 None）。
+    # 第六阶段：结构化来源追溯（普通文档 / 资源证据保持 None）。
     # source_kind = structured 时携带 document_id / record_id / locate / fields；
     # source_kind = structured_group 时额外携带 group_id / member_files / relations。
     source_doc_id: str | None = None  # 向量分组键（sr:<doc_id> / sgr:<group_id>）
@@ -176,7 +168,7 @@ class RouterDecisionOut(BaseModel):
 
     字段与 application.dynamic_router.RouterDecision.to_dict() 对齐。
     strategy_name 对应 retrieval_strategies.STRATEGIES 中的策略，
-    并可写入 EvaluationRun.retrieval_strategy 做实验对比。
+    并写入响应中的 router_decision，供前端展示当前检索策略。
     """
 
     strategy_name: str
@@ -265,8 +257,6 @@ class ChatAnswerResponse(BaseModel):
     query_analysis: QueryAnalysisOut | None = None
     # 阶段十二：Dynamic Router 决策（新增字段，旧字段不变）
     router_decision: RouterDecisionOut | None = None
-    # 阶段十三：KG 关系证据切片（citations/evidence 已包含，此处仅为便于观察/实验）
-    kg_evidence: list[Evidence] = []
     # 阶段十四：Evidence Gate 决策（向后兼容：Gate 关闭时为 None，旧字段不变）
     evidence_gate: GateDecisionOut | None = None
     # 阶段十五：Self Reflection 决策（向后兼容：Reflection 关闭时为 None）
@@ -452,10 +442,6 @@ async def ask(
         query_analysis=QueryAnalysisOut(**query_analysis.to_dict()),
         # 阶段十二：路由决策（检索前选择策略，检索仍走 Baseline 组件）
         router_decision=RouterDecisionOut(**router_decision.to_dict()),
-        # 阶段十三：KG 证据切片（未启用 KG 策略时为空列表）
-        kg_evidence=[
-            Evidence(**c) for c in citations if c.get("source_kind") == SOURCE_KIND_KG
-        ],
         # 阶段十四：Evidence Gate 决策（Gate 关闭时为 None）
         evidence_gate=(
             GateDecisionOut(**service.last_gate_decision.to_dict())
@@ -483,8 +469,7 @@ async def ask_stream(
     事件协议见原注释，不变（start → citations → delta×N → done）。
     阶段十一：start 事件 data 增加 query_analysis（事件名与顺序不变）。
     阶段十二：start 事件 data 增加 router_decision（事件名与顺序不变）。
-    done 事件 data 增加最终 citations / evidence / evidence_groups / evidence_summary /
-    kg_evidence：citations 事件是生成前候选，done 只保留正文实际引用的来源。
+    done 事件 data 增加最终 citations / evidence / evidence_groups / evidence_summary：
     BUG-035：事件流外层包 _with_heartbeat（注释帧心跳 + 总超时），
     事件名与顺序不变，旧客户端解析不受影响。
     """

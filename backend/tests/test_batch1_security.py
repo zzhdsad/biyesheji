@@ -1,7 +1,6 @@
 """第二轮 Batch 1（安全与数据正确性）回归测试。
 
 覆盖：
-- BUG-001 评测域知识库权限隔离
 - BUG-002 /settings/model 仅管理员可改
 - BUG-003 /settings/model/test SSRF 防护
 - BUG-004 KB 成员角色服务端校验（viewer 不得写）
@@ -10,12 +9,13 @@
 - BUG-027 生产环境禁用 TEST_MODE 后门
 - BUG-040 最后一个管理员不可降级/删除/禁用
 
+原「BUG-001 评测域知识库权限隔离」3 个用例随评估模块下线移除。
+
 所有用例走 auth_client fixture（真实 JWT + 真实 DB），不使用测试模式后门，
 否则无法验证权限本身。未连 PostgreSQL 时整体 skip（权限依赖真实数据）。
 """
 
 import time
-import uuid
 
 import pytest
 from fastapi import HTTPException
@@ -89,108 +89,8 @@ def _make_kb(auth_client, headers: dict, name: str) -> str:
     return resp.json()["id"]
 
 
-# ── BUG-001：评测域权限隔离 ─────────────────────────────────────────────────
-
-
-def test_evaluation_test_cases_require_kb_access(auth_client):
-    """他人私有知识库的测试集/结果不可读、不可改、不可运行。"""
-    admin = _admin_token(auth_client)
-    owner = _create_user(auth_client, admin)
-    other = _create_user(auth_client, admin)
-
-    owner_h = _ready_headers(auth_client, owner)
-    other_h = _ready_headers(auth_client, other)
-
-    kb_id = _make_kb(auth_client, owner_h, "评测权限测试库")
-    resp = auth_client.post(
-        "/api/v1/evaluation/upload",
-        json={
-            "kb_id": kb_id,
-            "cases": [
-                {
-                    "question": "麻黄的功效是什么？",
-                    "golden_answer": "发汗解表，宣肺平喘",
-                    "question_type": "herb",
-                }
-            ],
-        },
-        headers=owner_h,
-    )
-    assert resp.status_code == 200, resp.text
-    case_id = resp.json()["case_ids"][0]
-
-    # owner 可读
-    resp = auth_client.get(
-        f"/api/v1/evaluation/test-cases?kb_id={kb_id}", headers=owner_h
-    )
-    assert resp.status_code == 200
-    assert len(resp.json()) == 1
-
-    # 他人（非成员、非 admin）一律 403
-    resp = auth_client.get(
-        f"/api/v1/evaluation/test-cases?kb_id={kb_id}", headers=other_h
-    )
-    assert resp.status_code == 403
-
-    resp = auth_client.patch(
-        f"/api/v1/evaluation/test-cases/{case_id}",
-        json={"golden_answer": "篡改后的标准答案"},
-        headers=other_h,
-    )
-    assert resp.status_code == 403
-
-    resp = auth_client.post(
-        "/api/v1/evaluation/run",
-        json={"kb_id": kb_id},
-        headers=other_h,
-    )
-    assert resp.status_code == 403
-
-    resp = auth_client.get(
-        f"/api/v1/evaluation/results?kb_id={kb_id}", headers=other_h
-    )
-    assert resp.status_code == 403
-
-    # 不存在的知识库同样 403（不得因"查不到"而放行）
-    resp = auth_client.get(
-        f"/api/v1/evaluation/test-cases?kb_id={uuid.uuid4()}", headers=other_h
-    )
-    assert resp.status_code == 403
-
-
-def test_evaluation_list_endpoints_scoped_to_accessible_kbs(auth_client):
-    """不传 kb_id 的列表接口：普通用户只看到自己可访问知识库的数据。"""
-    admin = _admin_token(auth_client)
-    owner = _create_user(auth_client, admin)
-    other = _create_user(auth_client, admin)
-
-    owner_h = _ready_headers(auth_client, owner)
-    other_h = _ready_headers(auth_client, other)
-    kb_id = _make_kb(auth_client, owner_h, "评测列表隔离测试库")
-
-    for path in ("/api/v1/evaluation/runs", "/api/v1/evaluation/results"):
-        resp = auth_client.get(path, headers=other_h)
-        assert resp.status_code == 200, f"{path}: {resp.text}"
-        kb_ids = {item.get("kb_id") for item in resp.json() if item.get("kb_id")}
-        assert kb_id not in kb_ids, f"{path} 泄漏了他人知识库数据：{kb_ids}"
-
-
-def test_evaluation_run_detail_requires_kb_access(auth_client):
-    """单条运行详情按所属知识库鉴权（越权不得读取他人实验归档）。"""
-    admin = _admin_token(auth_client)
-    owner = _create_user(auth_client, admin)
-    other = _create_user(auth_client, admin)
-    owner_h = _ready_headers(auth_client, owner)
-    other_h = _ready_headers(auth_client, other)
-
-    # 运行 id 不存在 → 404；说明校验发生在鉴权链路上且未放行
-    resp = auth_client.get(f"/api/v1/evaluation/runs/{uuid.uuid4()}", headers=other_h)
-    assert resp.status_code == 404
-
-    # 非法 run_id → 422（不得 500，也不得绕过鉴权）
-    resp = auth_client.get("/api/v1/evaluation/results?run_id=not-a-uuid", headers=other_h)
-    assert resp.status_code == 422
-    assert owner_h and admin  # 保持可读性：owner/admin 头均已就绪
+# 原「BUG-001 评测域权限隔离」3 个用例随评估模块下线移除
+# （KB 访问控制语义仍由 BUG-004/BUG-005 用例在现行 KB/文档端点上覆盖）。
 
 
 # ── BUG-002 / BUG-003：模型配置与连通性测试 ──────────────────────────────────
@@ -426,14 +326,18 @@ def test_prod_rejects_default_secret_key():
     assert dev.SECRET_KEY == DEV_DEFAULT_SECRET_KEY
 
 
-def test_test_mode_backdoor_disabled_in_prod(monkeypatch):
+def test_test_mode_backdoor_disabled_in_prod_and_dev(monkeypatch):
     from src.core.config import settings
 
     monkeypatch.setattr(settings, "ENV", "prod")
     monkeypatch.setattr(deps, "TEST_MODE_ENABLED", True)
     assert deps.test_mode_active() is False
 
+    # P5：dev 也不能启用测试鉴权，只有 test/testing 可以。
     monkeypatch.setattr(settings, "ENV", "dev")
+    assert deps.test_mode_active() is False
+
+    monkeypatch.setattr(settings, "ENV", "test")
     assert deps.test_mode_active() is True
 
 

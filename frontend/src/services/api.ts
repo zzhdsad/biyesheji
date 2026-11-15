@@ -83,8 +83,6 @@ export interface ChatAnswer {
   query_analysis?: QueryAnalysis;
   /** 阶段十二：Dynamic Router 决策 */
   router_decision?: RouterDecision;
-  /** 阶段十三：KG 关系证据切片（citations/evidence 已包含，此处为可选视图） */
-  kg_evidence?: Citation[];
   /** 阶段十四：Evidence Gate 决策（Gate 关闭时为 null） */
   evidence_gate?: GateDecision | null;
   /** 阶段十五：Self Reflection 决策（Reflection 关闭时为 null） */
@@ -590,6 +588,14 @@ export async function saveStructuredRelations(
   const { data } = await api.put<StructuredGroup>(`/structured/groups/${groupId}/relations`, {
     relations,
   });
+  return data;
+}
+
+/** 基于字段名/键候选/样本值重叠生成关系建议（不自动确认）。 */
+export async function suggestStructuredRelations(groupId: string): Promise<StructuredGroup> {
+  const { data } = await api.post<StructuredGroup>(
+    `/structured/groups/${groupId}/relations/suggest`,
+  );
   return data;
 }
 

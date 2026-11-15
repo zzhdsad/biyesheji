@@ -34,6 +34,10 @@ from src.application.structured_runner import (
     is_structured_vector_job_active,
     run_group_vectorize_safely,
 )
+from src.application.structured_vector_service import (
+    VECTOR_CANCEL_MARKER,
+    resume_checkpoint,
+)
 from src.core.deps import get_accessible_kb_ids
 from src.core.exceptions import AppException, NotFoundError
 from src.domain.models import (
@@ -85,7 +89,7 @@ class RelationIn(BaseModel):
     to_field: str
     kind: str = "one_to_many"
     # 用户手动选出的字段即视为已确认；不传时由服务层按 origin 决定默认值。
-    # origin=suggested 仅用于兼容历史遗留关系，当前没有自动生成入口。
+    # origin=suggested 表示系统推荐关系，必须人工确认后才允许生成关联记录。
     confirmed: bool | None = None
     # 来源与评分只是展示/追溯用：origin 只允许 manual / suggested，评分由服务层夹紧
     origin: str = "manual"
@@ -519,6 +523,24 @@ async def save_group_relations(
     return _group_out(group, counts.get(str(group.id), 0))
 
 
+@router.post("/{group_id}/relations/suggest", response_model=GroupOut)
+async def suggest_group_relations(
+    group_id: uuid.UUID,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> GroupOut:
+    """按字段名、主键候选和样本值重叠生成关系建议。
+
+    建议以 origin=suggested、confirmed=False 写入，必须由用户逐条确认；
+    已存在的关系和用户已确认状态不会被覆盖。
+    """
+    user: User = request.state.user
+    await _require_group_write(db, user, group_id)
+    group = await StructuredGroupService(db).suggest_relations(group_id)
+    counts = await _file_counts(db, [group.id])
+    return _group_out(group, counts.get(str(group.id), 0))
+
+
 @router.post("/{group_id}/relations/confirmation", response_model=GroupOut)
 async def confirm_group_relation(
     group_id: uuid.UUID,
@@ -623,10 +645,17 @@ async def revectorize_group(
     ) or is_structured_vector_job_active("group", str(group_id)):
         raise AppException(409, "该文件组已在向量化队列中或正在向量化，请等待完成后再试")
 
+    resume_count = resume_checkpoint(
+        group.vector_status, group.vector_count, group.vector_error
+    )
     await db.execute(
         update(StructuredGroup)
         .where(StructuredGroup.id == group_id)
-        .values(vector_status=VECTOR_STATUS_PENDING, vector_error="")
+        .values(
+            vector_status=VECTOR_STATUS_PENDING,
+            vector_count=resume_count,
+            vector_error=VECTOR_CANCEL_MARKER if resume_count else "",
+        )
     )
     await db.commit()
     await db.refresh(group)
@@ -664,8 +693,8 @@ async def cancel_vectorize_group(
         .where(StructuredGroup.id == group_id)
         .values(
             vector_status=VECTOR_STATUS_PENDING,
-            vector_count=0,
-            vector_error="已停止向量化",
+            vector_count=group.vector_count,
+            vector_error=VECTOR_CANCEL_MARKER,
         )
     )
     await db.commit()

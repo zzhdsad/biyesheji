@@ -6,7 +6,7 @@
  * 目标不是重复 SSE 解析测试，而是验证**最终 ChatMessage 状态正确**：
  * - start / citations / delta / done / error 五类事件对消息属性的影响
  * - 阶段十五遗留问题：done.answer 必须覆盖 revise 前已流式渲染的文本
- * - evidence / evidence_groups / evidence_summary / kg_evidence /
+ * - evidence / evidence_groups / evidence_summary /
  *   evidence_gate / reflection 均不丢失，且不被其它消息污染
  * - Gate disabled（evidence_gate=null）与 Reflection disabled（reflection=null）
  * - 错误与中断后的状态恢复（可再次发送）
@@ -97,21 +97,21 @@ const CITATION_DOC = {
   source_kind: 'document',
   source_label: '文档',
 };
-const CITATION_KG = {
-  chunk_id: 'kg:e1',
+const CITATION_VEC = {
+  chunk_id: 'vec:e1',
   source_index: 2,
-  doc_id: 'kg:e1',
+  doc_id: 'a'.repeat(64),
   doc_name: '金银花',
-  content: '银翘散 → contains → 金银花',
+  content: '金银花，甘寒，清热解毒',
   score: 0.88,
-  source_kind: 'kg',
-  source_label: '图谱·中药',
+  source_kind: 'resource',
+  source_label: '中药',
   resource_type: 'herb',
 };
 
 const EVIDENCE_GROUPS = [
   { group_key: 'document', source_kind: 'document', source_label: '文档' },
-  { group_key: 'kg:herb', source_kind: 'kg', source_label: '知识图谱·中药' },
+  { group_key: 'resource:herb', source_kind: 'resource', source_label: '中药' },
 ];
 const EVIDENCE_SUMMARY = {
   evidence_count: 2,
@@ -143,11 +143,10 @@ function standardFlow(overrides: {
   events.push([
     'citations',
     {
-      citations: [CITATION_DOC, CITATION_KG],
-      evidence: [CITATION_DOC, CITATION_KG],
+      citations: [CITATION_DOC, CITATION_VEC],
+      evidence: [CITATION_DOC, CITATION_VEC],
       evidence_groups: EVIDENCE_GROUPS,
       evidence_summary: EVIDENCE_SUMMARY,
-      kg_evidence: [CITATION_KG],
       evidence_gate: { decision: 'accept', gate_version: 'gate-v1', accepted_count: 2 },
       ...(overrides.cite ?? {}),
     },
@@ -248,7 +247,7 @@ describe('阶段十六：chatStore 正常问答链路', () => {
     );
   });
 
-  it('citations 事件写入 evidence / groups / summary / kgEvidence / evidenceGate', async () => {
+  it('citations 事件写入 evidence / groups / summary / evidenceGate', async () => {
     mockFetch(standardFlow());
     await chatStore.getState().sendMessage('问题');
 
@@ -257,9 +256,6 @@ describe('阶段十六：chatStore 正常问答链路', () => {
     assert.equal(assistant.evidence?.length, 2);
     assert.equal(assistant.evidenceGroups?.length, 2);
     assert.deepEqual(assistant.evidenceSummary, EVIDENCE_SUMMARY);
-    // 阶段十三：KG 证据切片不再被丢弃
-    assert.equal(assistant.kgEvidence?.length, 1);
-    assert.equal(assistant.kgEvidence?.[0].source_kind, 'kg');
     assert.equal(assistant.evidenceGate?.decision, 'accept');
     assert.equal(assistant.evidenceGate?.gate_version, 'gate-v1');
   });
@@ -279,7 +275,6 @@ describe('阶段十六：chatStore 正常问答链路', () => {
             max_score: 0.9,
             by_level: { high: 1, medium: 0, insufficient: 0 },
           },
-          kg_evidence: [],
         },
       }),
     );
@@ -291,7 +286,6 @@ describe('阶段十六：chatStore 正常问答链路', () => {
     assert.equal(assistant.evidence?.length, 1);
     assert.equal(assistant.evidenceGroups?.length, 0);
     assert.equal(assistant.evidenceSummary?.evidence_count, 1);
-    assert.equal(assistant.kgEvidence?.length, 0);
   });
 
   it('delta 按到达顺序拼接（打字机效果）', async () => {

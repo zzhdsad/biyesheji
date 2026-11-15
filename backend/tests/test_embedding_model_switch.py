@@ -14,6 +14,7 @@ conftest 已把 embedding 固定为 mock（`_force_mock_model_config`），
 """
 
 import asyncio
+import time
 import uuid
 
 import pytest
@@ -23,6 +24,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from src.core.config import settings
 from src.domain.models import Document, RevectorizeJob
 from src.infrastructure.milvus_store import VectorStoreError
+from src.application.indexing_service import IndexingService
 from tests.test_chat import _upload_doc
 from tests.test_parse import _make_kb
 from tests.test_upload import PG_AVAILABLE
@@ -223,7 +225,10 @@ def test_stale_split_by_vector_presence(client, vector_store):
     doc_b = _upload_doc(client, kb_id, "无向量.txt")  # 上传后删除其向量
     _set_vector_model(doc_a, LEGACY_KEY)
     _set_vector_model(doc_b, LEGACY_KEY)
-    vector_store.delete_by_doc(doc_b)  # 模拟"从未真正向量化"的历史导入文档
+    vector_store.delete_by_doc(doc_b)  # 模拟"从未真正完成向量化"的历史导入文档
+    # Milvus 的删除在 flush 前对 query 不可见；不落盘会让刚删除的 doc_b
+    # 仍被算作 stale_with_vectors，导致断言偶发失败。
+    vector_store.flush()
 
     vectors = _embedding_status(client)["vectors"]
     assert vectors["stale_with_vectors"] >= 1, "有向量的旧模型文档计入 stale_with_vectors"
@@ -285,12 +290,19 @@ def test_batch_revectorize_failure_and_retry(client, vector_store):
     doc_id = _upload_doc(client, kb_id, "失败重试.txt")
     _set_vector_model(doc_id, LEGACY_KEY)
 
-    original_insert = vector_store.insert
+    original_replace = vector_store.replace_docs_bulk
+    original_single_run = IndexingService.run
 
-    def boom(rows):  # noqa: ANN001 - 测试替身
+    def boom(rows, **_kwargs):  # noqa: ANN001 - 测试替身
         raise VectorStoreError("模拟 Milvus 不可用")
 
-    vector_store.insert = boom
+    async def boom_single(self, doc_id):  # noqa: ANN001
+        raise VectorStoreError("模拟单篇向量化也不可用")
+
+    vector_store.replace_docs_bulk = boom
+    # 服务在批量写入失败后会降级逐篇 IndexingService；要把“失败”场景测完整，
+    # 单篇路径也必须失败，否则任务会 succeeded，无法验证 partial/重试。
+    IndexingService.run = boom_single
     try:
         resp = client.post("/api/v1/settings/model/revectorize", json={"kb_id": kb_id})
         assert resp.status_code == 200, resp.text
@@ -304,7 +316,8 @@ def test_batch_revectorize_failure_and_retry(client, vector_store):
         # 失败不得把文档标记成成功
         assert _get_vector_model(doc_id) == LEGACY_KEY
     finally:
-        vector_store.insert = original_insert
+        vector_store.replace_docs_bulk = original_replace
+        IndexingService.run = original_single_run
 
     retry = client.post("/api/v1/settings/model/revectorize/retry", json={"job_id": job_id})
     assert retry.status_code == 200, retry.text
@@ -319,6 +332,10 @@ def test_batch_revectorize_failure_and_retry(client, vector_store):
 def test_cancel_running_job_stops_processing(client, monkeypatch):
     """取消进行中的任务：当前文档处理完即停止，剩余文档保持旧向量不被改动。"""
     from src.application import revectorize_service
+
+    # 生产默认按 8 篇一批；批量任务只在批次边界检查取消。要验证“当前文档处理完
+    # 即停止”，本用例把批次缩到 1，否则两篇会落在同一批里，取消只能等整批结束。
+    monkeypatch.setattr(settings, "VECTORIZE_JOB_DOC_BATCH", 1)
 
     class _SlowIndexingService:
         """替身：让每篇耗时可观测，保证取消请求落在"进行中"而非"已结束"。"""
@@ -366,8 +383,10 @@ def test_cancel_running_job_stops_processing(client, monkeypatch):
     # 已完成至少一篇（取消发生在处理中），且不得继续处理剩余文档
     assert 0 < done["processed"] < done["total"], done
     assert "已取消" in done["error_message"], done
-    # 协作式取消不做回滚：未处理的文档仍是旧模型向量，可再次发起重建
-    assert _get_vector_model(last) == LEGACY_KEY
+    # 协作式取消不做回滚：未处理的文档仍是旧模型向量，可再次发起重建。
+    # pending 顺序由 DB 返回，不保证 last 先处理，因此按实际结果判断恰好剩一篇。
+    remaining = [d for d in (first, last) if _get_vector_model(d) == LEGACY_KEY]
+    assert len(remaining) == 1, "取消后必须恰好剩一篇未处理文档保持旧模型"
 
 
 def test_cancel_finished_job_rejects(client):

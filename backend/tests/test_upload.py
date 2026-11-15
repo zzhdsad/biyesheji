@@ -76,12 +76,15 @@ def _init_db_standalone() -> None:
                     )
                 )
                 if exists is None:
+                    from src.core.security import hash_password
+
                     session.add(
                         User(
                             email=settings.DEFAULT_ADMIN_EMAIL,
                             username="admin",
-                            hashed_password="not-set-yet",
+                            hashed_password=hash_password(settings.DEFAULT_ADMIN_PASSWORD),
                             role="admin",
+                            must_change_password=False,
                         )
                     )
                     await session.commit()

@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import weakref
 from typing import Any
 
 from loguru import logger
@@ -152,7 +153,18 @@ class ModelConfigService:
 # 模块级缓存：工厂函数每次调用都需要 DB session，这里提供同步便捷方法
 # 实际工厂通过传入的 db session 获取配置
 _config_cache: dict[str, Any] | None = None
-_cache_lock = asyncio.Lock()
+# P7：模型配置缓存同样会跨测试事件循环使用。全局 asyncio.Lock 一旦绑定到
+# 旧循环，后续循环等待会挂起（与 runtime_config 同一根因），故按循环分锁。
+_config_locks: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _config_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _config_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _config_locks[loop] = lock
+    return lock
 
 
 async def get_effective_config_cached(db: AsyncSession) -> dict[str, Any]:
@@ -164,7 +176,7 @@ async def get_effective_config_cached(db: AsyncSession) -> dict[str, Any]:
     global _config_cache
     if _config_cache is not None:
         return _config_cache
-    async with _cache_lock:
+    async with _config_lock():
         if _config_cache is not None:
             return _config_cache
         svc = ModelConfigService(db)

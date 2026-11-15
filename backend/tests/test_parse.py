@@ -13,6 +13,19 @@ import pytest
 from src.core.config import settings
 from tests.test_upload import PG_AVAILABLE
 
+# 每个测试进程独立后缀：失败/中断后重跑不会复用同名 KB，便于清理与定位。
+_RUN_ID = uuid.uuid4().hex[:8]
+_KB_SEQ = 0
+
+
+def _make_kb(client, visibility: str = "private") -> str:
+    global _KB_SEQ
+    _KB_SEQ += 1
+    name = f"解析集成测试库-{_RUN_ID}-{_KB_SEQ}"
+    resp = client.post("/api/v1/kb", json={"name": name, "visibility": visibility})
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
 
 def test_fallback_pdf_parse_pages_keeps_page_number():
     """PDF 降级解析器按页返回 1-based page_num（引用页码来源）。"""
@@ -71,12 +84,6 @@ async def test_parse_service_writes_chunk_page_num():
     assert chunks
     assert {c.page_num for c in chunks} == {1, 2}
     assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
-
-
-def _make_kb(client, visibility: str = "private") -> str:
-    resp = client.post("/api/v1/kb", json={"name": "解析集成测试库", "visibility": visibility})
-    assert resp.status_code == 201, resp.text
-    return resp.json()["id"]
 
 
 # ---------- TXT 全链路：上传 → 自动解析 → 切片入库 ----------

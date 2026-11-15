@@ -175,7 +175,7 @@ def test_documents_limit_and_total_header(client):
         resp = client.post(
             "/api/v1/documents/upload",
             data={"kb_id": kb_id},
-            files={"file": (name, b"hello world", "text/plain")},
+            files={"file": (name, f"hello world {name}".encode(), "text/plain")},
         )
         assert resp.status_code == 201, resp.text
 
@@ -198,7 +198,7 @@ def test_documents_offset_pages_do_not_overlap(client):
         resp = client.post(
             "/api/v1/documents/upload",
             data={"kb_id": kb_id},
-            files={"file": (name, b"hello world", "text/plain")},
+            files={"file": (name, f"hello world {name}".encode(), "text/plain")},
         )
         assert resp.status_code == 201, resp.text
 

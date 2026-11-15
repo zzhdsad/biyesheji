@@ -37,7 +37,7 @@ class RetrievalStrategy:
     """一条检索策略 = Baseline RAG 的一组参数配置。
 
     Attributes:
-        name: 策略标识（写入 EvaluationRun.retrieval_strategy）
+        name: 策略标识（写入问答响应的 router_decision）
         description: 策略说明（实验报告用）
         resource_types: 只允许这些 resource_type 的命中；None = 不限制
             （Document + 全部 Resource，即 Baseline 行为）
@@ -49,10 +49,6 @@ class RetrievalStrategy:
         rrf_k: RRF 平滑常数；None = 沿用 settings.RRF_K
         hyde_enabled: 是否启用 HyDE 查询改写
         dense_enabled / sparse_enabled: 是否走稠密 / 稀疏召回路
-        kg_enabled: 阶段十三：是否启用 KG Retrieval（KG 命中并入 Evidence，
-            不替代向量检索；False 即完全回到阶段十二及之前的行为）
-        kg_max_hops: KG 图遍历跳数（1 = 实体直连关系，2 = 两跳关系）
-        kg_top_k: KG 证据条数上限
     """
 
     name: str
@@ -66,9 +62,6 @@ class RetrievalStrategy:
     hyde_enabled: bool = True
     dense_enabled: bool = True
     sparse_enabled: bool = True
-    kg_enabled: bool = False
-    kg_max_hops: int = 1
-    kg_top_k: int = 5
 
 
 STRATEGIES: dict[str, RetrievalStrategy] = {
@@ -126,20 +119,6 @@ STRATEGIES: dict[str, RetrievalStrategy] = {
         include_document=True,
         rerank_top_k=6,
         hyde_enabled=False,
-    ),
-    # ── 阶段十三：KG 增强 = Baseline 向量检索 + KG 关系证据（补充，不替代）──
-    "kg_enhanced": RetrievalStrategy(
-        name="kg_enhanced",
-        description=(
-            "实体关系问题：在 Baseline 向量检索之外追加 KG 关系证据"
-            "（方剂-中药组成 / 文献记载 / 共享标签），两跳内关系证据并入 Evidence"
-        ),
-        # 不限制资源类型（KG 证据也要能覆盖文档之外的资源关系）
-        resource_types=None,
-        include_document=True,
-        kg_enabled=True,
-        kg_max_hops=2,
-        kg_top_k=5,
     ),
     # ── 多来源：资源类型运行时取 QueryAnalysis.resource_types（可多类 + Document）──
     "multi_source": RetrievalStrategy(
@@ -240,7 +219,7 @@ def resolve_retrieval_config(
     """把策略解析为本次检索的生效参数（None 覆盖项自动回落到全局 settings）。
 
     返回 dict 与 RagService._retrieve 的入参一一对应，并可整体写入
-    EvaluationRun.config_snapshot 保证实验可复现。
+    RouterDecision 快照保证问答行为可复现。
     """
     if strategy is None:
         strategy = STRATEGIES[BASELINE_STRATEGY]
@@ -264,10 +243,6 @@ def resolve_retrieval_config(
         "hyde_enabled": strategy.hyde_enabled,
         "dense_enabled": strategy.dense_enabled,
         "sparse_enabled": strategy.sparse_enabled,
-        # 阶段十三：KG 检索参数（Baseline 全为关闭/默认，行为不变）
-        "kg_enabled": strategy.kg_enabled,
-        "kg_max_hops": strategy.kg_max_hops,
-        "kg_top_k": strategy.kg_top_k,
     }
 
 
